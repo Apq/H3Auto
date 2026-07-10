@@ -1,4 +1,4 @@
-# H3Auto
+# 战场自动化
 
 手动战斗自动化插件。
 
@@ -25,5 +25,5 @@
 默认部署到：
 
 ```
-D:\Heroes3\Heroes3_2026.05.01\_HD3_Data\Packs\战斗自动
+D:\Heroes3\Heroes3_2026.05.01\_HD3_Data\Packs\战场自动化
 ```

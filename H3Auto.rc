@@ -1,9 +1,22 @@
-// H3Auto.rc
+// Microsoft Visual C++ generated resource script.
+//
 #include "resource.h"
 
+/////////////////////////////////////////////////////////////////////////////
+//  Chinese resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_CHS)
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
+#pragma code_page(936)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
 IDR_VERSIONINFO VERSIONINFO
- FILEVERSION 0,1,2026,1009
- PRODUCTVERSION 0,1,2026,1009
+ FILEVERSION 0,1,2026,710
+ PRODUCTVERSION 0,1,2026,710
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -18,15 +31,15 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "Comments", "Manual Battle Automation"
+            VALUE "Comments", "\xb3\xc9\xb2" "\xc1" "\xbf" "\xda" "\xd7" "\xb4" "\xb6" "\xaf" "\xb6" "\xaf" "\xbb" "\xf9" "\xbc" "\xc6"
             VALUE "CompanyName", "Apq"
-            VALUE "FileDescription", "Manual Battle Automation"
-            VALUE "FileVersion", "0.1.2026.1009"
+            VALUE "FileDescription", "H3 Auto Battle Plugin"
+            VALUE "FileVersion", "0.1.2026.710"
             VALUE "InternalName", "H3Auto"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "H3Auto.dll"
             VALUE "ProductName", "H3Auto"
-            VALUE "ProductVersion", "0.1.2026.1009"
+            VALUE "ProductVersion", "0.1.2026.710"
         END
     END
     BLOCK "VarFileInfo"
@@ -34,3 +47,15 @@ BEGIN
         VALUE "Translation", 0x804, 1200
     END
 END
+
+#endif    // Chinese resources
+/////////////////////////////////////////////////////////////////////////////
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+/////////////////////////////////////////////////////////////////////////////
+#endif

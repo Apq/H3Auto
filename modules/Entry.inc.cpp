@@ -26,7 +26,7 @@ static void WriteLog(const char* fmt, ...);
 
 static void StartPlugin()
 {
-    WriteLog("H3Auto 开始注册 Hook。");
+    WriteLog("战场自动化 开始注册 Hook。");
 
     // 战斗动画循环：自动化执行
     // TODO: 实测验证地址 0x495C50 后启用
@@ -45,7 +45,7 @@ static void StartPlugin()
     // _PI->WriteHiHook(0x4781C0, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatStartBattle);
 
     ResetAutoState();
-    WriteLog("H3Auto 已启用。Hook 注册待逆向验证后完成。");
+    WriteLog("战场自动化 已启用。Hook 注册待逆向验证后完成。");
 }
 
 // ========== DllMain ==========
@@ -61,13 +61,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (dot) strcpy(dot, ".ini");
         g_disable_log = ReadDisableLogFromIniFileA(g_ini_path);
         SetupDatedLogPathAndCleanup(hModule);
-        WriteLog("H3Auto 正在加载。");
+        WriteLog("战场自动化 正在加载。");
         _P = GetPatcher();
         if (!_P) {
             WriteLog("GetPatcher 失败；插件将保持未激活状态。");
             return TRUE;
         }
-        _PI = _P->CreateInstance("HD.Plugin.H3Auto");
+        _PI = _P->CreateInstance("HD.Plugin.ZhanChangZiDongHua");
         if (!_PI) {
             WriteLog("CreateInstance 失败；插件将保持未激活状态。");
             return TRUE;
