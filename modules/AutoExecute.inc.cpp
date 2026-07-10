@@ -3,23 +3,19 @@
 
 static void WriteLog(const char* fmt, ...);
 
-enum StackStrategy {
-    STRAT_MANUAL   = 0,
-    STRAT_DEFEND   = 1,
-    STRAT_RANDOM   = 2,
-    STRAT_SMART    = 3,
-    STRAT_BALANCED = 4
-};
+extern void CommitStrategies(int side, int* actions, int* targets);
+extern int  g_action_strategies[21];
+extern int  g_target_strategies[21];
 
 static struct {
     bool enabled;
-    int  strategies[21];
 } g_auto_state;
 
 void ResetAutoState()
 {
     g_auto_state.enabled = false;
-    memset(g_auto_state.strategies, 0, sizeof(g_auto_state.strategies));
+    memset(g_action_strategies, 0, sizeof(g_action_strategies));
+    memset(g_target_strategies, 0, sizeof(g_target_strategies));
     WriteLog("Auto state reset.");
 }
 
@@ -55,35 +51,42 @@ void DoRandomShot(_BattleStack_* self)
     (void)idx;
 }
 
-void DoSmartShot(_BattleStack_* self)
+void DoSequentialShot(_BattleStack_* self)
 {
+    // 顺序射击：按敌方站位顺序依次射击
     _BattleStack_* targets[21];
     int enemy_side = 1 - self->def_group_ix;
     int count = GetEnemyStacks(targets, 21, enemy_side);
     if (count == 0) return;
-    WriteLog("[Auto] Stack #%d smart shot (TODO: implement)", self->army_slot_ix);
+    WriteLog("[Auto] Stack #%d sequential shot (TODO: commit)", self->army_slot_ix);
 }
 
-void DoBalancedShot(_BattleStack_* self)
+// CommitStrategies：SettingsDlg 关闭时调用，写入策略
+void CommitStrategies(int side, int* actions, int* targets)
 {
-    _BattleStack_* targets[21];
-    int enemy_side = 1 - self->def_group_ix;
-    int count = GetEnemyStacks(targets, 21, enemy_side);
-    if (count == 0) return;
-    WriteLog("[Auto] Stack #%d balanced shot (TODO: implement)", self->army_slot_ix);
+    for (int i = 0; i < 21; ++i) {
+        g_action_strategies[i] = actions[i];
+        g_target_strategies[i] = targets[i];
+    }
+    WriteLog("[Auto] Strategies committed for side %d", side);
 }
 
-void ExecuteForStack(_BattleStack_* self, int strategy)
+void ExecuteForStack(_BattleStack_* self, int action, int target)
 {
     if (!self || self->count_current <= 0) return;
-    switch (strategy) {
-        case STRAT_MANUAL: return;
-        case STRAT_DEFEND:
+    switch (action) {
+        case AS_MANUAL: return;
+        case AS_DEFEND:
             WriteLog("[Auto] Stack #%d defend (TODO: implement)", self->army_slot_ix);
             break;
-        case STRAT_RANDOM:   DoRandomShot(self);   break;
-        case STRAT_SMART:    DoSmartShot(self);    break;
-        case STRAT_BALANCED: DoBalancedShot(self); break;
+        case AS_MELEE:
+            WriteLog("[Auto] Stack #%d melee attack (TODO: implement)", self->army_slot_ix);
+            break;
+        case AS_RANDOM:   DoRandomShot(self);   break;
+        case AS_SEQUENTIAL: DoSequentialShot(self); break;
+        case AS_CYCLE_MOVE:
+            WriteLog("[Auto] Stack #%d cycle move (TODO: implement)", self->army_slot_ix);
+            break;
         default: break;
     }
 }
@@ -98,7 +101,8 @@ void __stdcall Hook_CycleCombatScreen(_BattleMgr_* mgr)
     if (!g_auto_state.enabled) return;
     int idx = stack->army_slot_ix;
     if (idx < 0 || idx >= 21) return;
-    int strategy = g_auto_state.strategies[idx];
-    if (strategy == STRAT_MANUAL) return;
-    ExecuteForStack(stack, strategy);
+    int action = g_action_strategies[idx];
+    int target = g_target_strategies[idx];
+    if (action == AS_MANUAL) return;
+    ExecuteForStack(stack, action, target);
 }

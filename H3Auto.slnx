@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Release" />
+    <Platform Name="Win32" />
+  </Configurations>
+  <Project Path="H3Auto.vcxproj" Id="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" />
+</Solution>

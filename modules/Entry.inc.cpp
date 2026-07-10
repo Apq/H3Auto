@@ -1,51 +1,73 @@
-// ========== 插件入口与 Hook 注册 ==========
-// Hook 地址待逆向实测验证，验证前先注释
+// ========== Entry.inc.cpp ==========
+// 插件入口与 Hook 注册
+// 【测试阶段】逐个加回，WH_GETMESSAGE 已移除（会锁住 DLL）
 
-// 前向声明（来自其他模块）
+// 前向声明
 extern void ResetAutoState();
-static void WriteLog(const char* fmt, ...);
+extern void ShowSettingsDlg();
 
-// ========== Hook 前向声明 ==========
-// TODO: 原函数签名待实测确认
+// ================================================
+// 策略：
+//   HiHook 0x495C50 — 战斗循环，自己轮询鼠标右键状态
+//   LoHook 0x600430 — Blt 完成后弹窗（BattleValueInfo 不冲突）
+//
+// 不使用 WH_GETMESSAGE 钩子（会锁住 DLL 导致无法释放）
+// ================================================
 
-// 战斗动画循环：每帧检测行动时机并执行策略
-// 原函数 __stdcall 或 THISCALL，参数待确认
-// static void __stdcall Hook_CycleCombatScreen(_BattleMgr_* mgr);
+// ---- 全局状态 ----
+static bool s_rbutton_was_down_prev = false; // 上一帧右键状态
+static bool s_show_pending = false;
+static bool s_in_combat = false;
 
-// 对话框 DefProc：拦截右键点击弹出设置窗口
-// 原函数 THISCALL，参数 (H3Msg& msg)
-// static _bool8_ __stdcall Hook_DefProc(void* dlg, H3Msg& msg);
+// ---- 战斗循环 HiHook：自己轮询鼠标右键 ----
+static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
+{
+    typedef INT(__thiscall* OrigFunc_t)(INT);
+    INT result = reinterpret_cast<OrigFunc_t>(h->GetDefaultFunc())(thisptr);
+    s_in_combat = true;
 
-// 施法后标记策略状态变更
-// static void __stdcall Hook_CombatCastSpell(...);
+    // GetAsyncKeyState 高位=1 表示当前按下；低 1 位=1 表示"上次调用后按下的"
+    SHORT state = GetAsyncKeyState(VK_RBUTTON);
+    bool rbutton_down_now = (state < 0);  // 高位=1：当前按下
 
-// 战斗开始：清空策略状态
-// static void __stdcall Hook_CombatStartBattle(...);
+    if (s_rbutton_was_down_prev && !rbutton_down_now) {
+        // 上一帧按下，本帧松开：触发弹窗
+        s_show_pending = true;
+        WriteLog("[Cycle] RButton up, pending=1");
+    }
 
-// ========== 启动 ==========
+    s_rbutton_was_down_prev = rbutton_down_now;
+    return result;
+}
+
+// ---- Blt 完成后 LoHook ----
+static INT __stdcall Hook_AfterBlt(LoHook* h, HookContext* c)
+{
+    (void)h; (void)c;
+    if (s_show_pending) {
+        s_show_pending = false;
+        WriteLog("[AfterBlt] Showing settings dlg...");
+        ShowSettingsDlg();
+    }
+    return EXEC_DEFAULT;
+}
 
 static void StartPlugin()
 {
     WriteLog("战场自动化 开始注册 Hook。");
 
-    // 战斗动画循环：自动化执行
-    // TODO: 实测验证地址 0x495C50 后启用
-    // _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen);
+    // 战斗循环：设置战斗中标志 + 自己轮询鼠标
+    using CycleFunc_t = INT(__stdcall*)(HiHook*, INT);
+    _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_,
+        static_cast<void*>(static_cast<CycleFunc_t>(&Hook_CycleCombatScreen)));
+    WriteLog("HiHook 0x495C50 已注册（战斗循环+鼠标轮询）。");
 
-    // 对话框 DefProc：右键弹出设置窗口
-    // TODO: 实测验证地址 0x41B120 后启用
-    // _PI->WriteLoHook(0x41B120, Hook_DefProc);
-
-    // 施法后标记策略状态
-    // TODO: 实测验证地址 0x464F10 后启用
-    // _PI->WriteHiHook(0x464F10, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatCastSpell);
-
-    // 战斗开始：清空策略状态
-    // TODO: 实测验证地址 0x4781C0 后启用
-    // _PI->WriteHiHook(0x4781C0, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatStartBattle);
+    // Blt 完成后：延迟弹窗
+    _PI->WriteLoHook(0x600430, Hook_AfterBlt);
+    WriteLog("LoHook 0x600430 已注册（延迟弹窗）。");
 
     ResetAutoState();
-    WriteLog("战场自动化 已启用。Hook 注册待逆向验证后完成。");
+    WriteLog("战场自动化 已启用。");
 }
 
 // ========== DllMain ==========
@@ -59,7 +81,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         GetModuleFileNameA(hModule, g_ini_path, MAX_PATH);
         char* dot = strrchr(g_ini_path, '.');
         if (dot) strcpy(dot, ".ini");
-        g_disable_log = ReadDisableLogFromIniFileA(g_ini_path);
+        wchar_t ini_path_w[MAX_PATH];
+        MultiByteToWideChar(CP_ACP, 0, g_ini_path, -1, ini_path_w, MAX_PATH);
+        g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);
         SetupDatedLogPathAndCleanup(hModule);
         WriteLog("战场自动化 正在加载。");
         _P = GetPatcher();
@@ -67,13 +91,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
             WriteLog("GetPatcher 失败；插件将保持未激活状态。");
             return TRUE;
         }
+        WriteLog("GetPatcher 成功。");
         _PI = _P->CreateInstance("HD.Plugin.ZhanChangZiDongHua");
         if (!_PI) {
             WriteLog("CreateInstance 失败；插件将保持未激活状态。");
             return TRUE;
         }
+        WriteLog("CreateInstance 成功。");
         ReadConfig();
         StartPlugin();
+    }
+    if (reason == DLL_PROCESS_DETACH) {
+        ResetAutoState();
     }
     return TRUE;
 }

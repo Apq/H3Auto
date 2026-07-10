@@ -1,4 +1,26 @@
-// ========== 配置 ==========
+// ========== 配置与策略枚举 ==========
+
+// 行动策略枚举
+enum ActionStrategy {
+    AS_MANUAL     = 0,  // 手动
+    AS_DEFEND     = 1,  // 防御
+    AS_MELEE      = 2,  // 近战攻击
+    AS_RANDOM     = 3,  // 随机射击
+    AS_SEQUENTIAL = 4,  // 顺序射击
+    AS_CYCLE_MOVE = 5,  // 循环移动
+};
+
+// 目标策略枚举
+enum TargetStrategy {
+    TS_NONE       = 0,  // 无（默认）
+    TS_POSITION   = 1,  // 指定位置
+    TS_RANGED_SPD = 2,  // 远程和高速优先
+    TS_COUNT_PRI  = 3,  // 数量优先
+};
+
+// 全局策略状态（供 SettingsDlg 和 AutoExecute 共享）
+int g_action_strategies[21] = {0};
+int g_target_strategies[21] = {0};
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
@@ -41,10 +63,10 @@ static char* TrimAscii(char* s)
     return s;
 }
 
-static bool ReadDisableLogFromIniFileA(const char* ini_path)
+static bool ReadDisableLogFromIniFileW(const wchar_t* ini_path)
 {
     if (!ini_path || !ini_path[0]) return false;
-    HANDLE file = CreateFileA(ini_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    HANDLE file = CreateFileW(ini_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
     char buf[4097];
@@ -82,6 +104,7 @@ static bool ReadDisableLogFromIniFileA(const char* ini_path)
         if (key && value && _stricmp(key, "DisableLog") == 0)
             return atoi(value) != 0;
     }
+    // 没有 [Logging] 段 → 默认不禁用日志（DisableLog=0）
     return false;
 }
 

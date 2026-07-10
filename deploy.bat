@@ -1,3 +1,3 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1" %*
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1"
 pause
