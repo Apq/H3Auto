@@ -1,4 +1,4 @@
-$gameDir = 'D:\Heroes3\Heroes3_2026.05.01'
+﻿$gameDir = 'D:\Heroes3\Heroes3_2026.05.01'
 $packsDst = "$gameDir\_HD3_Data\Packs\战场自动化"
 $src = "$PSScriptRoot\Release"
 

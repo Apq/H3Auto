@@ -26,11 +26,16 @@ static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
     s_in_combat = true;
     s_hi_count++;
 
+    // 入口日志（仅前3帧）
+    if (s_hi_count <= 3) {
+        WriteLog("[HiHook] called! hi_count=%d, thisptr=0x%X", s_hi_count, thisptr);
+    }
+
     // 在 HiHook 里检测右键松开
     bool rbutton_now = (GetKeyState(VK_RBUTTON) < 0);
     if (s_rbutton_down && !rbutton_now) {
         s_show_pending = true;
-        WriteLog("[HiHook] RButton up! hi_count=%d, pending=1", s_hi_count);
+        WriteLog("[HiHook] RButton up! pending=1");
     }
     s_rbutton_down = rbutton_now;
 
