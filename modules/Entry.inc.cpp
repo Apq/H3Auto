@@ -7,7 +7,8 @@ extern void ShowSettingsDlg();
 
 // ================================================
 // 策略：
-//   HiHook 0x495C50 — 战斗循环，每帧调用，检测右键
+//   HiHook 0x495C50 — 战斗循环
+//   LoHook 0x5F4503 — 每帧战斗渲染，检测右键（主检测点）
 //   LoHook 0x600430 — Blt 完成后，弹窗
 // ================================================
 
@@ -16,9 +17,10 @@ static bool s_in_combat = false;
 static bool s_show_pending = false;
 static bool s_rbutton_down = false;
 static int s_hi_count = 0;
+static int s_lo_count = 0;
 static int s_blt_count = 0;
 
-// ---- 战斗循环 HiHook：每帧调用，检测右键 ----
+// ---- 战斗循环 HiHook ----
 static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
 {
     typedef INT(__thiscall* OrigFunc_t)(INT);
@@ -31,15 +33,30 @@ static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
         WriteLog("[HiHook] called! hi_count=%d, thisptr=0x%X", s_hi_count, thisptr);
     }
 
-    // GetAsyncKeyState 适合 hook 场景：右键按下时弹窗（只弹一次）
+    return result;
+}
+
+// ---- 战斗渲染 LoHook：每帧调用，检测右键 ----
+static INT __stdcall Hook_BuildCombat(LoHook* h, HookContext* c)
+{
+    (void)h; (void)c;
+    s_in_combat = true;
+    s_lo_count++;
+
+    // 每帧检测右键按下
     bool rbutton_now = (GetAsyncKeyState(VK_RBUTTON) < 0);
     if (rbutton_now && !s_rbutton_down) {
         s_show_pending = true;
-        WriteLog("[HiHook] RButton DOWN! pending=1");
+        WriteLog("[Build] RButton DOWN! lo_count=%d, pending=1", s_lo_count);
     }
     s_rbutton_down = rbutton_now;
 
-    return result;
+    // 入口日志（前5帧）
+    if (s_lo_count <= 5) {
+        WriteLog("[Build] called! lo_count=%d, VK=%d", s_lo_count, rbutton_now ? -1 : 0);
+    }
+
+    return EXEC_DEFAULT;
 }
 
 // ---- Blt 完成后 LoHook：弹窗 ----
@@ -59,11 +76,15 @@ static void StartPlugin()
 {
     WriteLog("战场自动化 开始注册 Hook。");
 
-    // HiHook：战斗循环，每帧调用，检测右键
+    // HiHook：战斗循环
     using CycleFunc_t = INT(__stdcall*)(HiHook*, INT);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_,
         static_cast<void*>(static_cast<CycleFunc_t>(&Hook_CycleCombatScreen)));
-    WriteLog("HiHook 0x495C50 已注册（战斗循环+GetKeyState检测右键）。");
+    WriteLog("HiHook 0x495C50 已注册。");
+
+    // LoHook 0x5F4503：每帧战斗渲染，检测右键
+    _PI->WriteLoHook(0x5F4503, Hook_BuildCombat);
+    WriteLog("LoHook 0x5F4503 已注册（每帧渲染检测右键）。");
 
     // LoHook 0x600430：Blt 完成后弹窗
     _PI->WriteLoHook(0x600430, Hook_AfterBlt);
