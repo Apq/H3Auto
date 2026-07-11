@@ -31,11 +31,11 @@ static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
         WriteLog("[HiHook] called! hi_count=%d, thisptr=0x%X", s_hi_count, thisptr);
     }
 
-    // 在 HiHook 里检测右键松开
-    bool rbutton_now = (GetKeyState(VK_RBUTTON) < 0);
-    if (s_rbutton_down && !rbutton_now) {
+    // GetAsyncKeyState 适合 hook 场景：右键按下时弹窗（只弹一次）
+    bool rbutton_now = (GetAsyncKeyState(VK_RBUTTON) < 0);
+    if (rbutton_now && !s_rbutton_down) {
         s_show_pending = true;
-        WriteLog("[HiHook] RButton up! pending=1");
+        WriteLog("[HiHook] RButton DOWN! pending=1");
     }
     s_rbutton_down = rbutton_now;
 
