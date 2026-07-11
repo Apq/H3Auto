@@ -1,5 +1,5 @@
 // ========== Entry.inc.cpp ==========
-// Plugin entry and hook registration
+// 插件入口与 Hook 注册
 
 extern void ResetAutoState();
 extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
@@ -9,7 +9,7 @@ static void StartPlugin()
 {
     WriteLog("H3Auto: registering hooks.");
 
-    // LoHook: 负责子类安装 + 画面板
+    // LoHook: 每帧检测自动战斗对话框 + 画面板
     _PI->WriteLoHook(0x600430, Hook_BltComplete);
     WriteLog("LoHook 0x600430 registered.");
 

@@ -1,7 +1,7 @@
 // ========== SettingsDlg.inc.cpp ==========
 // 战场自动化 - 设置面板
 // 渲染：LoHook 0x600430 画面板到 screenPcx16
-// 输入捕获：窗口子类化
+// 输入捕获：检测"自动战斗"对话框的关闭事件
 
 #define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
 
@@ -48,19 +48,27 @@ static struct Panel {
     int count;
 } s_p = {};
 
-static bool s_subclass_installed = false;
+// 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
+static const UINT s_right_click_dialog_vtable = 0x0063DB40;
+// 真正的战斗窗口。0x0063A5E4 是战斗底下仍保留的冒险地图窗口。
+static const UINT s_combat_dialog_vtable = 0x0063D528;
+// BattleUI 底栏 ICM004.def：点击分支切换 H3CombatManager::autoCombat。
+static const INT32 s_autofight_button_id = 0x7D4;
+// 战斗中弹出过设置面板
+static bool s_panel_popup_done = false;
+// 是否检测到 BattleUI 上层的自动战斗右键说明框
+static bool s_saw_explanation_dlg_in_battle = false;
+// 右键按下时鼠标确实位于自动战斗按钮上。
+static bool s_autofight_right_press_armed = false;
+// BattleUI 连续缺失帧数，避免对话框切换的瞬时空帧误判为战斗结束
+static int s_battle_ui_missing_frames = 0;
+
+// 前向声明
+static void OpenSettingsPanel_();
+static void DrawPanelToBuffer_();
 
 // ========================================================================
-// 第二部分：前向声明（所有被 SubclassWndProc 调用的函数）
-// ========================================================================
-
-static void DrawPanelToBuffer();
-static void CloseSettingsPanel();
-static bool HandlePanelClick(int sx, int sy);
-static void OpenSettingsPanel();
-
-// ========================================================================
-// 第三部分：工具函数
+// 第二部分：工具函数
 // ========================================================================
 
 static H3Font* GetPanelFont() { return H3Font::Load("bigfont.fnt"); }
@@ -108,40 +116,168 @@ static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
 }
 
 // ========================================================================
-// 第四部分：窗口子类（必须放在所有被调用函数声明之后）
+// 第三部分：战斗状态判断
 // ========================================================================
 
-// 前向声明（供 TryInstallSubclassOnce 使用）
-static LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-static void TryInstallSubclassOnce()
+static H3CombatManager* GetCombatMgr()
 {
-    // 暂时禁用子类化，诊断游戏冻结问题
-    return;
-    if (s_subclass_installed) return;
-    HWND hwnd = H3Hwnd::Get();
-    if (!hwnd || !IsWindow(hwnd)) return;
-    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)SubclassWndProc);
-    s_subclass_installed = true;
-    WriteLog("[Subclass] 窗口子类已注册 hwnd=0x%X。", (UINT_PTR)hwnd);
+    return H3CombatManager::Get();
 }
 
-static LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
 {
-    if (msg == WM_RBUTTONUP && !s_p.active) {
-        WriteLog("[Subclass] WM_RBUTTONUP at (%d,%d)", LOWORD(lParam), HIWORD(lParam));
-        OpenSettingsPanel();
-        return 0;
+    if (!o_WndMgr) return nullptr;
+
+    H3BaseDlg* dlg = o_WndMgr->firstDlg;
+    for (int i = 0; dlg && i < 16; ++i) {
+        if (*(UINT*)dlg == target_vtable)
+            return dlg;
+
+        // H3BaseDlg::nextDialog is protected and is stored at +0x08.
+        dlg = *reinterpret_cast<H3BaseDlg**>(reinterpret_cast<BYTE*>(dlg) + 0x08);
     }
-    if (s_p.active && msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
-        CloseSettingsPanel();
-        WriteLog("[Subclass] ESC, panel closed.");
-        return 0;
+    return nullptr;
+}
+
+static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui)
+{
+    if (!battle_ui) return -1;
+
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+    H3CombatDlg* combat_dlg = reinterpret_cast<H3CombatDlg*>(battle_ui);
+
+    // Bottom-panel items overlap: the 0x7D0 background covers the buttons and
+    // appears earlier in the vector. Find the known auto-fight button first.
+    if (combat_dlg->bottomPanel) {
+        H3Vector<H3DlgItem*>& items = combat_dlg->bottomPanel->GetItems();
+        for (H3DlgItem** it = items.begin(); it != items.end(); ++it) {
+            H3DlgItem* item = *it;
+            if (!item || item->GetID() != s_autofight_button_id) continue;
+
+            const INT32 x = item->GetAbsoluteX();
+            const INT32 y = item->GetAbsoluteY();
+            if (cursor.x >= x && cursor.x < x + item->GetWidth()
+                && cursor.y >= y && cursor.y < y + item->GetHeight())
+            {
+                return s_autofight_button_id;
+            }
+        }
+
+        // Diagnostic fallback for other overlapping controls under the cursor.
+        INT32 fallback_id = -1;
+        for (H3DlgItem** it = items.begin(); it != items.end(); ++it) {
+            H3DlgItem* item = *it;
+            if (!item || !item->IsVisible()) continue;
+
+            const INT32 x = item->GetAbsoluteX();
+            const INT32 y = item->GetAbsoluteY();
+            if (cursor.x >= x && cursor.x < x + item->GetWidth()
+                && cursor.y >= y && cursor.y < y + item->GetHeight())
+            {
+                fallback_id = item->GetID();
+            }
+        }
+        if (fallback_id != -1)
+            return fallback_id;
     }
-    if (s_p.active && msg == WM_LBUTTONDOWN) {
-        if (HandlePanelClick(LOWORD(lParam), HIWORD(lParam))) return 0;
+
+    H3Msg msg = {};
+    msg.position = cursor;
+    H3DlgItem* item = battle_ui->ItemAtPosition(msg);
+    return item ? item->GetID() : -1;
+}
+
+// ========================================================================
+// 第四部分：检测"自动战斗"对话框关闭
+// ========================================================================
+// 状态机：firstDlg 是底层战斗界面，lastDlg 才是当前最上层对话框。
+// 流程：BattleUI 存在 + lastDlg=自动战斗说明框 → lastDlg 回到 BattleUI → 弹窗。
+//
+static void CheckAutoFightDialogClosed()
+{
+    if (!o_WndMgr) return;
+
+    H3BaseDlg* first = o_WndMgr->firstDlg;
+    H3BaseDlg* last = o_WndMgr->lastDlg;
+    UINT first_vtable = first ? *(UINT*)first : 0;
+    UINT last_vtable = last ? *(UINT*)last : 0;
+    INT32 last_w = last ? last->GetWidth() : 0;
+    INT32 last_h = last ? last->GetHeight() : 0;
+    H3BaseDlg* combat_dlg = FindDialogByVtable_(s_combat_dialog_vtable);
+    INT32 cursor_item_id = GetBattleItemUnderCursor_(combat_dlg);
+
+    // 只在窗口链实际变化时记录，避免每帧刷日志。
+    static UINT s_logged_first_vtable = 0;
+    static UINT s_logged_last_vtable = 0;
+    if (first_vtable != s_logged_first_vtable || last_vtable != s_logged_last_vtable) {
+        WriteLog("[Dlg] 切换 first=0x%08X(vt=0x%08X) last=0x%08X(vt=0x%08X,w=%d,h=%d) cursorItem=0x%X rbutton=%d",
+            (UINT)(INT_PTR)first, first_vtable,
+            (UINT)(INT_PTR)last, last_vtable, last_w, last_h,
+            cursor_item_id,
+            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
+        s_logged_first_vtable = first_vtable;
+        s_logged_last_vtable = last_vtable;
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    const bool battle_ui_exists = combat_dlg != nullptr;
+    const bool right_button_down = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    if (battle_ui_exists && right_button_down
+        && cursor_item_id == s_autofight_button_id)
+    {
+        if (!s_autofight_right_press_armed)
+            WriteLog("[AutoFight] 右键按下命中自动战斗按钮 id=0x%X。", s_autofight_button_id);
+        s_autofight_right_press_armed = true;
+    }
+
+    const bool explanation_is_top = battle_ui_exists
+        && s_autofight_right_press_armed
+        && last_vtable == s_right_click_dialog_vtable
+        && last_w == 448 && last_h == 128;
+
+    static H3BaseDlg* s_logged_unarmed_explanation = nullptr;
+    if (battle_ui_exists && last_vtable == s_right_click_dialog_vtable
+        && last_w == 448 && last_h == 128
+        && !s_autofight_right_press_armed
+        && last != s_logged_unarmed_explanation)
+    {
+        const H3POINT cursor = H3POINT::GetCursorPosition();
+        WriteLog("[AutoFight] 说明框出现但尚未命中目标按钮 cursor=(%d,%d) cursorItem=0x%X rbutton=%d。",
+            cursor.x, cursor.y, cursor_item_id, right_button_down);
+        s_logged_unarmed_explanation = last;
+    } else if (last_vtable != s_right_click_dialog_vtable) {
+        s_logged_unarmed_explanation = nullptr;
+    }
+
+    if (battle_ui_exists) {
+        s_battle_ui_missing_frames = 0;
+    } else if (++s_battle_ui_missing_frames >= 3) {
+        if (s_saw_explanation_dlg_in_battle || s_panel_popup_done)
+            WriteLog("[State] BattleUI 已离开，重置说明框状态。");
+        s_saw_explanation_dlg_in_battle = false;
+        s_autofight_right_press_armed = false;
+        s_panel_popup_done = false;
+    }
+
+    if (explanation_is_top && !s_panel_popup_done) {
+        if (!s_saw_explanation_dlg_in_battle) {
+            s_saw_explanation_dlg_in_battle = true;
+            WriteLog("[AutoFight] 检测到右键按住时的自动战斗说明框，w=%d h=%d。", last_w, last_h);
+        }
+        return;
+    }
+
+    if (s_saw_explanation_dlg_in_battle && battle_ui_exists
+        && last_vtable != s_right_click_dialog_vtable && !s_panel_popup_done)
+    {
+        s_saw_explanation_dlg_in_battle = false;
+        s_autofight_right_press_armed = false;
+        WriteLog("[AutoFight] 说明框已关闭且 BattleUI 仍在，打开设置面板。");
+        OpenSettingsPanel_();
+        s_panel_popup_done = true;
+    } else if (!right_button_down && !s_saw_explanation_dlg_in_battle) {
+        // 在目标按钮上按下但没有出现对应说明框时，不把状态带到下一次右键。
+        s_autofight_right_press_armed = false;
+    }
 }
 
 // ========================================================================
@@ -151,8 +287,17 @@ static LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 {
     (void)h; (void)c;
-    TryInstallSubclassOnce();
-    if (s_p.active) DrawPanelToBuffer();
+    static int s_frame = 0;
+    s_frame++;
+    // 每30帧输出一次心跳日志
+    if (s_frame % 30 == 0) {
+        H3BaseDlg* top = o_WndMgr ? o_WndMgr->lastDlg : nullptr;
+        UINT vtable = top ? *(UINT*)top : 0;
+        WriteLog("[Blt] frame=%d last_vtable=0x%08X explanation=%d panel=%d",
+            s_frame, vtable, s_saw_explanation_dlg_in_battle, s_p.active);
+    }
+    CheckAutoFightDialogClosed();
+    if (s_p.active) DrawPanelToBuffer_();
     return EXEC_DEFAULT;
 }
 
@@ -160,7 +305,7 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 // 第六部分：绘制
 // ========================================================================
 
-static void DrawPanelToBuffer()
+static void DrawPanelToBuffer_()
 {
     if (!s_p.active) return;
     H3LoadedPcx16* scr = o_WndMgr ? o_WndMgr->screenPcx16 : nullptr;
@@ -186,8 +331,9 @@ static void DrawPanelToBuffer()
         scr->DrawFrame(cRc.left, cRc.top, CELL_W, CELL_H, (BYTE)50, (BYTE)80, (BYTE)160);
 
         char coord[16] = "--";
-        if (o_BattleMgr && si >= 0 && si < 21) {
-            int hx = o_BattleMgr->stack[0][si].hex_ix;
+        H3CombatManager* mgr = GetCombatMgr();
+        if (mgr && si >= 0 && si < 21) {
+            int hx = mgr->stacks[0][si].position;
             if (hx >= 0 && hx < 40)
                 _snprintf(coord, sizeof(coord), "%c%02d", 'A' + (hx % 8), hx / 8 + 1);
         }
@@ -213,13 +359,11 @@ static void DrawPanelToBuffer()
         COL_CANCEL_TEXT, eTextAlignment::MIDDLE_CENTER);
 }
 
-void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer(); }
-
 // ========================================================================
 // 第七部分：面板控制
 // ========================================================================
 
-void OpenSettingsPanel()
+void OpenSettingsPanel_()
 {
     s_p.active = true;
     s_p.count  = 0;
@@ -234,9 +378,10 @@ void OpenSettingsPanel()
     }
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 
-    if (o_BattleMgr) {
+    H3CombatManager* mgr = GetCombatMgr();
+    if (mgr) {
         for (int i = 0; i < 21 && s_p.count < CELL_COUNT; ++i) {
-            if (o_BattleMgr->stack[0][i].count_current > 0) {
+            if (mgr->stacks[0][i].numberAlive > 0) {
                 s_p.stack_idx[s_p.count] = i;
                 s_p.action[i] = g_action_strategies[i];
                 s_p.target[i] = g_target_strategies[i];
@@ -244,9 +389,11 @@ void OpenSettingsPanel()
             }
         }
     }
-    DrawPanelToBuffer();
+    DrawPanelToBuffer_();
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
 }
+
+void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer_(); }
 
 void CloseSettingsPanel()
 {
@@ -299,3 +446,6 @@ bool HandlePanelClick(int sx, int sy)
     }
     return false;
 }
+
+// ========================================================================
+// 第九部分：输入处理后续扩展
