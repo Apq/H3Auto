@@ -7,77 +7,61 @@ extern void ShowSettingsDlg();
 
 // ================================================
 // 策略：
-//   WH_GETMESSAGE 钩子 — 拦截游戏窗口的 WM_RBUTTONUP 消息
-//   HiHook 0x495C50 — 战斗循环，检测到右键消息后弹窗
+//   HiHook 0x495C50 — 战斗循环
+//   LoHook 0x5F4503 — 每帧渲染，检测右键点击并弹窗
 // ================================================
 
 // ---- 全局状态 ----
-static volatile LONG s_rbutton_up_flag = 0;  // 原子标志：收到右键松开消息
 static bool s_in_combat = false;
 static bool s_show_pending = false;
-static HHOOK s_getmsg_hook = nullptr;
+static bool s_rbutton_was_down = false;
+static int s_hi_count = 0;
+static int s_lo_count = 0;
 
-// ---- WH_GETMESSAGE 钩子过程 ----
-static LRESULT CALLBACK Hook_GetMsgProc(int code, WPARAM wParam, LPARAM lParam)
-{
-    if (code >= 0) {
-        MSG* msg = (MSG*)lParam;
-        if (msg && msg->hwnd) {
-            HWND gameHwnd = H3Hwnd::Get();
-            if (gameHwnd && msg->hwnd == gameHwnd) {
-                if (msg->message == WM_RBUTTONUP) {
-                    // 收到右键松开，设原子标志
-                    InterlockedExchange(&s_rbutton_up_flag, 1);
-                    WriteLog("[WH_GETMESSAGE] WM_RBUTTONUP at (%d,%d)", LOWORD(msg->lParam), HIWORD(msg->lParam));
-                }
-            }
-        }
-    }
-    return CallNextHookEx(s_getmsg_hook, code, wParam, lParam);
-}
-
-// ---- 战斗循环 HiHook：检测右键标志并弹窗 ----
+// ---- 战斗循环 HiHook ----
 static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
 {
     typedef INT(__thiscall* OrigFunc_t)(INT);
     INT result = reinterpret_cast<OrigFunc_t>(h->GetDefaultFunc())(thisptr);
     s_in_combat = true;
+    s_hi_count++;
+    return result;
+}
 
-    // 检测到右键松开标志，弹窗
-    if (!s_show_pending && InterlockedCompareExchange(&s_rbutton_up_flag, 0, 1) == 1) {
+// ---- 战斗渲染 LoHook：每帧检测右键点击 ----
+static INT __stdcall Hook_BuildCombat(LoHook* h, HookContext* c)
+{
+    (void)h; (void)c;
+    s_in_combat = true;
+    s_lo_count++;
+
+    // 检测右键松开（右键点击完成）
+    bool rbutton_now = (GetAsyncKeyState(VK_RBUTTON) < 0);
+    if (s_rbutton_was_down && !rbutton_now && !s_show_pending) {
         s_show_pending = true;
-        WriteLog("[HiHook] RButton detected! showing dialog...");
+        WriteLog("[Build] RButton click! lo_count=%d", s_lo_count);
         ShowSettingsDlg();
         s_show_pending = false;
-        WriteLog("[HiHook] dialog closed.");
+        WriteLog("[Build] dialog closed, lo_count=%d", s_lo_count);
     }
+    s_rbutton_was_down = rbutton_now;
 
-    return result;
+    return EXEC_DEFAULT;
 }
 
 static void StartPlugin()
 {
     WriteLog("战场自动化 开始注册 Hook。");
 
-    // HiHook：战斗循环，检测右键弹窗
+    // HiHook：战斗循环
     using CycleFunc_t = INT(__stdcall*)(HiHook*, INT);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_,
         static_cast<void*>(static_cast<CycleFunc_t>(&Hook_CycleCombatScreen)));
     WriteLog("HiHook 0x495C50 已注册。");
 
-    // WH_GETMESSAGE 钩子：拦截游戏窗口的鼠标右键消息
-    HMODULE hMod = GetModuleHandleA("user32.dll");
-    if (hMod) {
-        s_getmsg_hook = SetWindowsHookExA(WH_GETMESSAGE, Hook_GetMsgProc, hMod, 0);
-        if (s_getmsg_hook) {
-            WriteLog("WH_GETMESSAGE 钩子已安装（hHook=0x%X）。", (UINT_PTR)s_getmsg_hook);
-        } else {
-            DWORD err = GetLastError();
-            WriteLog("WH_GETMESSAGE 钩子安装失败！err=%u", err);
-        }
-    } else {
-        WriteLog("获取 user32.dll 模块句柄失败！");
-    }
+    // LoHook：每帧渲染，检测右键
+    _PI->WriteLoHook(0x5F4503, Hook_BuildCombat);
+    WriteLog("LoHook 0x5F4503 已注册。");
 
     ResetAutoState();
     WriteLog("战场自动化 已启用。");
@@ -115,11 +99,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         StartPlugin();
     }
     if (reason == DLL_PROCESS_DETACH) {
-        // 卸载钩子
-        if (s_getmsg_hook) {
-            UnhookWindowsHookEx(s_getmsg_hook);
-            s_getmsg_hook = nullptr;
-        }
         ResetAutoState();
     }
     return TRUE;
