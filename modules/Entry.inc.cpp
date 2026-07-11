@@ -1,6 +1,5 @@
 // ========== Entry.inc.cpp ==========
 // 插件入口与 Hook 注册
-// 【测试阶段】逐个加回，WH_GETMESSAGE 已移除（会锁住 DLL）
 
 // 前向声明
 extern void ResetAutoState();
@@ -8,48 +7,44 @@ extern void ShowSettingsDlg();
 
 // ================================================
 // 策略：
-//   HiHook 0x495C50 — 战斗循环，标记 s_in_combat
-//   LoHook 0x600430 — Blt 完成后弹窗（只在 s_show_pending=true 时）
-//   WH_KEYBOARD_LL 钩子 — 检测鼠标右键（不锁 DLL）
-//
-// 不使用 WH_GETMESSAGE 钩子（会锁住 DLL 导致无法释放）
+//   HiHook 0x495C50 — 战斗循环，每帧调用，检测右键
+//   LoHook 0x600430 — Blt 完成后，弹窗
 // ================================================
 
 // ---- 全局状态 ----
 static bool s_in_combat = false;
 static bool s_show_pending = false;
-static HHOOK s_mouse_hook = nullptr;
+static bool s_rbutton_down = false;
+static int s_hi_count = 0;
+static int s_blt_count = 0;
 
-// ---- WH_MOUSE_LL 钩子：检测鼠标右键 ----
-static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam)
-{
-    if (code >= 0) {
-        if (wParam == WM_RBUTTONUP) {
-            if (s_in_combat) {
-                s_show_pending = true;
-                WriteLog("[MouseHook] RButton up in combat, pending=1");
-            }
-        }
-    }
-    return CallNextHookEx(s_mouse_hook, code, wParam, lParam);
-}
-
-// ---- 战斗循环 HiHook ----
+// ---- 战斗循环 HiHook：每帧调用，检测右键 ----
 static INT __stdcall Hook_CycleCombatScreen(HiHook* h, INT thisptr)
 {
     typedef INT(__thiscall* OrigFunc_t)(INT);
     INT result = reinterpret_cast<OrigFunc_t>(h->GetDefaultFunc())(thisptr);
     s_in_combat = true;
+    s_hi_count++;
+
+    // 在 HiHook 里检测右键松开
+    bool rbutton_now = (GetKeyState(VK_RBUTTON) < 0);
+    if (s_rbutton_down && !rbutton_now) {
+        s_show_pending = true;
+        WriteLog("[HiHook] RButton up! hi_count=%d, pending=1", s_hi_count);
+    }
+    s_rbutton_down = rbutton_now;
+
     return result;
 }
 
-// ---- Blt 完成后 LoHook：仅当 pending 时弹窗 ----
+// ---- Blt 完成后 LoHook：弹窗 ----
 static INT __stdcall Hook_AfterBlt(LoHook* h, HookContext* c)
 {
     (void)h; (void)c;
+    s_blt_count++;
     if (s_show_pending) {
         s_show_pending = false;
-        WriteLog("[AfterBlt] Showing settings dlg...");
+        WriteLog("[AfterBlt] Showing settings dlg, blt_count=%d...", s_blt_count);
         ShowSettingsDlg();
     }
     return EXEC_DEFAULT;
@@ -59,21 +54,15 @@ static void StartPlugin()
 {
     WriteLog("战场自动化 开始注册 Hook。");
 
-    // WH_MOUSE_LL 钩子
-    s_mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, g_hModule, 0);
-    if (s_mouse_hook) {
-        WriteLog("WH_MOUSE_LL 钩子安装成功。");
-    } else {
-        WriteLog("WH_MOUSE_LL 钩子安装失败! err=%d", GetLastError());
-    }
-
+    // HiHook：战斗循环，每帧调用，检测右键
     using CycleFunc_t = INT(__stdcall*)(HiHook*, INT);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_,
         static_cast<void*>(static_cast<CycleFunc_t>(&Hook_CycleCombatScreen)));
-    WriteLog("HiHook 0x495C50 已注册（战斗循环）。");
+    WriteLog("HiHook 0x495C50 已注册（战斗循环+GetKeyState检测右键）。");
 
+    // LoHook 0x600430：Blt 完成后弹窗
     _PI->WriteLoHook(0x600430, Hook_AfterBlt);
-    WriteLog("LoHook 0x600430 已注册（延迟弹窗）。");
+    WriteLog("LoHook 0x600430 已注册（Blt完成后弹窗）。");
 
     ResetAutoState();
     WriteLog("战场自动化 已启用。");
@@ -111,10 +100,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         StartPlugin();
     }
     if (reason == DLL_PROCESS_DETACH) {
-        if (s_mouse_hook) {
-            UnhookWindowsHookEx(s_mouse_hook);
-            s_mouse_hook = nullptr;
-        }
         ResetAutoState();
     }
     return TRUE;
