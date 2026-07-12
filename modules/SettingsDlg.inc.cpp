@@ -4,26 +4,27 @@
 // 输入捕获：检测"自动战斗"对话框的关闭事件
 
 #define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
+#define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
 
 // ========================================================================
 // 第一部分：数据声明
 // ========================================================================
 
 static const int PANEL_W    = 680;
-static const int PANEL_H    = 380;
-static const int COLS       = 4;
-static const int CELL_W     = 158;
-static const int CELL_H     = 60;
-static const int GAP_X      = 8;
-static const int GAP_Y      = 4;
-static const int MARGIN     = 20;
-static const int TITLE_H    = 28;
+static const int PANEL_H    = 480;
+static const int COLS       = 3;
+static const int CELL_W     = 193;
+static const int CELL_H     = 83;
+static const int GAP_X      = 16;
+static const int GAP_Y      = 5;
+static const int MARGIN     = 34;
+static const int TITLE_H    = 44;
 static const int BTN_W      = 80;
 static const int BTN_H      = 24;
 static const int BTN_Y      = PANEL_H - 44;
 static const int OK_X       = PANEL_W - MARGIN - BTN_W;
 static const int CANCEL_X   = OK_X - BTN_W - 10;
-static const int CELL_COUNT = COLS * 3;
+static const int CELL_COUNT = COLS * 4;
 
 static const char* g_action_labels[] = {
     "手动", "防御", "近战攻击", "随机射击", "顺序射击", "循环移动",
@@ -47,6 +48,14 @@ static struct Panel {
     int stack_idx[CELL_COUNT];
     int count;
 } s_p = {};
+
+// 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
+static H3LoadedPcx16* s_panel_composite = nullptr;
+static H3LoadedPcx16* s_panel_background = nullptr;
+static H3LoadedPcx16* s_panel_cell = nullptr;
+static bool s_panel_background_load_failed = false;
+static bool s_panel_cell_load_failed = false;
+static bool s_panel_redraw_in_progress = false;
 
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
@@ -89,7 +98,8 @@ static RECT ActionBtnRect(int idx)
 {
     RECT rc = CellRect(idx);
     rc.left += 4; rc.right -= 4;
-    rc.top   = rc.bottom - 16;
+    rc.top += 23;
+    rc.bottom = rc.top + 22;
     return rc;
 }
 
@@ -97,7 +107,8 @@ static RECT TargetBtnRect(int idx)
 {
     RECT rc = CellRect(idx);
     rc.left += 4; rc.right -= 4;
-    rc.top   = rc.bottom - 14;
+    rc.top += 52;
+    rc.bottom = rc.top + 22;
     return rc;
 }
 
@@ -112,7 +123,368 @@ static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
 {
     if (!fnt || !text || w <= 0 || h <= 0) return;
-    scr->TextDraw(fnt, text, x, y, w, h, (eTextColor)color, align);
+
+    // The project uses UTF-8 source files, while the Chinese game font expects
+    // GBK byte sequences. ASCII can be passed through unchanged.
+    bool ascii = true;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        if (*p >= 0x80) { ascii = false; break; }
+    }
+    if (ascii) {
+        scr->TextDraw(fnt, text, x, y, w, h, (eTextColor)color, align);
+        return;
+    }
+
+    wchar_t wide[256] = {};
+    char gbk[512] = {};
+    const int wide_len = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, _countof(wide));
+    if (wide_len > 0
+        && WideCharToMultiByte(936, 0, wide, -1, gbk, sizeof(gbk), nullptr, nullptr) > 0)
+    {
+        scr->TextDraw(fnt, gbk, x, y, w, h, (eTextColor)color, align);
+    } else {
+        scr->TextDraw(fnt, text, x, y, w, h, (eTextColor)color, align);
+    }
+}
+
+static WORD PanelRGB888To565_(int r, int g, int b)
+{
+    return (WORD)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3));
+}
+
+static DWORD PanelRGB565To8888_(WORD color)
+{
+    const int r = ((color >> 11) & 0x1F) << 3;
+    const int g = ((color >> 5) & 0x3F) << 2;
+    const int b = (color & 0x1F) << 3;
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+static WORD PanelRGB8888To565_(DWORD color)
+{
+    return PanelRGB888To565_((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+}
+
+static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width,
+    int expected_height, H3LoadedPcx16*& cache, bool& load_failed)
+{
+    if (cache || load_failed)
+        return cache;
+
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(g_hModule, path, _countof(path));
+    char* slash = strrchr(path, '\\');
+    if (!slash) {
+        load_failed = true;
+        return nullptr;
+    }
+    const size_t remaining = _countof(path) - static_cast<size_t>(slash + 1 - path);
+    strcpy_s(slash + 1, remaining, "img\\");
+    strcat_s(path, asset_name);
+
+    FILE* file = nullptr;
+    if (fopen_s(&file, path, "rb") != 0 || !file) {
+        WriteLog("[Panel] PCX 资源加载失败：%s", path);
+        load_failed = true;
+        return nullptr;
+    }
+
+    fseek(file, 0, SEEK_END);
+    const long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    if (file_size < 128) {
+        fclose(file);
+        load_failed = true;
+        return nullptr;
+    }
+
+    BYTE* encoded = static_cast<BYTE*>(malloc(file_size));
+    if (!encoded || fread(encoded, 1, file_size, file) != static_cast<size_t>(file_size)) {
+        if (encoded) free(encoded);
+        fclose(file);
+        load_failed = true;
+        return nullptr;
+    }
+    fclose(file);
+
+    const int bits_per_plane = encoded[3];
+    const int xmin = *reinterpret_cast<WORD*>(encoded + 4);
+    const int ymin = *reinterpret_cast<WORD*>(encoded + 6);
+    const int xmax = *reinterpret_cast<WORD*>(encoded + 8);
+    const int ymax = *reinterpret_cast<WORD*>(encoded + 10);
+    const int plane_count = encoded[65];
+    const int bytes_per_line = *reinterpret_cast<WORD*>(encoded + 66);
+    const int width = xmax - xmin + 1;
+    const int height = ymax - ymin + 1;
+
+    if (encoded[0] != 0x0A || encoded[2] != 1 || bits_per_plane != 8
+        || plane_count != 3 || width != expected_width || height != expected_height
+        || bytes_per_line < width)
+    {
+        WriteLog("[Panel] %s 格式不符 w=%d h=%d bpp=%d planes=%d bpl=%d。",
+            asset_name, width, height, bits_per_plane, plane_count, bytes_per_line);
+        free(encoded);
+        load_failed = true;
+        return nullptr;
+    }
+
+    const size_t raw_size = static_cast<size_t>(bytes_per_line) * plane_count * height;
+    BYTE* raw = static_cast<BYTE*>(malloc(raw_size));
+    if (!raw) {
+        free(encoded);
+        load_failed = true;
+        return nullptr;
+    }
+
+    size_t source_pos = 128;
+    size_t output_pos = 0;
+    while (output_pos < raw_size && source_pos < static_cast<size_t>(file_size)) {
+        const BYTE marker = encoded[source_pos++];
+        if ((marker & 0xC0) == 0xC0) {
+            const int count = marker & 0x3F;
+            if (source_pos >= static_cast<size_t>(file_size)) break;
+            const BYTE value = encoded[source_pos++];
+            for (int i = 0; i < count && output_pos < raw_size; ++i)
+                raw[output_pos++] = value;
+        } else {
+            raw[output_pos++] = marker;
+        }
+    }
+    free(encoded);
+
+    if (output_pos != raw_size) {
+        WriteLog("[Panel] %s 解码不完整 decoded=%u expected=%u。",
+            asset_name, static_cast<unsigned>(output_pos), static_cast<unsigned>(raw_size));
+        free(raw);
+        load_failed = true;
+        return nullptr;
+    }
+
+    cache = H3LoadedPcx16::Create(width, height);
+    if (!cache || !cache->buffer) {
+        if (cache) cache->Destroy();
+        cache = nullptr;
+        free(raw);
+        load_failed = true;
+        return nullptr;
+    }
+
+    const bool output_32_bit = H3BitMode::Get() == 4;
+    for (int y = 0; y < height; ++y) {
+        const BYTE* planes = raw + static_cast<size_t>(y) * bytes_per_line * plane_count;
+        const BYTE* red = planes;
+        const BYTE* green = planes + bytes_per_line;
+        const BYTE* blue = planes + bytes_per_line * 2;
+        BYTE* row = cache->buffer + y * cache->scanlineSize;
+        if (output_32_bit) {
+            DWORD* pixels = reinterpret_cast<DWORD*>(row);
+            for (int x = 0; x < width; ++x)
+                pixels[x] = 0xFF000000u | (red[x] << 16) | (green[x] << 8) | blue[x];
+        } else {
+            WORD* pixels = reinterpret_cast<WORD*>(row);
+            for (int x = 0; x < width; ++x)
+                pixels[x] = PanelRGB888To565_(red[x], green[x], blue[x]);
+        }
+    }
+    free(raw);
+    WriteLog("[Panel] PCX 资源加载成功：%s (%dx%d)。", path, width, height);
+    return cache;
+}
+
+static H3LoadedPcx16* LoadPanelBackground_()
+{
+    return LoadPanelPcx24_("HA_bg.pcx", PANEL_W, PANEL_H,
+        s_panel_background, s_panel_background_load_failed);
+}
+
+static H3LoadedPcx16* LoadPanelCell_()
+{
+    return LoadPanelPcx24_("HA_cell.pcx", CELL_W, CELL_H,
+        s_panel_cell, s_panel_cell_load_failed);
+}
+
+static bool CopyPanelBackground_(H3LoadedPcx16* destination)
+{
+    H3LoadedPcx16* background = LoadPanelBackground_();
+    if (!background || !destination || !background->buffer || !destination->buffer)
+        return false;
+
+    const int row_bytes = background->scanlineSize < destination->scanlineSize
+        ? background->scanlineSize : destination->scanlineSize;
+    for (int y = 0; y < PANEL_H; ++y) {
+        memcpy(destination->buffer + y * destination->scanlineSize,
+            background->buffer + y * background->scanlineSize, row_bytes);
+    }
+    return true;
+}
+
+static bool IsPanelCellCyanKey_(int red, int green, int blue)
+{
+    // HA_cell.pcx uses cyan as a transparency matte. Its antialiased edge is
+    // blended with that matte, including low-saturation green edge pixels.
+    // The actual frame is gold/brown and therefore always red-dominant.
+    return green > red || blue > red;
+}
+
+static void DrawPanelCell_(H3LoadedPcx16* destination, int dst_x, int dst_y)
+{
+    H3LoadedPcx16* cell = LoadPanelCell_();
+    if (!cell || !cell->buffer || !destination || !destination->buffer)
+        return;
+
+    const bool mode_32_bit = H3BitMode::Get() == 4;
+    for (int y = 0; y < CELL_H; ++y) {
+        BYTE* dst_row = destination->buffer + (dst_y + y) * destination->scanlineSize;
+        const BYTE* src_row = cell->buffer + y * cell->scanlineSize;
+        if (mode_32_bit) {
+            DWORD* dst = reinterpret_cast<DWORD*>(dst_row) + dst_x;
+            const DWORD* src = reinterpret_cast<const DWORD*>(src_row);
+            for (int x = 0; x < CELL_W; ++x) {
+                const DWORD color = src[x];
+                const int red = (color >> 16) & 0xFF;
+                const int green = (color >> 8) & 0xFF;
+                const int blue = color & 0xFF;
+                if (!IsPanelCellCyanKey_(red, green, blue))
+                    dst[x] = src[x];
+            }
+        } else {
+            WORD* dst = reinterpret_cast<WORD*>(dst_row) + dst_x;
+            const WORD* src = reinterpret_cast<const WORD*>(src_row);
+            for (int x = 0; x < CELL_W; ++x) {
+                const WORD color = src[x];
+                const int red = ((color >> 11) & 0x1F) << 3;
+                const int green = ((color >> 5) & 0x3F) << 2;
+                const int blue = (color & 0x1F) << 3;
+                if (!IsPanelCellCyanKey_(red, green, blue))
+                    dst[x] = src[x];
+            }
+        }
+    }
+}
+
+static int GetPanelBackBufferBpp_()
+{
+    if (!o_DDSurfaceBackBuffer)
+        return H3BitMode::Get() == 4 ? 32 : 16;
+
+    DDPIXELFORMAT format = {};
+    format.dwSize = sizeof(format);
+    if (SUCCEEDED(o_DDSurfaceBackBuffer->GetPixelFormat(&format))
+        && (format.dwRGBBitCount == 16 || format.dwRGBBitCount == 32))
+    {
+        return static_cast<int>(format.dwRGBBitCount);
+    }
+    return H3BitMode::Get() == 4 ? 32 : 16;
+}
+
+static bool DrawPanelCompositeToBackBuffer_(H3LoadedPcx16* source, int dst_x, int dst_y)
+{
+    if (!source || !source->buffer || !o_DDSurfaceBackBuffer)
+        return false;
+
+    __try {
+        DDSURFACEDESC desc = {};
+        desc.dwSize = sizeof(desc);
+        const HRESULT lock_result = o_DDSurfaceBackBuffer->Lock(
+            nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr);
+        if (FAILED(lock_result) || !desc.lpSurface)
+            return false;
+
+        const int dst_bpp = GetPanelBackBufferBpp_();
+        int dst_w = static_cast<int>(desc.dwWidth);
+        int dst_h = static_cast<int>(desc.dwHeight);
+        if (dst_w <= 0 && o_WndMgr && o_WndMgr->screenPcx16)
+            dst_w = o_WndMgr->screenPcx16->width;
+        if (dst_h <= 0 && o_WndMgr && o_WndMgr->screenPcx16)
+            dst_h = o_WndMgr->screenPcx16->height;
+
+        int src_x = 0;
+        int src_y = 0;
+        int copy_w = source->width;
+        int copy_h = source->height;
+        if (dst_x < 0) { src_x = -dst_x; copy_w += dst_x; dst_x = 0; }
+        if (dst_y < 0) { src_y = -dst_y; copy_h += dst_y; dst_y = 0; }
+        if (dst_x + copy_w > dst_w) copy_w = dst_w - dst_x;
+        if (dst_y + copy_h > dst_h) copy_h = dst_h - dst_y;
+
+        const bool source_is_32_bit = H3BitMode::Get() == 4;
+        if (copy_w > 0 && copy_h > 0) {
+            for (int y = 0; y < copy_h; ++y) {
+                BYTE* src_row = source->buffer + (src_y + y) * source->scanlineSize;
+                BYTE* dst_row = static_cast<BYTE*>(desc.lpSurface)
+                    + (dst_y + y) * desc.lPitch;
+
+                if (dst_bpp == 32) {
+                    BYTE* dst = dst_row + dst_x * 4;
+                    if (source_is_32_bit) {
+                        const DWORD* src = reinterpret_cast<const DWORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            const DWORD color = src[x];
+                            dst[x * 4 + 0] = static_cast<BYTE>(color);
+                            dst[x * 4 + 1] = static_cast<BYTE>(color >> 8);
+                            dst[x * 4 + 2] = static_cast<BYTE>(color >> 16);
+                        }
+                    } else {
+                        const WORD* src = reinterpret_cast<const WORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            const DWORD color = PanelRGB565To8888_(src[x]);
+                            dst[x * 4 + 0] = static_cast<BYTE>(color);
+                            dst[x * 4 + 1] = static_cast<BYTE>(color >> 8);
+                            dst[x * 4 + 2] = static_cast<BYTE>(color >> 16);
+                        }
+                    }
+                } else {
+                    WORD* dst = reinterpret_cast<WORD*>(dst_row) + dst_x;
+                    if (source_is_32_bit) {
+                        const DWORD* src = reinterpret_cast<const DWORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x)
+                            dst[x] = PanelRGB8888To565_(src[x]);
+                    } else {
+                        const WORD* src = reinterpret_cast<const WORD*>(src_row) + src_x;
+                        memcpy(dst, src, copy_w * sizeof(WORD));
+                    }
+                }
+            }
+        }
+
+        o_DDSurfaceBackBuffer->Unlock(nullptr);
+        return copy_w > 0 && copy_h > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static H3LoadedPcx16* EnsurePanelComposite_()
+{
+    if (s_panel_composite
+        && s_panel_composite->width == PANEL_W
+        && s_panel_composite->height == PANEL_H)
+    {
+        return s_panel_composite;
+    }
+
+    if (s_panel_composite)
+        s_panel_composite->Destroy();
+    s_panel_composite = H3LoadedPcx16::Create(PANEL_W, PANEL_H);
+    return s_panel_composite;
+}
+
+static void ReleasePanelComposite_()
+{
+    if (s_panel_composite) {
+        s_panel_composite->Destroy();
+        s_panel_composite = nullptr;
+    }
+    if (s_panel_background) {
+        s_panel_background->Destroy();
+        s_panel_background = nullptr;
+    }
+    if (s_panel_cell) {
+        s_panel_cell->Destroy();
+        s_panel_cell = nullptr;
+    }
+    s_panel_background_load_failed = false;
+    s_panel_cell_load_failed = false;
 }
 
 // ========================================================================
@@ -308,16 +680,18 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 static void DrawPanelToBuffer_()
 {
     if (!s_p.active) return;
-    H3LoadedPcx16* scr = o_WndMgr ? o_WndMgr->screenPcx16 : nullptr;
-    if (!scr) return;
+    H3LoadedPcx16* scr = EnsurePanelComposite_();
+    if (!scr || !scr->buffer) return;
 
-    int px = s_p.x, py = s_p.y;
+    const int px = 0;
+    const int py = 0;
 
-    Fill(scr, px, py, PANEL_W, PANEL_H, 20, 20, 60);
-    scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)80, (BYTE)80, (BYTE)140);
-    Fill(scr, px + 1, py + 1, PANEL_W - 2, TITLE_H - 1, 40, 40, 100);
+    if (!CopyPanelBackground_(scr)) {
+        Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
+        scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
+    }
     DrawTxt(scr, GetPanelFont(), "部队自动行动设置",
-        px + 4, py + 3, PANEL_W - 8, TITLE_H - 4, COL_TITLE_TEXT, eTextAlignment::MIDDLE_LEFT);
+        px + 20, py + 8, PANEL_W - 40, 34, COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
     H3Font* fntS = GetSmallFont();
     for (int i = 0; i < s_p.count && i < CELL_COUNT; ++i) {
@@ -327,8 +701,7 @@ static void DrawPanelToBuffer_()
         RECT aRc = ActionBtnRect(i);
         RECT tRc = TargetBtnRect(i);
 
-        Fill(scr, cRc.left, cRc.top, CELL_W, CELL_H, 10, 30, 70);
-        scr->DrawFrame(cRc.left, cRc.top, CELL_W, CELL_H, (BYTE)50, (BYTE)80, (BYTE)160);
+        DrawPanelCell_(scr, cRc.left, cRc.top);
 
         char coord[16] = "--";
         H3CombatManager* mgr = GetCombatMgr();
@@ -340,12 +713,10 @@ static void DrawPanelToBuffer_()
         DrawTxt(scr, fntS, coord, cRc.left + 4, cRc.top + 2, CELL_W - 8, 16,
             COL_TEXT, eTextAlignment::TOP_LEFT);
 
-        Fill(scr, aRc.left, aRc.top, aRc.right - aRc.left, aRc.bottom - aRc.top, 30, 50, 100);
         DrawTxt(scr, fntS, g_action_labels[s_p.action[si]],
             aRc.left, aRc.top, aRc.right - aRc.left, aRc.bottom - aRc.top,
             COL_ACTION_TEXT, eTextAlignment::MIDDLE_CENTER);
 
-        Fill(scr, tRc.left, tRc.top, tRc.right - tRc.left, tRc.bottom - tRc.top, 25, 40, 80);
         DrawTxt(scr, fntS, g_target_labels[s_p.target[si]],
             tRc.left, tRc.top, tRc.right - tRc.left, tRc.bottom - tRc.top,
             COL_TARGET_TEXT, eTextAlignment::MIDDLE_CENTER);
@@ -357,6 +728,20 @@ static void DrawPanelToBuffer_()
     Fill(scr, px + CANCEL_X, py + BTN_Y, BTN_W, BTN_H, 100, 0, 0);
     DrawTxt(scr, GetSmallFont(), "取消", px + CANCEL_X, py + BTN_Y, BTN_W, BTN_H,
         COL_CANCEL_TEXT, eTextAlignment::MIDDLE_CENTER);
+
+    // Match H3BattleValueInfo's ranged panel: one composite copy to the real
+    // DirectDraw backbuffer, then invalidate only the panel region.
+    bool drawn = DrawPanelCompositeToBackBuffer_(scr, s_p.x, s_p.y);
+    if (!drawn && o_WndMgr && o_WndMgr->screenPcx16) {
+        scr->DrawToPcx16(s_p.x, s_p.y, FALSE, o_WndMgr->screenPcx16);
+        drawn = true;
+    }
+    if (drawn && o_WndMgr && !s_panel_redraw_in_progress)
+    {
+        s_panel_redraw_in_progress = true;
+        o_WndMgr->H3Redraw(s_p.x, s_p.y, PANEL_W, PANEL_H);
+        s_panel_redraw_in_progress = false;
+    }
 }
 
 // ========================================================================
@@ -399,6 +784,9 @@ void CloseSettingsPanel()
 {
     if (!s_p.active) return;
     s_p.active = false;
+    ReleasePanelComposite_();
+    if (H3CombatManager* mgr = GetCombatMgr())
+        THISCALL_7(void, 0x493FC0, mgr, FALSE, TRUE, FALSE, 0, TRUE, FALSE);
     WriteLog("[Panel] 设置面板已关闭。");
 }
 
