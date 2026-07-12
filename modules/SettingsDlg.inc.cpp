@@ -25,11 +25,12 @@ static const int SCROLL_W    = 16;
 static const int SCROLL_H    = CELL_H + 3 * CELL_STEP_Y;
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
-static const int BTN_W      = 80;
-static const int BTN_H      = 24;
-static const int BTN_Y      = PANEL_H - 44;
-static const int OK_X       = PANEL_W - MARGIN - BTN_W;
-static const int CANCEL_X   = OK_X - BTN_W - 10;
+static const int BTN_W      = 64;
+static const int BTN_H      = 30;
+static const int BTN_GAP    = 24;
+static const int BTN_Y      = PANEL_H - 56;
+static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
+static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * 4;
 static const int MAX_STACKS = 21;
 static const int TEST_CELL_COUNT = 15;
@@ -45,8 +46,6 @@ static const INT32 COL_TITLE_TEXT  = 0x1D;
 static const INT32 COL_TEXT        = 0x01;
 static const INT32 COL_ACTION_TEXT = 0x1A;
 static const INT32 COL_TARGET_TEXT = 0x0D;
-static const INT32 COL_OK_TEXT     = 0x0D;
-static const INT32 COL_CANCEL_TEXT = 0x1B;
 
 static struct Panel {
     bool active;
@@ -58,14 +57,25 @@ static struct Panel {
     int scroll_row;
     bool scroll_dragging;
     int scroll_drag_offset;
+    bool cursor_saved;
+    int saved_cursor_type;
+    int saved_cursor_frame;
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
 static H3LoadedPcx16* s_panel_composite = nullptr;
 static H3LoadedPcx16* s_panel_background = nullptr;
 static H3LoadedPcx16* s_panel_cell = nullptr;
+static H3LoadedPcx16* s_panel_ok_normal = nullptr;
+static H3LoadedPcx16* s_panel_ok_pressed = nullptr;
+static H3LoadedPcx16* s_panel_cancel_normal = nullptr;
+static H3LoadedPcx16* s_panel_cancel_pressed = nullptr;
 static bool s_panel_background_load_failed = false;
 static bool s_panel_cell_load_failed = false;
+static bool s_panel_ok_normal_load_failed = false;
+static bool s_panel_ok_pressed_load_failed = false;
+static bool s_panel_cancel_normal_load_failed = false;
+static bool s_panel_cancel_pressed_load_failed = false;
 static bool s_panel_redraw_in_progress = false;
 
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
@@ -87,6 +97,32 @@ static int s_battle_ui_missing_frames = 0;
 static void OpenSettingsPanel_();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
+static void SetPanelScrollRow_(int row);
+static bool PointInRect_(int x, int y, int left, int top, int width, int height);
+
+struct BattleInputBlocker
+{
+    H3BaseDlg* battle_ui;
+    H3DlgTransparentItem* item;
+    void** original_vtable;
+    void* local_vtable[14];
+};
+
+static BattleInputBlocker s_input_blocker = {};
+
+static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg&)
+{
+    return 1; // H3BaseDlg::vPreProcess: message handled, stop iterating items.
+}
+
+static void ForcePanelDefaultCursor_()
+{
+    if (!s_p.active) return;
+    H3MouseManager* mouse = H3MouseManager::Get();
+    if (!mouse) return;
+    if (mouse->GetType() != 0 || mouse->GetFrame() != 0)
+        mouse->DefaultCursor();
+}
 
 // ========================================================================
 // 第二部分：工具函数
@@ -454,6 +490,69 @@ static void DrawPanelScrollbar_(H3LoadedPcx16* destination)
         SCROLL_W - 8, 1, 235, 205, 116);
 }
 
+static void DrawTransparentPcx_(H3LoadedPcx16* source,
+    H3LoadedPcx16* destination, int dst_x, int dst_y)
+{
+    if (!source || !source->buffer || !destination || !destination->buffer) return;
+    const bool mode_32_bit = H3BitMode::Get() == 4;
+    for (int y = 0; y < source->height; ++y) {
+        const BYTE* src_row = source->buffer + y * source->scanlineSize;
+        BYTE* dst_row = destination->buffer + (dst_y + y) * destination->scanlineSize;
+        for (int x = 0; x < source->width; ++x) {
+            int red, green, blue;
+            if (mode_32_bit) {
+                const DWORD color = reinterpret_cast<const DWORD*>(src_row)[x];
+                red = (color >> 16) & 0xFF;
+                green = (color >> 8) & 0xFF;
+                blue = color & 0xFF;
+                if (IsPanelCellCyanKey_(red, green, blue)) continue;
+                reinterpret_cast<DWORD*>(dst_row)[dst_x + x] = color;
+            } else {
+                const WORD color = reinterpret_cast<const WORD*>(src_row)[x];
+                red = ((color >> 11) & 0x1F) << 3;
+                green = ((color >> 5) & 0x3F) << 2;
+                blue = (color & 0x1F) << 3;
+                if (IsPanelCellCyanKey_(red, green, blue)) continue;
+                reinterpret_cast<WORD*>(dst_row)[dst_x + x] = color;
+            }
+        }
+    }
+}
+
+static void DrawPanelButtons_(H3LoadedPcx16* destination)
+{
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+    const int px = cursor.x - s_p.x;
+    const int py = cursor.y - s_p.y;
+    const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool ok_pressed = left_down
+        && PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H);
+    const bool cancel_pressed = left_down
+        && PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H);
+
+    H3LoadedPcx16* ok = LoadPanelPcx24_(ok_pressed
+        ? "HA_ok_pressed.pcx" : "HA_ok_normal.pcx", BTN_W, BTN_H,
+        ok_pressed ? s_panel_ok_pressed : s_panel_ok_normal,
+        ok_pressed ? s_panel_ok_pressed_load_failed : s_panel_ok_normal_load_failed);
+    H3LoadedPcx16* cancel = LoadPanelPcx24_(cancel_pressed
+        ? "HA_cancel_pressed.pcx" : "HA_cancel_normal.pcx", BTN_W, BTN_H,
+        cancel_pressed ? s_panel_cancel_pressed : s_panel_cancel_normal,
+        cancel_pressed ? s_panel_cancel_pressed_load_failed : s_panel_cancel_normal_load_failed);
+
+    if (ok) DrawTransparentPcx_(ok, destination, OK_X, BTN_Y);
+    else {
+        Fill(destination, OK_X, BTN_Y, BTN_W, BTN_H, 74, 52, 24);
+        destination->DrawFrame(OK_X, BTN_Y, BTN_W, BTN_H,
+            (BYTE)210, (BYTE)170, (BYTE)72);
+    }
+    if (cancel) DrawTransparentPcx_(cancel, destination, CANCEL_X, BTN_Y);
+    else {
+        Fill(destination, CANCEL_X, BTN_Y, BTN_W, BTN_H, 74, 52, 24);
+        destination->DrawFrame(CANCEL_X, BTN_Y, BTN_W, BTN_H,
+            (BYTE)210, (BYTE)170, (BYTE)72);
+    }
+}
+
 static int GetPanelBackBufferBpp_()
 {
     if (!o_DDSurfaceBackBuffer)
@@ -575,8 +674,22 @@ static void ReleasePanelComposite_()
         s_panel_cell->Destroy();
         s_panel_cell = nullptr;
     }
+    H3LoadedPcx16** button_resources[] = {
+        &s_panel_ok_normal, &s_panel_ok_pressed,
+        &s_panel_cancel_normal, &s_panel_cancel_pressed
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (*button_resources[i]) {
+            (*button_resources[i])->Destroy();
+            *button_resources[i] = nullptr;
+        }
+    }
     s_panel_background_load_failed = false;
     s_panel_cell_load_failed = false;
+    s_panel_ok_normal_load_failed = false;
+    s_panel_ok_pressed_load_failed = false;
+    s_panel_cancel_normal_load_failed = false;
+    s_panel_cancel_pressed_load_failed = false;
 }
 
 // ========================================================================
@@ -601,6 +714,60 @@ static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
         dlg = *reinterpret_cast<H3BaseDlg**>(reinterpret_cast<BYTE*>(dlg) + 0x08);
     }
     return nullptr;
+}
+
+static bool InstallBattleInputBlocker_()
+{
+    H3BaseDlg* battle_ui = FindDialogByVtable_(s_combat_dialog_vtable);
+    if (!battle_ui) {
+        WriteLog("[Panel] 未找到 BattleUI，无法安装输入屏障。");
+        return false;
+    }
+
+    if (s_input_blocker.item && s_input_blocker.battle_ui == battle_ui) {
+        *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.local_vtable;
+        s_input_blocker.item->ShowActivate();
+        WriteLog("[Panel] 已重新激活 BattleUI 输入屏障 item=%p。", s_input_blocker.item);
+        return true;
+    }
+
+    s_input_blocker = {};
+    H3DlgTransparentItem* item = H3DlgTransparentItem::Create(
+        0, 0, battle_ui->GetWidth(), battle_ui->GetHeight(), 0x7FFE);
+    if (!item) {
+        WriteLog("[Panel] 创建 BattleUI 输入屏障失败。");
+        return false;
+    }
+
+    void** original_vtable = *reinterpret_cast<void***>(item);
+    memcpy(s_input_blocker.local_vtable, original_vtable,
+        sizeof(s_input_blocker.local_vtable));
+    s_input_blocker.local_vtable[2] = reinterpret_cast<void*>(&BlockBattleItemMessage_);
+    *reinterpret_cast<void***>(item) = s_input_blocker.local_vtable;
+
+    if (!battle_ui->AddItem(item, TRUE)) {
+        *reinterpret_cast<void***>(item) = original_vtable;
+        typedef H3DlgItem* (__thiscall *DestroyItemProc)(H3DlgItem*, BOOL8);
+        reinterpret_cast<DestroyItemProc>(original_vtable[0])(item, TRUE);
+        WriteLog("[Panel] BattleUI 拒绝加入输入屏障控件。");
+        return false;
+    }
+
+    s_input_blocker.battle_ui = battle_ui;
+    s_input_blocker.item = item;
+    s_input_blocker.original_vtable = original_vtable;
+    WriteLog("[Panel] BattleUI 输入屏障已安装。 battle=%p item=%p firstItem=%p。",
+        battle_ui, item, battle_ui->GetList().begin() != battle_ui->GetList().end()
+            ? *battle_ui->GetList().begin() : nullptr);
+    return true;
+}
+
+static void RemoveBattleInputBlocker_()
+{
+    if (!s_input_blocker.item) return;
+    *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.original_vtable;
+    s_input_blocker.item->HideDeactivate();
+    WriteLog("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
 }
 
 static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui)
@@ -764,6 +931,7 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     if (s_p.active) {
         HandlePanelInput_();
         DrawPanelToBuffer_();
+        ForcePanelDefaultCursor_();
     }
     return EXEC_DEFAULT;
 }
@@ -822,13 +990,7 @@ static void DrawPanelToBuffer_()
     }
 
     DrawPanelScrollbar_(scr);
-
-    Fill(scr, px + OK_X, py + BTN_Y, BTN_W, BTN_H, 0, 100, 0);
-    DrawTxt(scr, GetSmallFont(), "确定", px + OK_X, py + BTN_Y, BTN_W, BTN_H,
-        COL_OK_TEXT, eTextAlignment::MIDDLE_CENTER);
-    Fill(scr, px + CANCEL_X, py + BTN_Y, BTN_W, BTN_H, 100, 0, 0);
-    DrawTxt(scr, GetSmallFont(), "取消", px + CANCEL_X, py + BTN_Y, BTN_W, BTN_H,
-        COL_CANCEL_TEXT, eTextAlignment::MIDDLE_CENTER);
+    DrawPanelButtons_(scr);
 
     // Match H3BattleValueInfo's ranged panel: one composite copy to the real
     // DirectDraw backbuffer, then invalidate only the panel region.
@@ -851,6 +1013,10 @@ static void DrawPanelToBuffer_()
 
 void OpenSettingsPanel_()
 {
+    H3MouseManager* mouse = H3MouseManager::Get();
+    s_p.cursor_saved = mouse != nullptr;
+    s_p.saved_cursor_type = mouse ? mouse->GetType() : 0;
+    s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
     s_p.active = true;
     s_p.count  = 0;
     s_p.scroll_row = 0;
@@ -882,6 +1048,8 @@ void OpenSettingsPanel_()
         s_p.stack_idx[s_p.count] = -1;
         ++s_p.count;
     }
+    InstallBattleInputBlocker_();
+    ForcePanelDefaultCursor_();
     DrawPanelToBuffer_();
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
 }
@@ -892,6 +1060,12 @@ void CloseSettingsPanel()
 {
     if (!s_p.active) return;
     s_p.active = false;
+    RemoveBattleInputBlocker_();
+    if (s_p.cursor_saved) {
+        if (H3MouseManager* mouse = H3MouseManager::Get())
+            mouse->SetCursor(s_p.saved_cursor_frame, s_p.saved_cursor_type);
+        s_p.cursor_saved = false;
+    }
     ReleasePanelComposite_();
     if (H3CombatManager* mgr = GetCombatMgr())
         THISCALL_7(void, 0x493FC0, mgr, FALSE, TRUE, FALSE, 0, TRUE, FALSE);

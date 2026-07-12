@@ -6,6 +6,8 @@ static void WriteLog(const char* fmt, ...);
 extern void CommitStrategies(int side, int* actions, int* targets);
 extern int  g_action_strategies[21];
 extern int  g_target_strategies[21];
+extern bool IsPanelActive();
+extern void CloseSettingsPanel();
 
 static struct {
     bool enabled;
@@ -13,6 +15,8 @@ static struct {
 
 void ResetAutoState()
 {
+    if (IsPanelActive())
+        CloseSettingsPanel();
     g_auto_state.enabled = false;
     memset(g_action_strategies, 0, sizeof(g_action_strategies));
     memset(g_target_strategies, 0, sizeof(g_target_strategies));
