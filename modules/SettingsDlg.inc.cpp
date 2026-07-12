@@ -15,9 +15,12 @@ static const int PANEL_H    = 480;
 static const int COLS       = 3;
 static const int CELL_W     = 193;
 static const int CELL_H     = 83;
-static const int GAP_X      = 16;
-static const int GAP_Y      = 5;
-static const int MARGIN     = 34;
+static const int CELL_STEP_X = CELL_W - 2;
+static const int CELL_STEP_Y = CELL_H - 2;
+static const int GRID_X      = 36;
+static const int GRID_Y      = 70;
+static const int SCROLL_X    = GRID_X + CELL_W + (COLS - 1) * CELL_STEP_X + 18;
+static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 80;
 static const int BTN_H      = 24;
@@ -87,8 +90,8 @@ static RECT CellRect(int idx)
 {
     RECT rc = {};
     if (idx < 0 || idx >= CELL_COUNT) return rc;
-    rc.left   = MARGIN + (idx % COLS) * (CELL_W + GAP_X);
-    rc.top    = TITLE_H + MARGIN + (idx / COLS) * (CELL_H + GAP_Y);
+    rc.left   = GRID_X + (idx % COLS) * CELL_STEP_X;
+    rc.top    = GRID_Y + (idx / COLS) * CELL_STEP_Y;
     rc.right  = rc.left + CELL_W;
     rc.bottom = rc.top + CELL_H;
     return rc;
