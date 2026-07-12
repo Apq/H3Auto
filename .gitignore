@@ -68,4 +68,7 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# Visual Studio per-user state and indexes
+.vs/
+
 Release/
