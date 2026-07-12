@@ -42,7 +42,7 @@ static const char* g_target_labels[] = {
     "无", "指定位置", "远程和高速优先", "数量优先",
 };
 
-static const INT32 COL_TITLE_TEXT  = 0x1D;
+static const INT32 COL_TITLE_TEXT  = 0x04;
 static const INT32 COL_TEXT        = 0x01;
 static const INT32 COL_ACTION_TEXT = 0x1A;
 static const INT32 COL_TARGET_TEXT = 0x0D;
@@ -79,6 +79,8 @@ static bool s_panel_ok_pressed_load_failed = false;
 static bool s_panel_cancel_normal_load_failed = false;
 static bool s_panel_cancel_pressed_load_failed = false;
 static bool s_panel_redraw_in_progress = false;
+static Patch* s_hover_patch_primary = nullptr;
+static Patch* s_hover_patch_secondary = nullptr;
 
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
@@ -100,6 +102,8 @@ static void OpenSettingsPanel_();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
 static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y);
+static bool BlockBattleHover_();
+static void RestoreBattleHover_();
 static void SetPanelScrollRow_(int row);
 static bool PointInRect_(int x, int y, int left, int top, int width, int height);
 
@@ -133,7 +137,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
         HandlePanelMouseMessage_(raw_command,
             static_cast<int>(msg.subtype), msg.itemId);
     }
-    return panel_was_active ? 1 : 0;
+    return panel_was_active ? msg.StopProcessing() : 0;
 }
 
 static void ForcePanelDefaultCursor_()
@@ -732,6 +736,44 @@ static H3CombatManager* GetCombatMgr()
     return H3CombatManager::Get();
 }
 
+static bool BlockBattleHover_()
+{
+    if (!_PI) return false;
+    if (!s_hover_patch_primary)
+        s_hover_patch_primary = _PI->CreateHexPatch(0x473E32,
+            const_cast<char*>("83 C4 04 33 C0"));
+    if (!s_hover_patch_secondary)
+        s_hover_patch_secondary = _PI->CreateHexPatch(0x473F55,
+            const_cast<char*>("83 C4 04 33 C0"));
+    if (!s_hover_patch_primary || !s_hover_patch_secondary) {
+        WriteLog("[Panel] 创建战场悬停屏蔽补丁失败。");
+        return false;
+    }
+
+    const int first = s_hover_patch_primary->IsApplied()
+        ? 0 : s_hover_patch_primary->Apply();
+    const int second = s_hover_patch_secondary->IsApplied()
+        ? 0 : s_hover_patch_secondary->Apply();
+    if (first < 0 || second < 0) {
+        if (s_hover_patch_primary->IsApplied()) s_hover_patch_primary->Undo();
+        if (s_hover_patch_secondary->IsApplied()) s_hover_patch_secondary->Undo();
+        WriteLog("[Panel] 应用战场悬停屏蔽补丁失败 first=%d second=%d。",
+            first, second);
+        return false;
+    }
+    WriteLog("[Panel] 战场悬停处理已屏蔽。");
+    return true;
+}
+
+static void RestoreBattleHover_()
+{
+    if (s_hover_patch_secondary && s_hover_patch_secondary->IsApplied())
+        s_hover_patch_secondary->Undo();
+    if (s_hover_patch_primary && s_hover_patch_primary->IsApplied())
+        s_hover_patch_primary->Undo();
+    WriteLog("[Panel] 战场悬停处理已恢复。");
+}
+
 static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
 {
     if (!o_WndMgr) return nullptr;
@@ -983,8 +1025,8 @@ static void DrawPanelToBuffer_()
         Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
-    DrawTxt(scr, GetPanelFont(), "部队自动行动设置",
-        px + 20, py + 8, PANEL_W - 40, 34, COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
+    DrawTxt(scr, GetSmallFont(), "部队自动行动设置",
+        px + 20, py + 15, PANEL_W - 40, 24, COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
     H3Font* fntS = GetSmallFont();
     const int first_item = s_p.scroll_row * COLS;
@@ -1047,6 +1089,11 @@ void OpenSettingsPanel_()
     s_p.cursor_saved = mouse != nullptr;
     s_p.saved_cursor_type = mouse ? mouse->GetType() : 0;
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
+    if (!BlockBattleHover_()) {
+        s_p.cursor_saved = false;
+        WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
+        return;
+    }
     s_p.active = true;
     s_p.count  = 0;
     s_p.scroll_row = 0;
@@ -1093,6 +1140,7 @@ void CloseSettingsPanel()
 {
     if (!s_p.active) return;
     s_p.active = false;
+    RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
     // right-click -> explanation shown -> explanation closed sequence.
     s_panel_popup_done = false;
