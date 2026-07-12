@@ -44,7 +44,7 @@ static const char* g_target_labels[] = {
     "无", "指定位置", "远程和高速优先", "数量优先",
 };
 
-static const INT32 COL_TITLE_TEXT  = 0x04;
+static const INT32 COL_TITLE_TEXT  = 0x03;
 static const INT32 COL_TEXT        = 0x01;
 static const INT32 COL_ACTION_TEXT = 0x1A;
 static const INT32 COL_TARGET_TEXT = 0x0D;
@@ -113,6 +113,9 @@ static void RestoreBattleHover_();
 static void UpdatePanelModalSuspension_();
 static void SetPanelScrollRow_(int row);
 static bool PointInRect_(int x, int y, int left, int top, int width, int height);
+static bool IsGameWindowForeground_();
+static bool IsGameMouseInputActive_();
+static void CancelPanelTransientInput_();
 
 struct BattleInputBlocker
 {
@@ -128,6 +131,15 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
     const bool panel_was_active = s_p.active && !s_panel_modal_suspended;
     const int raw_command = static_cast<int>(msg.command);
+    const bool mouse_command = raw_command == 4 || raw_command == 8
+        || raw_command == 16
+        || raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL);
+    if (panel_was_active && mouse_command && !IsGameMouseInputActive_()) {
+        // Losing focus can leave a stale in-game cursor coordinate in the
+        // translated packet. Never let an outside click complete a button or drag.
+        CancelPanelTransientInput_();
+        return msg.StopProcessing();
+    }
     if (panel_was_active && raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL)) {
         const int old_row = s_p.scroll_row;
         const int wheel_delta = static_cast<int>(msg.subtype);
@@ -162,6 +174,38 @@ static void ForcePanelDefaultCursor_()
 
 static H3Font* GetPanelFont() { return H3Font::Load("bigfont.fnt"); }
 static H3Font* GetSmallFont() { return H3Font::Load("smalfont.fnt"); }
+
+static bool IsGameWindowForeground_()
+{
+    HWND game_window = *reinterpret_cast<HWND*>(0x699650);
+    if (!game_window || IsIconic(game_window)) return false;
+
+    HWND foreground = GetForegroundWindow();
+    return foreground
+        && GetAncestor(foreground, GA_ROOT) == GetAncestor(game_window, GA_ROOT);
+}
+
+static bool IsGameMouseInputActive_()
+{
+    if (!IsGameWindowForeground_()) return false;
+    HWND game_window = *reinterpret_cast<HWND*>(0x699650);
+
+    POINT cursor = {};
+    RECT client = {};
+    if (!GetCursorPos(&cursor) || !ScreenToClient(game_window, &cursor)
+        || !GetClientRect(game_window, &client))
+    {
+        return false;
+    }
+    return PtInRect(&client, cursor) != FALSE;
+}
+
+static void CancelPanelTransientInput_()
+{
+    s_p.pressed_button = 0;
+    s_p.scroll_button_pressed = 0;
+    s_p.scroll_dragging = false;
+}
 
 static RECT CellRect(int idx)
 {
@@ -866,7 +910,10 @@ static void RemoveBattleInputBlocker_()
 static void UpdatePanelModalSuspension_()
 {
     if (!s_p.active) return;
-    const bool system_modal_active = *reinterpret_cast<INT32*>(0x69FEA4) > 0;
+    const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
+    // The same counter also rises while the game is inactive. Only an in-game
+    // modal dialog should hide the panel; clicking outside must leave it intact.
+    const bool system_modal_active = modal_depth > 0 && IsGameWindowForeground_();
     if (system_modal_active == s_panel_modal_suspended) return;
 
     s_panel_modal_suspended = system_modal_active;
@@ -967,7 +1014,8 @@ static void CheckAutoFightDialogClosed()
     }
 
     const bool battle_ui_exists = combat_dlg != nullptr;
-    const bool right_button_down = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    const bool right_button_down = IsGameMouseInputActive_()
+        && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
     if (battle_ui_exists && right_button_down
         && cursor_item_id == s_autofight_button_id)
     {
@@ -1072,8 +1120,9 @@ static void DrawPanelToBuffer_()
         Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
-    DrawTxt(scr, GetSmallFont(), "部队自动行动设置",
-        px + 20, py + 15, PANEL_W - 40, 24, COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
+    DrawTxt(scr, GetPanelFont(), "部队自动行动设置",
+        px + 20, py + 13, PANEL_W - 40, TITLE_H,
+        COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
     H3Font* fntS = GetSmallFont();
     const int first_item = s_p.scroll_row * COLS;
@@ -1344,6 +1393,14 @@ static void HandlePanelInput_()
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
+    if (!IsGameWindowForeground_()) {
+        CancelPanelTransientInput_();
+        previous_up_down = up_down;
+        previous_down_down = down_down;
+        previous_page_up_down = page_up_down;
+        previous_page_down_down = page_down_down;
+        return;
+    }
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
     if (down_down && !previous_down_down) SetPanelScrollRow_(s_p.scroll_row + 1);
     if (page_up_down && !previous_page_up_down)
