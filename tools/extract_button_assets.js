@@ -6,9 +6,11 @@ const projectRoot = path.resolve(__dirname, '..');
 const imageDir = path.join(projectRoot, 'img');
 const lodPath = process.argv[2]
   || 'D:/Heroes3/Heroes3_2026.05.01/Data/H3sprite.lod';
+const bitmapLodPath = process.argv[3]
+  || 'D:/Heroes3/Heroes3_2026.05.01/Data/H3bitmap.lod';
 
-function extractLodEntry(entryName) {
-  const lod = fs.readFileSync(lodPath);
+function extractLodEntry(entryName, sourceLod = lodPath) {
+  const lod = fs.readFileSync(sourceLod);
   const count = lod.readUInt32LE(8);
   for (let i = 0; i < count; i++) {
     const entry = 0x5c + i * 32;
@@ -22,6 +24,23 @@ function extractLodEntry(entryName) {
     return packedSize ? zlib.inflateSync(data) : Buffer.from(data);
   }
   throw new Error(`LOD entry not found: ${entryName}`);
+}
+
+function decodeH3Pcx8(pcx) {
+  const pixelCount = pcx.readUInt32LE(0);
+  const width = pcx.readUInt32LE(4);
+  const height = pcx.readUInt32LE(8);
+  if (pixelCount !== width * height || pcx.length !== 12 + pixelCount + 768)
+    throw new Error('Unsupported H3 PCX format');
+
+  const paletteOffset = 12 + pixelCount;
+  const palette = Array.from({ length: 256 }, (_, index) => [
+    pcx[paletteOffset + index * 3],
+    pcx[paletteOffset + index * 3 + 1],
+    pcx[paletteOffset + index * 3 + 2],
+  ]);
+  const indices = Buffer.from(pcx.subarray(12, paletteOffset));
+  return { width, height, indices, palette };
 }
 
 function decodeDef(def) {
@@ -119,3 +138,7 @@ for (const [entry, prefix] of [['iOKAY.def', 'HA_ok'], ['iCANCEL.def', 'HA_cance
   writePcx(frames[1], `${prefix}_pressed.pcx`);
   console.log(`${entry}: wrote normal and pressed ${frames[0].width}x${frames[0].height} frames`);
 }
+
+const buttonFrame = decodeH3Pcx8(extractLodEntry('Box64x30.pcx', bitmapLodPath));
+writePcx(buttonFrame, 'HA_button_frame.pcx');
+console.log(`Box64x30.pcx: wrote ${buttonFrame.width}x${buttonFrame.height} frame`);

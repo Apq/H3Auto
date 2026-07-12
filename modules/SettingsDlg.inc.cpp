@@ -27,6 +27,8 @@ static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 64;
 static const int BTN_H      = 30;
+static const int BTN_FRAME_W = 66;
+static const int BTN_FRAME_H = 32;
 static const int BTN_GAP    = 24;
 static const int BTN_Y      = PANEL_H - 56;
 static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
@@ -72,12 +74,14 @@ static H3LoadedPcx16* s_panel_ok_normal = nullptr;
 static H3LoadedPcx16* s_panel_ok_pressed = nullptr;
 static H3LoadedPcx16* s_panel_cancel_normal = nullptr;
 static H3LoadedPcx16* s_panel_cancel_pressed = nullptr;
+static H3LoadedPcx16* s_panel_button_frame = nullptr;
 static bool s_panel_background_load_failed = false;
 static bool s_panel_cell_load_failed = false;
 static bool s_panel_ok_normal_load_failed = false;
 static bool s_panel_ok_pressed_load_failed = false;
 static bool s_panel_cancel_normal_load_failed = false;
 static bool s_panel_cancel_pressed_load_failed = false;
+static bool s_panel_button_frame_load_failed = false;
 static bool s_panel_redraw_in_progress = false;
 static bool s_panel_modal_suspended = false;
 static Patch* s_hover_patch_primary = nullptr;
@@ -553,6 +557,8 @@ static void DrawTransparentPcx_(H3LoadedPcx16* source,
 
 static void EnsurePanelButtonPcxResources_()
 {
+    LoadPanelPcx24_("HA_button_frame.pcx", BTN_FRAME_W, BTN_FRAME_H,
+        s_panel_button_frame, s_panel_button_frame_load_failed);
     LoadPanelPcx24_("HA_ok_normal.pcx", BTN_W, BTN_H,
         s_panel_ok_normal, s_panel_ok_normal_load_failed);
     LoadPanelPcx24_("HA_ok_pressed.pcx", BTN_W, BTN_H,
@@ -576,6 +582,16 @@ static void DrawPanelButtons_(H3LoadedPcx16* destination)
     H3LoadedPcx16* ok = ok_pressed ? s_panel_ok_pressed : s_panel_ok_normal;
     H3LoadedPcx16* cancel = cancel_pressed
         ? s_panel_cancel_pressed : s_panel_cancel_normal;
+
+    if (s_panel_button_frame) {
+        DrawTransparentPcx_(s_panel_button_frame, destination, OK_X - 1, BTN_Y - 1);
+        DrawTransparentPcx_(s_panel_button_frame, destination, CANCEL_X - 1, BTN_Y - 1);
+    } else {
+        destination->DrawFrame(OK_X - 1, BTN_Y - 1, BTN_FRAME_W, BTN_FRAME_H,
+            (BYTE)168, (BYTE)141, (BYTE)68);
+        destination->DrawFrame(CANCEL_X - 1, BTN_Y - 1, BTN_FRAME_W, BTN_FRAME_H,
+            (BYTE)168, (BYTE)141, (BYTE)68);
+    }
 
     if (ok) DrawTransparentPcx_(ok, destination, OK_X, BTN_Y);
     else {
@@ -714,9 +730,10 @@ static void ReleasePanelComposite_()
     }
     H3LoadedPcx16** button_resources[] = {
         &s_panel_ok_normal, &s_panel_ok_pressed,
-        &s_panel_cancel_normal, &s_panel_cancel_pressed
+        &s_panel_cancel_normal, &s_panel_cancel_pressed,
+        &s_panel_button_frame
     };
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (*button_resources[i]) {
             (*button_resources[i])->Destroy();
             *button_resources[i] = nullptr;
@@ -728,6 +745,7 @@ static void ReleasePanelComposite_()
     s_panel_ok_pressed_load_failed = false;
     s_panel_cancel_normal_load_failed = false;
     s_panel_cancel_pressed_load_failed = false;
+    s_panel_button_frame_load_failed = false;
 }
 
 // ========================================================================
