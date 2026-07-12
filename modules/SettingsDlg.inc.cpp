@@ -60,6 +60,8 @@ static struct Panel {
     bool cursor_saved;
     int saved_cursor_type;
     int saved_cursor_frame;
+    int pressed_button;
+    bool previous_left_down;
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
@@ -110,9 +112,45 @@ struct BattleInputBlocker
 
 static BattleInputBlocker s_input_blocker = {};
 
-static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg&)
+static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
-    return 1; // H3BaseDlg::vPreProcess: message handled, stop iterating items.
+    const bool panel_was_active = s_p.active;
+    const int raw_command = static_cast<int>(msg.command);
+    if (panel_was_active && (raw_command == 8 || raw_command == 16)) {
+        // Item vProcessMsg receives the pre-translation mouse packet:
+        // command is WM-derived and coordinates are stored at +4/+8.
+        const int px = static_cast<int>(msg.subtype) - s_p.x;
+        const int py = msg.itemId - s_p.y;
+        if (raw_command == 8) {
+            int button = 0;
+            if (PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)) button = 1;
+            else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
+            if (s_p.pressed_button != button) {
+                s_p.pressed_button = button;
+                DrawPanelToBuffer_();
+                if (button != 0)
+                    WriteLog(button == 1
+                        ? "[Panel] 确定按钮原生按下。"
+                        : "[Panel] 取消按钮原生按下。");
+            }
+        } else {
+            const int pressed = s_p.pressed_button;
+            const bool activate = pressed == 1
+                ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
+                : pressed == 2
+                    ? PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)
+                    : false;
+            s_p.pressed_button = 0;
+            DrawPanelToBuffer_();
+            if (activate) {
+                WriteLog(pressed == 1
+                    ? "[Panel] 确定按钮原生松开：关闭设置窗口（暂不提交策略）。"
+                    : "[Panel] 取消按钮原生松开：关闭设置窗口。");
+                CloseSettingsPanel();
+            }
+        }
+    }
+    return panel_was_active ? 1 : 0;
 }
 
 static void ForcePanelDefaultCursor_()
@@ -519,25 +557,31 @@ static void DrawTransparentPcx_(H3LoadedPcx16* source,
     }
 }
 
+static void EnsurePanelButtonPcxResources_()
+{
+    LoadPanelPcx24_("HA_ok_normal.pcx", BTN_W, BTN_H,
+        s_panel_ok_normal, s_panel_ok_normal_load_failed);
+    LoadPanelPcx24_("HA_ok_pressed.pcx", BTN_W, BTN_H,
+        s_panel_ok_pressed, s_panel_ok_pressed_load_failed);
+    LoadPanelPcx24_("HA_cancel_normal.pcx", BTN_W, BTN_H,
+        s_panel_cancel_normal, s_panel_cancel_normal_load_failed);
+    LoadPanelPcx24_("HA_cancel_pressed.pcx", BTN_W, BTN_H,
+        s_panel_cancel_pressed, s_panel_cancel_pressed_load_failed);
+}
+
 static void DrawPanelButtons_(H3LoadedPcx16* destination)
 {
     const H3POINT cursor = H3POINT::GetCursorPosition();
     const int px = cursor.x - s_p.x;
     const int py = cursor.y - s_p.y;
-    const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    const bool ok_pressed = left_down
+    const bool ok_pressed = s_p.pressed_button == 1
         && PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H);
-    const bool cancel_pressed = left_down
+    const bool cancel_pressed = s_p.pressed_button == 2
         && PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H);
 
-    H3LoadedPcx16* ok = LoadPanelPcx24_(ok_pressed
-        ? "HA_ok_pressed.pcx" : "HA_ok_normal.pcx", BTN_W, BTN_H,
-        ok_pressed ? s_panel_ok_pressed : s_panel_ok_normal,
-        ok_pressed ? s_panel_ok_pressed_load_failed : s_panel_ok_normal_load_failed);
-    H3LoadedPcx16* cancel = LoadPanelPcx24_(cancel_pressed
-        ? "HA_cancel_pressed.pcx" : "HA_cancel_normal.pcx", BTN_W, BTN_H,
-        cancel_pressed ? s_panel_cancel_pressed : s_panel_cancel_normal,
-        cancel_pressed ? s_panel_cancel_pressed_load_failed : s_panel_cancel_normal_load_failed);
+    H3LoadedPcx16* ok = ok_pressed ? s_panel_ok_pressed : s_panel_ok_normal;
+    H3LoadedPcx16* cancel = cancel_pressed
+        ? s_panel_cancel_pressed : s_panel_cancel_normal;
 
     if (ok) DrawTransparentPcx_(ok, destination, OK_X, BTN_Y);
     else {
@@ -733,7 +777,7 @@ static bool InstallBattleInputBlocker_()
 
     s_input_blocker = {};
     H3DlgTransparentItem* item = H3DlgTransparentItem::Create(
-        0, 0, battle_ui->GetWidth(), battle_ui->GetHeight(), 0x7FFE);
+        0, 0, H3GameWidth::Get(), H3GameHeight::Get(), 0x7FFE);
     if (!item) {
         WriteLog("[Panel] 创建 BattleUI 输入屏障失败。");
         return false;
@@ -756,9 +800,8 @@ static bool InstallBattleInputBlocker_()
     s_input_blocker.battle_ui = battle_ui;
     s_input_blocker.item = item;
     s_input_blocker.original_vtable = original_vtable;
-    WriteLog("[Panel] BattleUI 输入屏障已安装。 battle=%p item=%p firstItem=%p。",
-        battle_ui, item, battle_ui->GetList().begin() != battle_ui->GetList().end()
-            ? *battle_ui->GetList().begin() : nullptr);
+    WriteLog("[Panel] BattleUI 输入屏障已安装。 battle=%p item=%p prev=%p next=%p。",
+        battle_ui, item, item->GetPreviousItem(), item->GetNextItem());
     return true;
 }
 
@@ -1022,6 +1065,8 @@ void OpenSettingsPanel_()
     s_p.scroll_row = 0;
     s_p.scroll_dragging = false;
     s_p.scroll_drag_offset = 0;
+    s_p.pressed_button = 0;
+    s_p.previous_left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     memset(s_p.action, 0, sizeof(s_p.action));
     memset(s_p.target, 0, sizeof(s_p.target));
 
@@ -1049,6 +1094,7 @@ void OpenSettingsPanel_()
         ++s_p.count;
     }
     InstallBattleInputBlocker_();
+    EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
     DrawPanelToBuffer_();
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
@@ -1060,6 +1106,13 @@ void CloseSettingsPanel()
 {
     if (!s_p.active) return;
     s_p.active = false;
+    // Allow the same battle to open the panel again, but require a fresh
+    // right-click -> explanation shown -> explanation closed sequence.
+    s_panel_popup_done = false;
+    s_saw_explanation_dlg_in_battle = false;
+    s_autofight_right_press_armed = false;
+    s_p.pressed_button = 0;
+    s_p.previous_left_down = false;
     RemoveBattleInputBlocker_();
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
@@ -1083,25 +1136,6 @@ bool HandlePanelClick(int sx, int sy)
     if (!s_p.active) return false;
     int px = sx - s_p.x, py = sy - s_p.y;
 
-    if (px >= OK_X && px < OK_X + BTN_W && py >= BTN_Y && py < BTN_Y + BTN_H) {
-        for (int i = 0; i < s_p.count; ++i) {
-            int si = s_p.stack_idx[i];
-            if (si >= 0 && si < 21) {
-                g_action_strategies[si] = s_p.action[si];
-                g_target_strategies[si] = s_p.target[si];
-            }
-        }
-        extern void CommitStrategies(int side, int* actions, int* targets);
-        CommitStrategies(0, g_action_strategies, g_target_strategies);
-        WriteLog("[Panel] OK");
-        CloseSettingsPanel();
-        return true;
-    }
-    if (px >= CANCEL_X && px < CANCEL_X + BTN_W && py >= BTN_Y && py < BTN_Y + BTN_H) {
-        WriteLog("[Panel] Cancel");
-        CloseSettingsPanel();
-        return true;
-    }
     const int first_item = s_p.scroll_row * COLS;
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
@@ -1131,7 +1165,6 @@ static bool PointInRect_(int x, int y, int left, int top, int width, int height)
 
 static void HandlePanelInput_()
 {
-    static bool previous_left_down = false;
     static bool previous_up_down = false;
     static bool previous_down_down = false;
     static bool previous_page_up_down = false;
@@ -1140,8 +1173,9 @@ static void HandlePanelInput_()
     const H3POINT cursor = H3POINT::GetCursorPosition();
     const int px = cursor.x - s_p.x;
     const int py = cursor.y - s_p.y;
-    const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    const bool left_pressed = left_down && !previous_left_down;
+    const SHORT left_state = GetAsyncKeyState(VK_LBUTTON);
+    const bool left_down = (left_state & 0x8000) != 0;
+    const bool left_pressed = left_down && !s_p.previous_left_down;
     const int max_row = PanelMaxScrollRow_();
 
     if (max_row > 0) {
@@ -1192,10 +1226,10 @@ static void HandlePanelInput_()
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
 
-    if (left_pressed && !s_p.scroll_dragging)
+    if (left_pressed && s_p.pressed_button == 0 && !s_p.scroll_dragging)
         HandlePanelClick(cursor.x, cursor.y);
 
-    previous_left_down = left_down;
+    s_p.previous_left_down = left_down;
     previous_up_down = up_down;
     previous_down_down = down_down;
     previous_page_up_down = page_up_down;
