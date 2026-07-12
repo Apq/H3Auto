@@ -79,6 +79,7 @@ static bool s_panel_ok_pressed_load_failed = false;
 static bool s_panel_cancel_normal_load_failed = false;
 static bool s_panel_cancel_pressed_load_failed = false;
 static bool s_panel_redraw_in_progress = false;
+static bool s_panel_modal_suspended = false;
 static Patch* s_hover_patch_primary = nullptr;
 static Patch* s_hover_patch_secondary = nullptr;
 
@@ -99,11 +100,13 @@ static int s_battle_ui_missing_frames = 0;
 
 // 前向声明
 static void OpenSettingsPanel_();
+void CloseSettingsPanel();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
 static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y);
 static bool BlockBattleHover_();
 static void RestoreBattleHover_();
+static void UpdatePanelModalSuspension_();
 static void SetPanelScrollRow_(int row);
 static bool PointInRect_(int x, int y, int left, int top, int width, int height);
 
@@ -119,7 +122,7 @@ static BattleInputBlocker s_input_blocker = {};
 
 static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
-    const bool panel_was_active = s_p.active;
+    const bool panel_was_active = s_p.active && !s_panel_modal_suspended;
     const int raw_command = static_cast<int>(msg.command);
     if (panel_was_active && raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL)) {
         const int old_row = s_p.scroll_row;
@@ -842,6 +845,29 @@ static void RemoveBattleInputBlocker_()
     WriteLog("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
 }
 
+static void UpdatePanelModalSuspension_()
+{
+    if (!s_p.active) return;
+    const bool system_modal_active = *reinterpret_cast<INT32*>(0x69FEA4) > 0;
+    if (system_modal_active == s_panel_modal_suspended) return;
+
+    s_panel_modal_suspended = system_modal_active;
+    if (system_modal_active) {
+        RemoveBattleInputBlocker_();
+        RestoreBattleHover_();
+        WriteLog("[Panel] 检测到系统模态对话框，暂停面板绘制和输入。");
+    } else {
+        if (!BlockBattleHover_() || !InstallBattleInputBlocker_()) {
+            WriteLog("[Panel] 系统模态对话框关闭后恢复面板失败，关闭设置面板。");
+            CloseSettingsPanel();
+            return;
+        }
+        ForcePanelDefaultCursor_();
+        DrawPanelToBuffer_();
+        WriteLog("[Panel] 系统模态对话框已关闭，恢复设置面板。");
+    }
+}
+
 static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui)
 {
     if (!battle_ui) return -1;
@@ -1001,9 +1027,12 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     }
     CheckAutoFightDialogClosed();
     if (s_p.active) {
-        HandlePanelInput_();
-        DrawPanelToBuffer_();
-        ForcePanelDefaultCursor_();
+        UpdatePanelModalSuspension_();
+        if (s_p.active && !s_panel_modal_suspended) {
+            HandlePanelInput_();
+            DrawPanelToBuffer_();
+            ForcePanelDefaultCursor_();
+        }
     }
     return EXEC_DEFAULT;
 }
@@ -1089,6 +1118,7 @@ void OpenSettingsPanel_()
     s_p.cursor_saved = mouse != nullptr;
     s_p.saved_cursor_type = mouse ? mouse->GetType() : 0;
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
+    s_panel_modal_suspended = false;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -1140,6 +1170,7 @@ void CloseSettingsPanel()
 {
     if (!s_p.active) return;
     s_p.active = false;
+    s_panel_modal_suspended = false;
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
     // right-click -> explanation shown -> explanation closed sequence.
