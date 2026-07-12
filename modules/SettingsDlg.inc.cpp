@@ -20,6 +20,9 @@ static const int CELL_STEP_Y = CELL_H - 2;
 static const int GRID_X      = 36;
 static const int GRID_Y      = 70;
 static const int SCROLL_X    = GRID_X + CELL_W + (COLS - 1) * CELL_STEP_X + 18;
+static const int SCROLL_Y    = GRID_Y;
+static const int SCROLL_W    = 16;
+static const int SCROLL_H    = CELL_H + 3 * CELL_STEP_Y;
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 80;
@@ -28,6 +31,8 @@ static const int BTN_Y      = PANEL_H - 44;
 static const int OK_X       = PANEL_W - MARGIN - BTN_W;
 static const int CANCEL_X   = OK_X - BTN_W - 10;
 static const int CELL_COUNT = COLS * 4;
+static const int MAX_STACKS = 21;
+static const int TEST_CELL_COUNT = 15;
 
 static const char* g_action_labels[] = {
     "手动", "防御", "近战攻击", "随机射击", "顺序射击", "循环移动",
@@ -46,10 +51,13 @@ static const INT32 COL_CANCEL_TEXT = 0x1B;
 static struct Panel {
     bool active;
     int x, y;
-    int action[21];
-    int target[21];
-    int stack_idx[CELL_COUNT];
+    int action[MAX_STACKS];
+    int target[MAX_STACKS];
+    int stack_idx[MAX_STACKS];
     int count;
+    int scroll_row;
+    bool scroll_dragging;
+    int scroll_drag_offset;
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
@@ -78,6 +86,7 @@ static int s_battle_ui_missing_frames = 0;
 // 前向声明
 static void OpenSettingsPanel_();
 static void DrawPanelToBuffer_();
+static void HandlePanelInput_();
 
 // ========================================================================
 // 第二部分：工具函数
@@ -113,6 +122,35 @@ static RECT TargetBtnRect(int idx)
     rc.top += 52;
     rc.bottom = rc.top + 22;
     return rc;
+}
+
+static int PanelMaxScrollRow_()
+{
+    const int total_rows = (s_p.count + COLS - 1) / COLS;
+    const int visible_rows = CELL_COUNT / COLS;
+    return total_rows > visible_rows ? total_rows - visible_rows : 0;
+}
+
+static int PanelScrollButtonSize_()
+{
+    return 16;
+}
+
+static int PanelScrollThumbY_()
+{
+    const int button_size = PanelScrollButtonSize_();
+    const int free_size = SCROLL_H - 3 * button_size;
+    const int max_row = PanelMaxScrollRow_();
+    return SCROLL_Y + button_size
+        + (max_row > 0 ? free_size * s_p.scroll_row / max_row : 0);
+}
+
+static void SetPanelScrollRow_(int row)
+{
+    const int max_row = PanelMaxScrollRow_();
+    if (row < 0) row = 0;
+    if (row > max_row) row = max_row;
+    s_p.scroll_row = row;
 }
 
 static void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b)
@@ -363,6 +401,57 @@ static void DrawPanelCell_(H3LoadedPcx16* destination, int dst_x, int dst_y)
             }
         }
     }
+}
+
+static void DrawPanelTriangle_(H3LoadedPcx16* destination, int center_x, int top,
+    bool points_down, int red, int green, int blue)
+{
+    for (int row = 0; row < 5; ++row) {
+        const int half_width = points_down ? 4 - row : row;
+        const int y = top + row;
+        Fill(destination, center_x - half_width, y,
+            half_width * 2 + 1, 1, red, green, blue);
+    }
+}
+
+static void DrawPanelScrollbar_(H3LoadedPcx16* destination)
+{
+    const int max_row = PanelMaxScrollRow_();
+    if (!destination) return;
+
+    const int button_size = PanelScrollButtonSize_();
+    const int thumb_y = PanelScrollThumbY_();
+
+    // Matches the supplied mockup: black recessed track, gold outline,
+    // gold arrow buttons and a brown/gold thumb. Drawing directly to pcx16
+    // avoids the 8-bit palette corruption seen with sliderV.pcx in HD 32-bit.
+    Fill(destination, SCROLL_X, SCROLL_Y, SCROLL_W, SCROLL_H, 8, 6, 4);
+    destination->DrawFrame(SCROLL_X, SCROLL_Y, SCROLL_W, SCROLL_H,
+        (BYTE)112, (BYTE)78, (BYTE)30);
+    destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + 1, SCROLL_W - 2, SCROLL_H - 2,
+        (BYTE)35, (BYTE)25, (BYTE)14);
+
+    Fill(destination, SCROLL_X + 2, SCROLL_Y + 2, SCROLL_W - 4, button_size - 3,
+        54, 38, 20);
+    Fill(destination, SCROLL_X + 2, SCROLL_Y + SCROLL_H - button_size + 1,
+        SCROLL_W - 4, button_size - 3, 54, 38, 20);
+    destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + 1, SCROLL_W - 2, button_size - 1,
+        (BYTE)184, (BYTE)139, (BYTE)62);
+    destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + SCROLL_H - button_size,
+        SCROLL_W - 2, button_size - 1, (BYTE)184, (BYTE)139, (BYTE)62);
+    DrawPanelTriangle_(destination, SCROLL_X + SCROLL_W / 2,
+        SCROLL_Y + 5, false, 235, 205, 116);
+    DrawPanelTriangle_(destination, SCROLL_X + SCROLL_W / 2,
+        SCROLL_Y + SCROLL_H - button_size + 5, true, 235, 205, 116);
+
+    Fill(destination, SCROLL_X + 2, thumb_y, SCROLL_W - 4, button_size,
+        max_row > 0 ? 126 : 74, max_row > 0 ? 86 : 52, max_row > 0 ? 36 : 24);
+    destination->DrawFrame(SCROLL_X + 1, thumb_y, SCROLL_W - 2, button_size,
+        (BYTE)(max_row > 0 ? 218 : 118),
+        (BYTE)(max_row > 0 ? 174 : 83),
+        (BYTE)(max_row > 0 ? 82 : 38));
+    Fill(destination, SCROLL_X + 4, thumb_y + button_size / 2 - 1,
+        SCROLL_W - 8, 1, 235, 205, 116);
 }
 
 static int GetPanelBackBufferBpp_()
@@ -672,7 +761,10 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
             s_frame, vtable, s_saw_explanation_dlg_in_battle, s_p.active);
     }
     CheckAutoFightDialogClosed();
-    if (s_p.active) DrawPanelToBuffer_();
+    if (s_p.active) {
+        HandlePanelInput_();
+        DrawPanelToBuffer_();
+    }
     return EXEC_DEFAULT;
 }
 
@@ -697,9 +789,11 @@ static void DrawPanelToBuffer_()
         px + 20, py + 8, PANEL_W - 40, 34, COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
     H3Font* fntS = GetSmallFont();
-    for (int i = 0; i < s_p.count && i < CELL_COUNT; ++i) {
-        int si = s_p.stack_idx[i];
-        if (si < 0) continue;
+    const int first_item = s_p.scroll_row * COLS;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        const int item_index = first_item + i;
+        if (item_index >= s_p.count) break;
+        int si = s_p.stack_idx[item_index];
         RECT cRc = CellRect(i);
         RECT aRc = ActionBtnRect(i);
         RECT tRc = TargetBtnRect(i);
@@ -716,14 +810,18 @@ static void DrawPanelToBuffer_()
         DrawTxt(scr, fntS, coord, cRc.left + 4, cRc.top + 2, CELL_W - 8, 16,
             COL_TEXT, eTextAlignment::TOP_LEFT);
 
-        DrawTxt(scr, fntS, g_action_labels[s_p.action[si]],
+        const int action = si >= 0 && si < MAX_STACKS ? s_p.action[si] : AS_MANUAL;
+        const int target = si >= 0 && si < MAX_STACKS ? s_p.target[si] : TS_NONE;
+        DrawTxt(scr, fntS, g_action_labels[action],
             aRc.left, aRc.top, aRc.right - aRc.left, aRc.bottom - aRc.top,
             COL_ACTION_TEXT, eTextAlignment::MIDDLE_CENTER);
 
-        DrawTxt(scr, fntS, g_target_labels[s_p.target[si]],
+        DrawTxt(scr, fntS, g_target_labels[target],
             tRc.left, tRc.top, tRc.right - tRc.left, tRc.bottom - tRc.top,
             COL_TARGET_TEXT, eTextAlignment::MIDDLE_CENTER);
     }
+
+    DrawPanelScrollbar_(scr);
 
     Fill(scr, px + OK_X, py + BTN_Y, BTN_W, BTN_H, 0, 100, 0);
     DrawTxt(scr, GetSmallFont(), "确定", px + OK_X, py + BTN_Y, BTN_W, BTN_H,
@@ -755,6 +853,9 @@ void OpenSettingsPanel_()
 {
     s_p.active = true;
     s_p.count  = 0;
+    s_p.scroll_row = 0;
+    s_p.scroll_dragging = false;
+    s_p.scroll_drag_offset = 0;
     memset(s_p.action, 0, sizeof(s_p.action));
     memset(s_p.target, 0, sizeof(s_p.target));
 
@@ -768,7 +869,7 @@ void OpenSettingsPanel_()
 
     H3CombatManager* mgr = GetCombatMgr();
     if (mgr) {
-        for (int i = 0; i < 21 && s_p.count < CELL_COUNT; ++i) {
+        for (int i = 0; i < MAX_STACKS && s_p.count < MAX_STACKS; ++i) {
             if (mgr->stacks[0][i].numberAlive > 0) {
                 s_p.stack_idx[s_p.count] = i;
                 s_p.action[i] = g_action_strategies[i];
@@ -776,6 +877,10 @@ void OpenSettingsPanel_()
                 ++s_p.count;
             }
         }
+    }
+    while (s_p.count < TEST_CELL_COUNT) {
+        s_p.stack_idx[s_p.count] = -1;
+        ++s_p.count;
     }
     DrawPanelToBuffer_();
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
@@ -805,7 +910,7 @@ bool HandlePanelClick(int sx, int sy)
     int px = sx - s_p.x, py = sy - s_p.y;
 
     if (px >= OK_X && px < OK_X + BTN_W && py >= BTN_Y && py < BTN_Y + BTN_H) {
-        for (int i = 0; i < s_p.count && i < CELL_COUNT; ++i) {
+        for (int i = 0; i < s_p.count; ++i) {
             int si = s_p.stack_idx[i];
             if (si >= 0 && si < 21) {
                 g_action_strategies[si] = s_p.action[si];
@@ -823,8 +928,11 @@ bool HandlePanelClick(int sx, int sy)
         CloseSettingsPanel();
         return true;
     }
-    for (int i = 0; i < s_p.count && i < CELL_COUNT; ++i) {
-        int si = s_p.stack_idx[i];
+    const int first_item = s_p.scroll_row * COLS;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        const int item_index = first_item + i;
+        if (item_index >= s_p.count) break;
+        int si = s_p.stack_idx[item_index];
         if (si < 0) continue;
         RECT aRc = ActionBtnRect(i);
         RECT tRc = TargetBtnRect(i);
@@ -839,4 +947,83 @@ bool HandlePanelClick(int sx, int sy)
 }
 
 // ========================================================================
-// 第九部分：输入处理后续扩展
+// 第九部分：滚动条输入
+// ========================================================================
+
+static bool PointInRect_(int x, int y, int left, int top, int width, int height)
+{
+    return x >= left && x < left + width && y >= top && y < top + height;
+}
+
+static void HandlePanelInput_()
+{
+    static bool previous_left_down = false;
+    static bool previous_up_down = false;
+    static bool previous_down_down = false;
+    static bool previous_page_up_down = false;
+    static bool previous_page_down_down = false;
+
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+    const int px = cursor.x - s_p.x;
+    const int py = cursor.y - s_p.y;
+    const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool left_pressed = left_down && !previous_left_down;
+    const int max_row = PanelMaxScrollRow_();
+
+    if (max_row > 0) {
+        const int button_size = PanelScrollButtonSize_();
+        const int thumb_y = PanelScrollThumbY_();
+        const int free_size = SCROLL_H - 3 * button_size;
+
+        if (left_pressed && PointInRect_(px, py, SCROLL_X, SCROLL_Y, SCROLL_W, SCROLL_H)) {
+            if (py < SCROLL_Y + button_size) {
+                SetPanelScrollRow_(s_p.scroll_row - 1);
+            } else if (py >= SCROLL_Y + SCROLL_H - button_size) {
+                SetPanelScrollRow_(s_p.scroll_row + 1);
+            } else if (py >= thumb_y && py < thumb_y + button_size) {
+                s_p.scroll_dragging = true;
+                s_p.scroll_drag_offset = py - thumb_y;
+            } else if (py < thumb_y) {
+                SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
+            } else {
+                SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
+            }
+        }
+
+        if (s_p.scroll_dragging) {
+            if (left_down) {
+                int offset = py - s_p.scroll_drag_offset - (SCROLL_Y + button_size);
+                if (offset < 0) offset = 0;
+                if (offset > free_size) offset = free_size;
+                const int row = free_size > 0
+                    ? (max_row * offset + free_size / 2) / free_size : 0;
+                SetPanelScrollRow_(row);
+            } else {
+                s_p.scroll_dragging = false;
+            }
+        }
+    } else {
+        s_p.scroll_dragging = false;
+        SetPanelScrollRow_(0);
+    }
+
+    const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+    const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+    const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
+    const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
+    if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
+    if (down_down && !previous_down_down) SetPanelScrollRow_(s_p.scroll_row + 1);
+    if (page_up_down && !previous_page_up_down)
+        SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
+    if (page_down_down && !previous_page_down_down)
+        SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
+
+    if (left_pressed && !s_p.scroll_dragging)
+        HandlePanelClick(cursor.x, cursor.y);
+
+    previous_left_down = left_down;
+    previous_up_down = up_down;
+    previous_down_down = down_down;
+    previous_page_up_down = page_up_down;
+    previous_page_down_down = page_down_down;
+}
