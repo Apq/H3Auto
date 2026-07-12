@@ -57,11 +57,11 @@ static struct Panel {
     int scroll_row;
     bool scroll_dragging;
     int scroll_drag_offset;
+    int scroll_button_pressed;
     bool cursor_saved;
     int saved_cursor_type;
     int saved_cursor_frame;
     int pressed_button;
-    bool previous_left_down;
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
@@ -99,6 +99,7 @@ static int s_battle_ui_missing_frames = 0;
 static void OpenSettingsPanel_();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
+static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y);
 static void SetPanelScrollRow_(int row);
 static bool PointInRect_(int x, int y, int left, int top, int width, int height);
 
@@ -116,39 +117,21 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
     const bool panel_was_active = s_p.active;
     const int raw_command = static_cast<int>(msg.command);
-    if (panel_was_active && (raw_command == 8 || raw_command == 16)) {
+    if (panel_was_active && raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL)) {
+        const int old_row = s_p.scroll_row;
+        const int wheel_delta = static_cast<int>(msg.subtype);
+        if (wheel_delta < 0)
+            SetPanelScrollRow_(s_p.scroll_row + 1);
+        else if (wheel_delta > 0)
+            SetPanelScrollRow_(s_p.scroll_row - 1);
+        if (s_p.scroll_row != old_row)
+            DrawPanelToBuffer_();
+    }
+    if (panel_was_active && (raw_command == 4 || raw_command == 8 || raw_command == 16)) {
         // Item vProcessMsg receives the pre-translation mouse packet:
         // command is WM-derived and coordinates are stored at +4/+8.
-        const int px = static_cast<int>(msg.subtype) - s_p.x;
-        const int py = msg.itemId - s_p.y;
-        if (raw_command == 8) {
-            int button = 0;
-            if (PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)) button = 1;
-            else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
-            if (s_p.pressed_button != button) {
-                s_p.pressed_button = button;
-                DrawPanelToBuffer_();
-                if (button != 0)
-                    WriteLog(button == 1
-                        ? "[Panel] 确定按钮原生按下。"
-                        : "[Panel] 取消按钮原生按下。");
-            }
-        } else {
-            const int pressed = s_p.pressed_button;
-            const bool activate = pressed == 1
-                ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
-                : pressed == 2
-                    ? PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)
-                    : false;
-            s_p.pressed_button = 0;
-            DrawPanelToBuffer_();
-            if (activate) {
-                WriteLog(pressed == 1
-                    ? "[Panel] 确定按钮原生松开：关闭设置窗口（暂不提交策略）。"
-                    : "[Panel] 取消按钮原生松开：关闭设置窗口。");
-                CloseSettingsPanel();
-            }
-        }
+        HandlePanelMouseMessage_(raw_command,
+            static_cast<int>(msg.subtype), msg.itemId);
     }
     return panel_was_active ? 1 : 0;
 }
@@ -505,18 +488,22 @@ static void DrawPanelScrollbar_(H3LoadedPcx16* destination)
     destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + 1, SCROLL_W - 2, SCROLL_H - 2,
         (BYTE)35, (BYTE)25, (BYTE)14);
 
+    const bool up_pressed = s_p.scroll_button_pressed == 1;
+    const bool down_pressed = s_p.scroll_button_pressed == 2;
     Fill(destination, SCROLL_X + 2, SCROLL_Y + 2, SCROLL_W - 4, button_size - 3,
-        54, 38, 20);
+        up_pressed ? 104 : 54, up_pressed ? 70 : 38, up_pressed ? 28 : 20);
     Fill(destination, SCROLL_X + 2, SCROLL_Y + SCROLL_H - button_size + 1,
-        SCROLL_W - 4, button_size - 3, 54, 38, 20);
+        SCROLL_W - 4, button_size - 3,
+        down_pressed ? 104 : 54, down_pressed ? 70 : 38, down_pressed ? 28 : 20);
     destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + 1, SCROLL_W - 2, button_size - 1,
         (BYTE)184, (BYTE)139, (BYTE)62);
     destination->DrawFrame(SCROLL_X + 1, SCROLL_Y + SCROLL_H - button_size,
         SCROLL_W - 2, button_size - 1, (BYTE)184, (BYTE)139, (BYTE)62);
     DrawPanelTriangle_(destination, SCROLL_X + SCROLL_W / 2,
-        SCROLL_Y + 5, false, 235, 205, 116);
+        SCROLL_Y + 5 + (up_pressed ? 1 : 0), false, 235, 205, 116);
     DrawPanelTriangle_(destination, SCROLL_X + SCROLL_W / 2,
-        SCROLL_Y + SCROLL_H - button_size + 5, true, 235, 205, 116);
+        SCROLL_Y + SCROLL_H - button_size + 5 + (down_pressed ? 1 : 0),
+        true, 235, 205, 116);
 
     Fill(destination, SCROLL_X + 2, thumb_y, SCROLL_W - 4, button_size,
         max_row > 0 ? 126 : 74, max_row > 0 ? 86 : 52, max_row > 0 ? 36 : 24);
@@ -1065,8 +1052,8 @@ void OpenSettingsPanel_()
     s_p.scroll_row = 0;
     s_p.scroll_dragging = false;
     s_p.scroll_drag_offset = 0;
+    s_p.scroll_button_pressed = 0;
     s_p.pressed_button = 0;
-    s_p.previous_left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     memset(s_p.action, 0, sizeof(s_p.action));
     memset(s_p.target, 0, sizeof(s_p.target));
 
@@ -1112,7 +1099,8 @@ void CloseSettingsPanel()
     s_saw_explanation_dlg_in_battle = false;
     s_autofight_right_press_armed = false;
     s_p.pressed_button = 0;
-    s_p.previous_left_down = false;
+    s_p.scroll_button_pressed = 0;
+    s_p.scroll_dragging = false;
     RemoveBattleInputBlocker_();
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
@@ -1163,30 +1151,52 @@ static bool PointInRect_(int x, int y, int left, int top, int width, int height)
     return x >= left && x < left + width && y >= top && y < top + height;
 }
 
-static void HandlePanelInput_()
+static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y)
 {
-    static bool previous_up_down = false;
-    static bool previous_down_down = false;
-    static bool previous_page_up_down = false;
-    static bool previous_page_down_down = false;
-
-    const H3POINT cursor = H3POINT::GetCursorPosition();
-    const int px = cursor.x - s_p.x;
-    const int py = cursor.y - s_p.y;
-    const SHORT left_state = GetAsyncKeyState(VK_LBUTTON);
-    const bool left_down = (left_state & 0x8000) != 0;
-    const bool left_pressed = left_down && !s_p.previous_left_down;
+    if (!s_p.active) return;
+    const int px = screen_x - s_p.x;
+    const int py = screen_y - s_p.y;
     const int max_row = PanelMaxScrollRow_();
+    const int button_size = PanelScrollButtonSize_();
 
-    if (max_row > 0) {
-        const int button_size = PanelScrollButtonSize_();
-        const int thumb_y = PanelScrollThumbY_();
-        const int free_size = SCROLL_H - 3 * button_size;
+    if (raw_command == 4) {
+        if (s_p.scroll_dragging && max_row > 0) {
+            const int free_size = SCROLL_H - 3 * button_size;
+            int offset = py - s_p.scroll_drag_offset - (SCROLL_Y + button_size);
+            if (offset < 0) offset = 0;
+            if (offset > free_size) offset = free_size;
+            const int row = free_size > 0
+                ? (max_row * offset + free_size / 2) / free_size : 0;
+            if (row != s_p.scroll_row) {
+                SetPanelScrollRow_(row);
+                DrawPanelToBuffer_();
+            }
+        }
+        return;
+    }
 
-        if (left_pressed && PointInRect_(px, py, SCROLL_X, SCROLL_Y, SCROLL_W, SCROLL_H)) {
+    if (raw_command == 8) {
+        int button = 0;
+        if (PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)) button = 1;
+        else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
+        if (button != 0) {
+            s_p.pressed_button = button;
+            DrawPanelToBuffer_();
+            WriteLog(button == 1
+                ? "[Panel] 确定按钮原生按下。"
+                : "[Panel] 取消按钮原生按下。");
+            return;
+        }
+
+        if (max_row > 0
+            && PointInRect_(px, py, SCROLL_X, SCROLL_Y, SCROLL_W, SCROLL_H))
+        {
+            const int thumb_y = PanelScrollThumbY_();
             if (py < SCROLL_Y + button_size) {
+                s_p.scroll_button_pressed = 1;
                 SetPanelScrollRow_(s_p.scroll_row - 1);
             } else if (py >= SCROLL_Y + SCROLL_H - button_size) {
+                s_p.scroll_button_pressed = 2;
                 SetPanelScrollRow_(s_p.scroll_row + 1);
             } else if (py >= thumb_y && py < thumb_y + button_size) {
                 s_p.scroll_dragging = true;
@@ -1196,24 +1206,42 @@ static void HandlePanelInput_()
             } else {
                 SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
             }
+            DrawPanelToBuffer_();
+            return;
         }
 
-        if (s_p.scroll_dragging) {
-            if (left_down) {
-                int offset = py - s_p.scroll_drag_offset - (SCROLL_Y + button_size);
-                if (offset < 0) offset = 0;
-                if (offset > free_size) offset = free_size;
-                const int row = free_size > 0
-                    ? (max_row * offset + free_size / 2) / free_size : 0;
-                SetPanelScrollRow_(row);
-            } else {
-                s_p.scroll_dragging = false;
-            }
-        }
-    } else {
-        s_p.scroll_dragging = false;
-        SetPanelScrollRow_(0);
+        HandlePanelClick(screen_x, screen_y);
+        return;
     }
+
+    if (raw_command == 16) {
+        const int pressed = s_p.pressed_button;
+        const bool activate = pressed == 1
+            ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
+            : pressed == 2
+                ? PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)
+                : false;
+        const bool redraw = pressed != 0 || s_p.scroll_button_pressed != 0
+            || s_p.scroll_dragging;
+        s_p.pressed_button = 0;
+        s_p.scroll_button_pressed = 0;
+        s_p.scroll_dragging = false;
+        if (redraw) DrawPanelToBuffer_();
+        if (activate) {
+            WriteLog(pressed == 1
+                ? "[Panel] 确定按钮原生松开：关闭设置窗口（暂不提交策略）。"
+                : "[Panel] 取消按钮原生松开：关闭设置窗口。");
+            CloseSettingsPanel();
+        }
+    }
+}
+
+static void HandlePanelInput_()
+{
+    static bool previous_up_down = false;
+    static bool previous_down_down = false;
+    static bool previous_page_up_down = false;
+    static bool previous_page_down_down = false;
 
     const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
@@ -1226,10 +1254,6 @@ static void HandlePanelInput_()
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
 
-    if (left_pressed && s_p.pressed_button == 0 && !s_p.scroll_dragging)
-        HandlePanelClick(cursor.x, cursor.y);
-
-    s_p.previous_left_down = left_down;
     previous_up_down = up_down;
     previous_down_down = down_down;
     previous_page_up_down = page_up_down;
