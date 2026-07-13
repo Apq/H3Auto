@@ -7,6 +7,23 @@
 
 static void WriteLog(const char* fmt, ...);
 
+// Fill 和 GetSmallFont 定义在 SettingsDlg.inc.cpp（include 顺序保证先看见）
+void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b);
+H3Font* GetSmallFont();
+
+// 写回全局策略数组
+// g_action/target_strategies 定义在 ConfigLog.inc.cpp
+extern "C" INT g_action_strategies[21];
+extern "C" INT g_target_strategies[21];
+
+// 当 CellData::army_slot_ix >= 0 时，将选中的值写回全局策略数组
+static void SyncStrategyBack_(INT army_slot_ix, int action_id, int target_id)
+{
+    if (army_slot_ix < 0 || army_slot_ix >= 21) return;
+    g_action_strategies[army_slot_ix] = action_id;
+    g_target_strategies[army_slot_ix] = target_id;
+}
+
 // ========================================================================
 // 公共类型（与外部共享）
 // ========================================================================
@@ -23,6 +40,9 @@ struct CellData
     // 策略
     INT     action_id;          // 当前行动策略序号
     INT     target_id;          // 当前目标策略序号
+
+    // 所属阵营槽位（确定按钮提交时需要写回 g_action/target_strategies）
+    INT     army_slot_ix;
 };
 
 // ========================================================================
@@ -377,6 +397,7 @@ static bool CellControl_HitDropdownItem(CellControl* ctrl, CellHitArea area,
                 ctrl->data.action_id = idx;
                 ctrl->action_expanded = false;
                 ctrl->dirty = true;
+                SyncStrategyBack_(ctrl->data.army_slot_ix, ctrl->data.action_id, ctrl->data.target_id);
                 return true;
             }
         }
@@ -387,6 +408,7 @@ static bool CellControl_HitDropdownItem(CellControl* ctrl, CellHitArea area,
                 ctrl->data.target_id = idx;
                 ctrl->target_expanded = false;
                 ctrl->dirty = true;
+                SyncStrategyBack_(ctrl->data.army_slot_ix, ctrl->data.action_id, ctrl->data.target_id);
                 return true;
             }
         }

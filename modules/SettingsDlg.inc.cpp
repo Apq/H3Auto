@@ -92,7 +92,6 @@ static struct Panel {
     int x, y;
     int action[MAX_STACKS];
     int target[MAX_STACKS];
-    int stack_idx[MAX_STACKS];
     int count;
     int scroll_row;
     bool scroll_dragging;
@@ -102,6 +101,7 @@ static struct Panel {
     int saved_cursor_type;
     int saved_cursor_frame;
     int pressed_button;
+    CellControl cells[CELL_COUNT];
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
@@ -1167,32 +1167,13 @@ static void DrawPanelToBuffer_()
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
-        int si = s_p.stack_idx[item_index];
-        RECT cRc = CellRect(i);
-        RECT aRc = ActionBtnRect(i);
-        RECT tRc = TargetBtnRect(i);
-
-        DrawPanelCell_(scr, cRc.left, cRc.top);
-
-        char coord[16] = "--";
-        H3CombatManager* mgr = GetCombatMgr();
-        if (mgr && si >= 0 && si < 21) {
-            int hx = mgr->stacks[0][si].position;
-            if (hx >= 0 && hx < 40)
-                _snprintf(coord, sizeof(coord), "%c%02d", 'A' + (hx % 8), hx / 8 + 1);
+        CellControl* ctrl = &s_p.cells[i];
+        if (ctrl->dirty || !ctrl->buffer)
+            CellControl_DrawToBuffer(ctrl);
+        if (ctrl->buffer && ctrl->buffer->buffer) {
+            RECT cRc = CellRect(i);
+            DrawTransparentPcx_(ctrl->buffer, scr, cRc.left, cRc.top);
         }
-        DrawTxt(scr, fntS, coord, cRc.left + 4, cRc.top + 2, CELL_W - 8, 16,
-            COL_TEXT, eTextAlignment::TOP_LEFT);
-
-        const int action = si >= 0 && si < MAX_STACKS ? s_p.action[si] : AS_MANUAL;
-        const int target = si >= 0 && si < MAX_STACKS ? s_p.target[si] : TS_NONE;
-        DrawTxt(scr, fntS, g_action_labels[action],
-            aRc.left, aRc.top, aRc.right - aRc.left, aRc.bottom - aRc.top,
-            COL_ACTION_TEXT, eTextAlignment::MIDDLE_CENTER);
-
-        DrawTxt(scr, fntS, g_target_labels[target],
-            tRc.left, tRc.top, tRc.right - tRc.left, tRc.bottom - tRc.top,
-            COL_TARGET_TEXT, eTextAlignment::MIDDLE_CENTER);
     }
 
     DrawPanelScrollbar_(scr);
@@ -1236,6 +1217,8 @@ void OpenSettingsPanel_()
     s_p.scroll_drag_offset = 0;
     s_p.scroll_button_pressed = 0;
     s_p.pressed_button = 0;
+    for (int i = 0; i < CELL_COUNT; ++i)
+        CellControl_Init(&s_p.cells[i]);
     memset(s_p.action, 0, sizeof(s_p.action));
     memset(s_p.target, 0, sizeof(s_p.target));
 
@@ -1251,15 +1234,23 @@ void OpenSettingsPanel_()
     if (mgr) {
         for (int i = 0; i < MAX_STACKS && s_p.count < MAX_STACKS; ++i) {
             if (mgr->stacks[0][i].numberAlive > 0) {
-                s_p.stack_idx[s_p.count] = i;
                 s_p.action[i] = g_action_strategies[i];
                 s_p.target[i] = g_target_strategies[i];
+                CellData cd = {};
+                cd.creature_type = mgr->stacks[0][i].type;
+                cd.position      = mgr->stacks[0][i].position;
+                cd.count_alive   = mgr->stacks[0][i].numberAlive;
+                cd.creature_def  = mgr->stacks[0][i].def;
+                cd.action_id     = s_p.action[i];
+                cd.target_id     = s_p.target[i];
+                cd.army_slot_ix  = i;  // 槽位索引，提交时需要
+                if (s_p.count < CELL_COUNT)
+                    CellControl_SetData(&s_p.cells[s_p.count], &cd);
                 ++s_p.count;
             }
         }
     }
     while (s_p.count < TEST_CELL_COUNT) {
-        s_p.stack_idx[s_p.count] = -1;
         ++s_p.count;
     }
     InstallBattleInputBlocker_();
@@ -1306,21 +1297,19 @@ bool IsPanelActive() { return s_p.active; }
 bool HandlePanelClick(int sx, int sy)
 {
     if (!s_p.active) return false;
-    int px = sx - s_p.x, py = sy - s_p.y;
+    const int px = sx - s_p.x, py = sy - s_p.y;
 
     const int first_item = s_p.scroll_row * COLS;
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
-        int si = s_p.stack_idx[item_index];
-        if (si < 0) continue;
-        RECT aRc = ActionBtnRect(i);
-        RECT tRc = TargetBtnRect(i);
-        if (px >= aRc.left && px < aRc.right && py >= aRc.top && py < aRc.bottom) {
-            WriteLog("[Panel] 点击行动按钮 stack=%d", si); return true;
-        }
-        if (px >= tRc.left && px < tRc.right && py >= tRc.top && py < tRc.bottom) {
-            WriteLog("[Panel] 点击目标按钮 stack=%d", si); return true;
+        RECT cRc = CellRect(i);
+        if (!PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H))
+            continue;
+        // 转发到 CellControl（坐标转相对格子的本地坐标）
+        if (CellControl_OnMouse(&s_p.cells[i], 4, px - cRc.left, py - cRc.top)) {
+            DrawPanelToBuffer_();
+            return true;
         }
     }
     return false;
@@ -1394,7 +1383,21 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             return;
         }
 
-        HandlePanelClick(screen_x, screen_y);
+        // ---- 格子单元格点击 ----
+        {
+            const int first_item = s_p.scroll_row * COLS;
+            for (int i = 0; i < CELL_COUNT; ++i) {
+                const int item_index = first_item + i;
+                if (item_index >= s_p.count) break;
+                RECT cRc = CellRect(i);
+                if (PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H)) {
+                    CellControl_OnMouse(&s_p.cells[i], raw_command,
+                        px - cRc.left, py - cRc.top);
+                    DrawPanelToBuffer_();
+                    return;
+                }
+            }
+        }
         return;
     }
 
