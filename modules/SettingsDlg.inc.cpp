@@ -107,6 +107,8 @@ static struct Panel {
     int saved_cursor_type;
     int saved_cursor_frame;
     int pressed_button;
+    int hover_cell;   // 下拉展开时鼠标悬停的格子索引，-1=无
+    int hover_idx;    // 下拉展开时鼠标悬停的项索引，-1=无
     CellControl cells[CELL_COUNT];
 } s_p = {};
 
@@ -1292,6 +1294,7 @@ static void DrawPanelToBuffer_()
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
 
+    // 第一趟：画所有格子本体
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
@@ -1302,31 +1305,38 @@ static void DrawPanelToBuffer_()
             RECT cRc = CellRect(i);
             DrawPanelCell_(scr, cRc.left, cRc.top);
             DrawTransparentPcx_(ctrl->buffer, scr, cRc.left, cRc.top);
-
-            // 绘制展开的下拉项到面板缓冲区
-            if (ctrl->action_expanded) {
-                CellControl_DrawActionDropdownTo(ctrl, scr,
-                    cRc.left, cRc.top, mouse_px - cRc.left, mouse_py - cRc.top);
-                int bottom = cRc.left + CC_COMBO_X
-                    + MAX_ACTION_LABELS * CC_DROPDOWN_ITEM_H;
-                if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
-            }
-            if (ctrl->target_expanded) {
-                const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
-                CellControl_DrawTargetDropdownTo(ctrl, scr,
-                    cRc.left, cRc.top,
-                    mouse_px - cRc.left, mouse_py - cRc.top,
-                    expand_up);
-                int bottom = expand_up
-                    ? cRc.top + CC_ROW2_Y
-                    : cRc.top + CC_ROW2_Y + CC_ROW_H
-                        + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
-                if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
-            }
         }
     }
 
     DrawPanelScrollbar_(scr);
+
+    // 第二趟：单独画展开的下拉项，确保覆盖在所有格子和滚动条之上（层级最高）
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        const int item_index = first_item + i;
+        if (item_index >= s_p.count) break;
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->buffer || !ctrl->buffer->buffer) continue;
+        RECT cRc = CellRect(i);
+        if (ctrl->action_expanded) {
+            CellControl_DrawActionDropdownTo(ctrl, scr,
+                cRc.left, cRc.top, mouse_px - cRc.left, mouse_py - cRc.top);
+            int bottom = cRc.top + CC_ROW1_Y + CC_ROW_H
+                + MAX_ACTION_LABELS * CC_DROPDOWN_ITEM_H;
+            if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
+        }
+        if (ctrl->target_expanded) {
+            const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+            CellControl_DrawTargetDropdownTo(ctrl, scr,
+                cRc.left, cRc.top,
+                mouse_px - cRc.left, mouse_py - cRc.top,
+                expand_up);
+            int bottom = expand_up
+                ? cRc.top + CC_ROW2_Y
+                : cRc.top + CC_ROW2_Y + CC_ROW_H
+                    + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
+            if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
+        }
+    }
 
     // 网格金框：框住 4 行格子 + 右侧滚动条，画在格子/滚动条之上（仅金色边框，
     // 内部青色键透明，不遮挡内容）。与其它边框资源同款算法。
@@ -1377,6 +1387,8 @@ void OpenSettingsPanel_()
     s_p.scroll_dragging = false;
     s_p.scroll_drag_offset = 0;
     s_p.scroll_button_pressed = 0;
+    s_p.hover_cell = -1;
+    s_p.hover_idx = -1;
     s_p.pressed_button = 0;
     for (int i = 0; i < CELL_COUNT; ++i)
         CellControl_Init(&s_p.cells[i]);
@@ -1512,6 +1524,44 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 SetPanelScrollRow_(row);
                 DrawPanelToBuffer_();
             }
+            return;
+        }
+        // 下拉展开时，鼠标移动立即重绘以刷新悬停高亮（无延迟）。
+        // 只在悬停项变化时重绘，避免每像素重绘。
+        {
+            const int first_item = s_p.scroll_row * COLS;
+            int new_hover_cell = -1, new_hover_idx = -1;
+            for (int i = 0; i < CELL_COUNT; ++i) {
+                const int item_index = first_item + i;
+                if (item_index >= s_p.count) break;
+                CellControl* ctrl = &s_p.cells[i];
+                if (!ctrl->action_expanded && !ctrl->target_expanded) continue;
+                RECT cRc = CellRect(i);
+                const int lx = px - cRc.left;
+                const int ly = py - cRc.top;
+                if (lx < CC_COMBO_X || lx >= CC_COMBO_X + CC_COMBO_W) { new_hover_cell = -1; new_hover_idx = -1; break; }
+                if (ctrl->action_expanded) {
+                    const int rel_y = ly - (CC_ROW1_Y + CC_ROW_H);
+                    int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
+                    if (idx < 0 || idx >= MAX_ACTION_LABELS) idx = -1;
+                    new_hover_cell = i; new_hover_idx = idx;
+                } else {
+                    const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+                    const int list_top = expand_up
+                        ? CC_ROW2_Y - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H
+                        : CC_ROW2_Y + CC_ROW_H;
+                    const int rel_y = ly - list_top;
+                    int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
+                    if (idx < 0 || idx >= MAX_TARGET_LABELS) idx = -1;
+                    new_hover_cell = i; new_hover_idx = idx;
+                }
+                break;
+            }
+            if (new_hover_cell != s_p.hover_cell || new_hover_idx != s_p.hover_idx) {
+                s_p.hover_cell = new_hover_cell;
+                s_p.hover_idx = new_hover_idx;
+                DrawPanelToBuffer_();
+            }
         }
         return;
     }
@@ -1559,7 +1609,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     CellControl* ctrl = &s_p.cells[i];
                     // 目标下拉是否向上展开：取决于格子底部是否够放下4项
                     const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
-                    if (CellControl_OnMouse(ctrl, raw_command,
+                    // 面板按下(raw 8) → 格子按下(4)，触发下拉展开/收起
+                    if (CellControl_OnMouse(ctrl, 4,
                             px - cRc.left, py - cRc.top, expand_up)) {
                         DrawPanelToBuffer_();
                         return;
@@ -1585,6 +1636,26 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         if (redraw) DrawPanelToBuffer_();
         if (activate) {
             CloseSettingsPanel();
+            return;
+        }
+
+        // 面板松开(raw 16) → 格子松开(8)，选中展开的下拉项
+        {
+            const int first_item = s_p.scroll_row * COLS;
+            for (int i = 0; i < CELL_COUNT; ++i) {
+                const int item_index = first_item + i;
+                if (item_index >= s_p.count) break;
+                RECT cRc = CellRect(i);
+                if (PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H)) {
+                    CellControl* ctrl = &s_p.cells[i];
+                    const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+                    if (CellControl_OnMouse(ctrl, 8,
+                            px - cRc.left, py - cRc.top, expand_up)) {
+                        DrawPanelToBuffer_();
+                        return;
+                    }
+                }
+            }
         }
     }
 }

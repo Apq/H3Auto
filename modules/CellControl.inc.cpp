@@ -306,23 +306,17 @@ static void CellControl_DrawButtonBg(H3LoadedPcx16* scr, int x, int y, int w, in
 static void CellControl_DrawArrow(H3LoadedPcx16* scr, int x, int y, bool down)
 {
     if (down) {
-        // 向下箭头 ▼
-        Fill(scr, x + 3, y,     1, 1, 235, 205, 116);
-        Fill(scr, x + 2, y + 1, 3, 1, 235, 205, 116);
-        Fill(scr, x + 1, y + 2, 5, 1, 235, 205, 116);
-        Fill(scr, x,     y + 3, 7, 1, 235, 205, 116);
-        Fill(scr, x + 1, y + 4, 5, 1, 235, 205, 116);
-        Fill(scr, x + 2, y + 5, 3, 1, 235, 205, 116);
-        Fill(scr, x + 3, y + 6, 1, 1, 235, 205, 116);
+        // 向下箭头 ▼：顶部最宽，逐行收窄到底部尖
+        Fill(scr, x,     y,     7, 1, 235, 205, 116);
+        Fill(scr, x + 1, y + 1, 5, 1, 235, 205, 116);
+        Fill(scr, x + 2, y + 2, 3, 1, 235, 205, 116);
+        Fill(scr, x + 3, y + 3, 1, 1, 235, 205, 116);
     } else {
-        // 向上箭头 ▲
-        Fill(scr, x + 3, y + 6, 1, 1, 235, 205, 116);
-        Fill(scr, x + 2, y + 5, 3, 1, 235, 205, 116);
-        Fill(scr, x + 1, y + 4, 5, 1, 235, 205, 116);
-        Fill(scr, x,     y + 3, 7, 1, 235, 205, 116);
-        Fill(scr, x + 1, y + 2, 5, 1, 235, 205, 116);
-        Fill(scr, x + 2, y + 1, 3, 1, 235, 205, 116);
+        // 向上箭头 ▲：底部最宽，逐行收窄到顶部尖
         Fill(scr, x + 3, y,     1, 1, 235, 205, 116);
+        Fill(scr, x + 2, y + 1, 3, 1, 235, 205, 116);
+        Fill(scr, x + 1, y + 2, 5, 1, 235, 205, 116);
+        Fill(scr, x,     y + 3, 7, 1, 235, 205, 116);
     }
 }
 
@@ -429,9 +423,9 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     CellControl_DrawText(scr, fntS, action_label,
         CC_COMBO_X + 4, CC_ROW1_Y, CC_COMBO_W - 20, CC_ROW_H,
         0x1A, eTextAlignment::MIDDLE_LEFT);
-    // 箭头向下（收起状态）
+    // 展开时箭头向上，收起时向下
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
-        CC_ROW1_Y + CC_ROW_H / 2 - 3, true);
+        CC_ROW1_Y + CC_ROW_H / 2 - 3, !ctrl->action_expanded);
 
     // ---- 目标下拉框（收起状态）----
     const char* target_label = ctrl->data.target_id >= 0
@@ -442,9 +436,9 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     CellControl_DrawText(scr, fntS, target_label,
         CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 20, CC_ROW_H,
         0x0D, eTextAlignment::MIDDLE_LEFT);
-    // 箭头向下（收起状态）
+    // 展开时箭头向上，收起时向下
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
-        CC_ROW2_Y + CC_ROW_H / 2 - 3, true);
+        CC_ROW2_Y + CC_ROW_H / 2 - 3, !ctrl->target_expanded);
 
     // ---- 第一行：数量标注（右对齐，上移3px）----
     // 文字位置锚定原始图标高度 52，不随金框放大而下移（保持用户设定）
