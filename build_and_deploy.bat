@@ -2,17 +2,22 @@
 setlocal
 
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1"
-if errorlevel 1 goto :error
+if errorlevel 1 (
+    pwsh -c "Write-Host 'Build failed.' -ForegroundColor Red"
+    goto :error
+)
 
 echo Deploying...
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1"
-if errorlevel 1 goto :error
+if errorlevel 1 (
+    pwsh -c "Write-Host 'Deploy failed.' -ForegroundColor Red"
+    goto :error
+)
 
-echo Build and deployment completed.
+pwsh -c "Write-Host 'Build and deployment completed.' -ForegroundColor Green"
 exit /b 0
 
 :error
 echo.
-echo Build or deployment failed. Press any key to close...
-pause >nul
+pause
 exit /b 1
