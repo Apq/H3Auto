@@ -36,6 +36,13 @@ static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * 4;
 static const int MAX_STACKS = 21;
 
+// 网格金框（HA_grid_frame.pcx 624x342），框住 4 行格子 + 右侧滚动条。
+// 内容区 x=36..645, y=70..396；框画在 (29,62)，四周留约 7px。
+static const int GRID_FRAME_W = 624;
+static const int GRID_FRAME_H = 342;
+static const int GRID_FRAME_X = 29;
+static const int GRID_FRAME_Y = 62;
+
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[] = {
     "手动", "防御", "近战攻击", "随机射击", "顺序射击", "循环移动",
@@ -112,8 +119,10 @@ static H3LoadedPcx16* s_panel_ok_pressed = nullptr;
 static H3LoadedPcx16* s_panel_cancel_normal = nullptr;
 static H3LoadedPcx16* s_panel_cancel_pressed = nullptr;
 static H3LoadedPcx16* s_panel_button_frame = nullptr;
+static H3LoadedPcx16* s_panel_grid_frame = nullptr;
 static bool s_panel_background_load_failed = false;
 static bool s_panel_cell_load_failed = false;
+static bool s_panel_grid_frame_load_failed = false;
 static bool s_panel_ok_normal_load_failed = false;
 static bool s_panel_ok_pressed_load_failed = false;
 static bool s_panel_cancel_normal_load_failed = false;
@@ -512,6 +521,12 @@ static H3LoadedPcx16* LoadPanelCell_()
         s_panel_cell, s_panel_cell_load_failed);
 }
 
+static H3LoadedPcx16* LoadPanelGridFrame_()
+{
+    return LoadPanelPcx24_("HA_grid_frame.pcx", GRID_FRAME_W, GRID_FRAME_H,
+        s_panel_grid_frame, s_panel_grid_frame_load_failed);
+}
+
 static bool CopyPanelBackground_(H3LoadedPcx16* destination)
 {
     H3LoadedPcx16* background = LoadPanelBackground_();
@@ -844,6 +859,10 @@ static void ReleasePanelComposite_()
         s_panel_cell->Destroy();
         s_panel_cell = nullptr;
     }
+    if (s_panel_grid_frame) {
+        s_panel_grid_frame->Destroy();
+        s_panel_grid_frame = nullptr;
+    }
     H3LoadedPcx16** button_resources[] = {
         &s_panel_ok_normal, &s_panel_ok_pressed,
         &s_panel_cancel_normal, &s_panel_cancel_pressed,
@@ -857,6 +876,7 @@ static void ReleasePanelComposite_()
     }
     s_panel_background_load_failed = false;
     s_panel_cell_load_failed = false;
+    s_panel_grid_frame_load_failed = false;
     s_panel_ok_normal_load_failed = false;
     s_panel_ok_pressed_load_failed = false;
     s_panel_cancel_normal_load_failed = false;
@@ -1307,6 +1327,15 @@ static void DrawPanelToBuffer_()
     }
 
     DrawPanelScrollbar_(scr);
+
+    // 网格金框：框住 4 行格子 + 右侧滚动条，画在格子/滚动条之上（仅金色边框，
+    // 内部青色键透明，不遮挡内容）。与其它边框资源同款算法。
+    {
+        H3LoadedPcx16* gridFrame = LoadPanelGridFrame_();
+        if (gridFrame)
+            DrawTransparentPcx_(gridFrame, scr, GRID_FRAME_X, GRID_FRAME_Y);
+    }
+
     DrawPanelButtons_(scr);
 
     // Match H3BattleValueInfo's ranged panel: one composite copy to the real
