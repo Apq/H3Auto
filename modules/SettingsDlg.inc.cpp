@@ -124,13 +124,16 @@ static bool s_panel_modal_suspended = false;
 static Patch* s_hover_patch_primary = nullptr;
 static Patch* s_hover_patch_secondary = nullptr;
 
-// HD_SOD.dll 高亮屏蔽（参考队列条定位.md）
-// 高亮的根因在 HD_SOD.dll，不在 Heroes3.exe
+// HD_SOD.dll 高亮屏蔽（参考 docs/队列条定位.md）
+// 高亮总开关 RVA 0x152d14，shown标志 RVA 0x152d18
 static HMODULE s_hd_sod_module = nullptr;
-static int* s_hd_highlight_flag = nullptr;   // RVA 0x152d14: HD.Battle.HighlightOnHover 运行值
-static int* s_hd_shown_flag = nullptr;        // RVA 0x152d18: 高亮已显示标志
+static int* s_hd_highlight_flag = nullptr;
+static int* s_hd_shown_flag = nullptr;
 static int  s_hd_saved_highlight = 0;
 static bool s_hd_hover_blocked = false;
+// HD_SOD 的 FUN_010d9ce0 (RVA 0xD9CE0) 是 HD 的战斗消息钩子
+// 它负责鼠标 hover 高亮更新等处理。ret 12 (C2 0C 00) 直接禁用。
+static Patch* s_hd_msgproc_patch = nullptr;
 
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
@@ -873,9 +876,76 @@ static H3CombatManager* GetCombatMgr()
     return H3CombatManager::Get();
 }
 
-// 面板打开时每帧强制清掉战场悬停状态。
-// HD_SOD.dll 的高亮走自己的数据（0x152d14/0x152d18），
-// 原版的 creatureAtMousePos/mouseCoord 是次要的。
+// HD_SOD.dll 高亮屏蔽（参考 docs/队列条定位.md）
+// 定位 HD 模块和高亮标志地址，只调一次
+static void InitHdHover_()
+{
+    if (s_hd_sod_module) return;
+    s_hd_sod_module = GetModuleHandleA("HD_SOD.dll");
+    if (s_hd_sod_module) {
+        BYTE* base = (BYTE*)s_hd_sod_module;
+        // 文档 RVA 正确：highlight=0x152D14, shown=0x152D18
+        // (之前误用 file offset 当 RVA 导致错误)
+        s_hd_highlight_flag = (int*)(base + 0x152D14);
+        s_hd_shown_flag = (int*)(base + 0x152D18);
+        WriteLog("[Panel] HD_SOD.dll=%p highlight=@%p shown=@%p",
+            (void*)base, (void*)s_hd_highlight_flag, (void*)s_hd_shown_flag);
+    }
+}
+
+// 面板打开时调：保存原值并清零，使 HD 的鼠标移动分支不再更新高亮
+static void BlockHdHover_()
+{
+    InitHdHover_();
+    if (!s_hd_highlight_flag) return;
+    __try {
+        int cur = *s_hd_highlight_flag;
+        int cur_shown = s_hd_shown_flag ? *s_hd_shown_flag : -999;
+        WriteLog("[Panel] HD hover: highlight=%d shown=%d @%p", cur, cur_shown, (void*)s_hd_highlight_flag);
+        if (!s_hd_hover_blocked) {
+            s_hd_saved_highlight = cur;
+            s_hd_hover_blocked = true;
+        }
+        *s_hd_highlight_flag = 0;
+        if (s_hd_shown_flag) *s_hd_shown_flag = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Panel] HD hover 屏蔽异常。");
+    }
+
+    // 直接 patch HD 的战斗消息钩子 FUN_010d9ce0 (RVA 0xD9CE0) 为 ret 12
+    // 这是 HD 挂在原版战斗消息处理上的钩子，负责 hover 高亮更新。
+    // ret 12 (C2 0C 00) 直接跳过整个钩子，高亮不会更新。
+    // 面板关闭时 undo，恢复正常功能。
+    if (_PI && s_hd_sod_module) {
+        if (!s_hd_msgproc_patch) {
+            BYTE* target = (BYTE*)s_hd_sod_module + 0xD9CE0;
+            char ret12[] = "C2 0C 00";
+            s_hd_msgproc_patch = _PI->CreateHexPatch(
+                reinterpret_cast<UINT_PTR>(target), ret12);
+        }
+        if (s_hd_msgproc_patch && !s_hd_msgproc_patch->IsApplied()) {
+            int r = s_hd_msgproc_patch->Apply();
+            WriteLog("[Panel] HD msgproc ret-12 patch result=%d", r);
+        }
+    }
+}
+
+// 面板关闭时调：还原
+static void RestoreHdHover_()
+{
+    if (s_hd_msgproc_patch && s_hd_msgproc_patch->IsApplied())
+        s_hd_msgproc_patch->Undo();
+    if (!s_hd_hover_blocked || !s_hd_highlight_flag) return;
+    __try {
+        *s_hd_highlight_flag = s_hd_saved_highlight;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    s_hd_hover_blocked = false;
+}
+
+// 面板打开时每帧强制清掉战场悬停状态，让 SP 行动顺序条的高亮跟随失效。
+// SP 插件的队列高亮每帧读 creatureAtMousePos(0x132D0) 和 mouseCoord(0x132D4)
+// 重画。游戏鼠标离场时也是把这两个值设成 -1，所以这里直接置 -1，
+// SP 下一帧重算就认为鼠标不在任何单位上，自动清高亮。
 static void ClearBattleHoverState_()
 {
     H3CombatManager* mgr = GetCombatMgr();
@@ -885,93 +955,36 @@ static void ClearBattleHoverState_()
         *reinterpret_cast<INT32*>(base + 0x132D0) = -1; // creatureAtMousePos
         *reinterpret_cast<INT32*>(base + 0x132D4) = -1; // mouseCoord
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    // 同时清零 HD_SOD 的高亮标志
-    if (s_hd_highlight_flag) {
-        __try {
-            *s_hd_highlight_flag = 0;
-            if (s_hd_shown_flag) *s_hd_shown_flag = 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-}
-
-static void InitHdHover_()
-{
-    if (s_hd_sod_module) return;
-    s_hd_sod_module = GetModuleHandleA("HD_SOD.dll");
-    if (s_hd_sod_module) {
-        BYTE* base = (BYTE*)s_hd_sod_module;
-        s_hd_highlight_flag = (int*)(base + 0x152d14);
-        s_hd_shown_flag = (int*)(base + 0x152d18);
-        WriteLog("[Panel] HD_SOD.dll 基址=%p 高亮标志=@%p shown标志=@%p",
-            (void*)base, (void*)s_hd_highlight_flag, (void*)s_hd_shown_flag);
-    } else {
-        WriteLog("[Panel] HD_SOD.dll 未加载，HD 高亮屏蔽不可用。");
-    }
-}
-
-static bool BlockHdHover_()
-{
-    InitHdHover_();
-    if (!s_hd_highlight_flag) return false;
-
-    __try {
-        s_hd_saved_highlight = *s_hd_highlight_flag;
-
-        // 当前有高亮显示时，调 HD 自己的擦除函数（RVA 0xd9610）立即清除
-        // __fastcall: ecx=combatMgr, edx=target(0=擦除)
-        if (s_hd_shown_flag && *s_hd_shown_flag != 0) {
-            BYTE* base = (BYTE*)s_hd_sod_module;
-            typedef void (__fastcall *EraseHighlightFn)(void* mgr, int target);
-            EraseHighlightFn fn = (EraseHighlightFn)(base + 0xd9610);
-            H3CombatManager* mgr = GetCombatMgr();
-            if (mgr) fn(mgr, 0);
-        }
-
-        if (s_hd_shown_flag) *s_hd_shown_flag = 0;
-        *s_hd_highlight_flag = 0;
-        s_hd_hover_blocked = true;
-        WriteLog("[Panel] HD 高亮已屏蔽（saved=%d）。", s_hd_saved_highlight);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Panel] HD 高亮屏蔽异常。");
-        return false;
-    }
-}
-
-static void RestoreHdHover_()
-{
-    if (!s_hd_hover_blocked || !s_hd_highlight_flag) return;
-    __try {
-        *s_hd_highlight_flag = s_hd_saved_highlight;
-        s_hd_hover_blocked = false;
-        WriteLog("[Panel] HD 高亮已恢复（value=%d）。", s_hd_saved_highlight);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static bool BlockBattleHover_()
 {
-    // 首要方案：直接清零 HD_SOD.dll 的高亮开关（根因修复）
-    bool hd_ok = BlockHdHover_();
-
-    // 次要方案：保留原版 hex patch 作为补充（处理非 HD 的原版 hover）
-    if (_PI) {
-        if (!s_hover_patch_primary)
-            s_hover_patch_primary = _PI->CreateHexPatch(0x473E32,
-                const_cast<char*>("83 C4 04 33 C0"));
-        if (!s_hover_patch_secondary)
-            s_hover_patch_secondary = _PI->CreateHexPatch(0x473F55,
-                const_cast<char*>("83 C4 04 33 C0"));
-        if (s_hover_patch_primary && s_hover_patch_secondary) {
-            if (!s_hover_patch_primary->IsApplied())
-                s_hover_patch_primary->Apply();
-            if (!s_hover_patch_secondary->IsApplied())
-                s_hover_patch_secondary->Apply();
-        }
+    if (!_PI) return false;
+    if (!s_hover_patch_primary)
+        s_hover_patch_primary = _PI->CreateHexPatch(0x473E32,
+            const_cast<char*>("83 C4 04 33 C0"));
+    if (!s_hover_patch_secondary)
+        s_hover_patch_secondary = _PI->CreateHexPatch(0x473F55,
+            const_cast<char*>("83 C4 04 33 C0"));
+    if (!s_hover_patch_primary || !s_hover_patch_secondary) {
+        WriteLog("[Panel] 创建战场悬停屏蔽补丁失败。");
+        return false;
     }
 
-    WriteLog("[Panel] 战场悬停处理已屏蔽 hd_ok=%d。", hd_ok ? 1 : 0);
-    return hd_ok;
+    const int first = s_hover_patch_primary->IsApplied()
+        ? 0 : s_hover_patch_primary->Apply();
+    const int second = s_hover_patch_secondary->IsApplied()
+        ? 0 : s_hover_patch_secondary->Apply();
+    if (first < 0 || second < 0) {
+        if (s_hover_patch_primary->IsApplied()) s_hover_patch_primary->Undo();
+        if (s_hover_patch_secondary->IsApplied()) s_hover_patch_secondary->Undo();
+        WriteLog("[Panel] 应用战场悬停屏蔽补丁失败 first=%d second=%d。",
+            first, second);
+        return false;
+    }
+    BlockHdHover_();
+    WriteLog("[Panel] 战场悬停处理已屏蔽。");
+    return true;
 }
 
 static void RestoreBattleHover_()
@@ -1258,8 +1271,14 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
         UpdatePanelModalSuspension_();
         if (s_p.active && !s_panel_modal_suspended) {
             // HD_SOD 每帧都会重新评估高亮，所以每帧都要清零
-            if (s_hd_highlight_flag && !s_panel_modal_suspended) {
+            if (s_hd_highlight_flag) {
                 __try {
+                    static int s_hd_log_cnt = 0;
+                    if (s_hd_log_cnt < 5) {
+                        s_hd_log_cnt++;
+                        WriteLog("[Panel] HD hover per-frame: before clear highlight=%d shown=%d",
+                            *s_hd_highlight_flag, s_hd_shown_flag ? *s_hd_shown_flag : -999);
+                    }
                     *s_hd_highlight_flag = 0;
                     if (s_hd_shown_flag) *s_hd_shown_flag = 0;
                 } __except (EXCEPTION_EXECUTE_HANDLER) {}
