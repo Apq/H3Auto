@@ -187,7 +187,6 @@ static bool CellControl_GetTargetDropdownRect(int cell_panel_x, int cell_panel_y
     if (!out_rc) return false;
 
     int base_x = cell_panel_x + CC_COMBO_X;
-    int base_y; // 下拉项起始 Y
 
     // 向下展开时
     const int down_top = cell_panel_y + CC_ROW2_Y + CC_ROW_H;
