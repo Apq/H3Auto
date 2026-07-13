@@ -58,10 +58,10 @@ static const int CC_CELL_H    = 83;
 static const int CC_ICON_X   = 4;
 static const int CC_ICON_Y   = 4;
 static const int CC_ICON_W   = 58;
-static const int CC_ICON_H   = 58;
+static const int CC_ICON_H   = 52;
 
 // 图标下方标注区域（两行）
-static const int CC_LABEL_H  = 9;   // 每行高度
+static const int CC_LABEL_H  = 11;  // 每行高度
 
 // 右侧控件区域（紧贴左侧图标右边）
 static const int CC_COMBO_X  = CC_ICON_X + CC_ICON_W + 4;  // 66
