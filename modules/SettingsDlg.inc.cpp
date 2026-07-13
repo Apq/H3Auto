@@ -1415,6 +1415,9 @@ void OpenSettingsPanel_()
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
     DrawPanelToBuffer_();
+    // 消费掉打开面板前残留的 ESC/Enter 按键状态，防止首帧误触发关闭
+    GetAsyncKeyState(VK_ESCAPE);
+    GetAsyncKeyState(VK_RETURN);
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
 }
 
@@ -1600,13 +1603,10 @@ static void HandlePanelInput_()
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
-    // GetAsyncKeyState bit0 = 自上次调用以来按键被按过。
-    // 面板帧率低（200ms+ 间隔），纯边沿检测会漏键。
-    // 对 ESC/Enter 用 bit0 确保"按过就生效"，不依赖精确帧时机。
+    // 面板帧率低，用 bit0（自上次调用以来按过）避免漏键
     const SHORT esc_state = GetAsyncKeyState(VK_ESCAPE);
-    const SHORT enter_state = GetAsyncKeyState(VK_RETURN);
-    const bool esc_down = (esc_state & 0x8000) || (esc_state & 0x01);
-    const bool enter_down = (enter_state & 0x8000) || (enter_state & 0x01);
+    const bool esc_down = (esc_state & 0x8000) != 0 || (esc_state & 1) != 0;
+    const bool enter_down = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
     if (!IsGameWindowForeground_()) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
