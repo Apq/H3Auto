@@ -35,7 +35,6 @@ static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
 static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * 4;
 static const int MAX_STACKS = 21;
-static const int TEST_CELL_COUNT = 15;
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[] = {
@@ -613,25 +612,52 @@ static void DrawTransparentPcx_(H3LoadedPcx16* source,
 {
     if (!source || !source->buffer || !destination || !destination->buffer) return;
     const bool mode_32_bit = H3BitMode::Get() == 4;
+    // 格子缓冲区是我们自己用精确清屏色（16-bit 0x7FDF / 32-bit 0xFF00FFFF）
+    // 清空的，所以合成时只跳过这个精确值，不能用金框那套宽松的
+    // green>red||blue>red 判定，否则图标/文字里的冷色像素会被误抠。
     for (int y = 0; y < source->height; ++y) {
         const BYTE* src_row = source->buffer + y * source->scanlineSize;
         BYTE* dst_row = destination->buffer + (dst_y + y) * destination->scanlineSize;
         for (int x = 0; x < source->width; ++x) {
-            int red, green, blue;
             if (mode_32_bit) {
                 const DWORD color = reinterpret_cast<const DWORD*>(src_row)[x];
-                red = (color >> 16) & 0xFF;
-                green = (color >> 8) & 0xFF;
-                blue = color & 0xFF;
-                if (IsPanelCellCyanKey_(red, green, blue)) continue;
+                if ((color & 0x00FFFFFFu) == 0x0000FFFFu) continue; // 精确青色键
                 reinterpret_cast<DWORD*>(dst_row)[dst_x + x] = color;
             } else {
                 const WORD color = reinterpret_cast<const WORD*>(src_row)[x];
-                red = ((color >> 11) & 0x1F) << 3;
-                green = ((color >> 5) & 0x3F) << 2;
-                blue = (color & 0x1F) << 3;
-                if (IsPanelCellCyanKey_(red, green, blue)) continue;
+                if (color == 0x7FDF) continue; // 精确青色键
                 reinterpret_cast<WORD*>(dst_row)[dst_x + x] = color;
+            }
+        }
+    }
+}
+
+// 不透明区块拷贝：把 source 的一个矩形原样拷到 destination（不做任何键色跳过）。
+// 用于图标区——TwCrPort 头像自带实心背景，冷色像素若走 DrawTransparentPcx_
+// 的 green>red||blue>red 判定会被误当透明抠掉，透出面板底图。这里直接不透明贴。
+static void BlitOpaqueRegion_(H3LoadedPcx16* source, H3LoadedPcx16* destination,
+    int src_x, int src_y, int w, int h, int dst_x, int dst_y)
+{
+    if (!source || !source->buffer || !destination || !destination->buffer) return;
+    const bool mode_32_bit = H3BitMode::Get() == 4;
+    for (int y = 0; y < h; ++y) {
+        const int sy = src_y + y;
+        const int dy = dst_y + y;
+        if (sy < 0 || sy >= source->height) continue;
+        if (dy < 0 || dy >= destination->height) continue;
+        const BYTE* src_row = source->buffer + sy * source->scanlineSize;
+        BYTE* dst_row = destination->buffer + dy * destination->scanlineSize;
+        for (int x = 0; x < w; ++x) {
+            const int sx = src_x + x;
+            const int dx = dst_x + x;
+            if (sx < 0 || sx >= source->width) continue;
+            if (dx < 0 || dx >= destination->width) continue;
+            if (mode_32_bit) {
+                reinterpret_cast<DWORD*>(dst_row)[dx] =
+                    reinterpret_cast<const DWORD*>(src_row)[sx];
+            } else {
+                reinterpret_cast<WORD*>(dst_row)[dx] =
+                    reinterpret_cast<const WORD*>(src_row)[sx];
             }
         }
     }
@@ -1162,17 +1188,46 @@ static void DrawPanelToBuffer_()
         px + 20, py + 13, PANEL_W - 40, TITLE_H,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
+    // 计算鼠标在面板上的相对坐标（用于下拉项悬停高亮）
+    H3POINT cursor = H3POINT::GetCursorPosition();
+    const int mouse_px = cursor.x - s_p.x;
+    const int mouse_py = cursor.y - s_p.y;
+
     H3Font* fntS = GetSmallFont();
     const int first_item = s_p.scroll_row * COLS;
+    int max_redraw_bottom = 0; // 记录最下方的重绘边界
+
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
         CellControl* ctrl = &s_p.cells[i];
         if (ctrl->dirty || !ctrl->buffer)
-            CellControl_DrawToBuffer(ctrl);
+            CellControl_DrawCollapsed(ctrl);
         if (ctrl->buffer && ctrl->buffer->buffer) {
             RECT cRc = CellRect(i);
+            DrawPanelCell_(scr, cRc.left, cRc.top);
             DrawTransparentPcx_(ctrl->buffer, scr, cRc.left, cRc.top);
+
+            // 绘制展开的下拉项到面板缓冲区
+            if (ctrl->action_expanded) {
+                CellControl_DrawActionDropdownTo(ctrl, scr,
+                    cRc.left, cRc.top, mouse_px - cRc.left, mouse_py - cRc.top);
+                int bottom = cRc.left + CC_COMBO_X
+                    + MAX_ACTION_LABELS * CC_DROPDOWN_ITEM_H;
+                if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
+            }
+            if (ctrl->target_expanded) {
+                const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+                CellControl_DrawTargetDropdownTo(ctrl, scr,
+                    cRc.left, cRc.top,
+                    mouse_px - cRc.left, mouse_py - cRc.top,
+                    expand_up);
+                int bottom = expand_up
+                    ? cRc.top + CC_ROW2_Y
+                    : cRc.top + CC_ROW2_Y + CC_ROW_H
+                        + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
+                if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
+            }
         }
     }
 
@@ -1189,7 +1244,9 @@ static void DrawPanelToBuffer_()
     if (drawn && o_WndMgr && !s_panel_redraw_in_progress)
     {
         s_panel_redraw_in_progress = true;
-        o_WndMgr->H3Redraw(s_p.x, s_p.y, PANEL_W, PANEL_H);
+        int redraw_h = PANEL_H;
+        if (max_redraw_bottom > redraw_h) redraw_h = max_redraw_bottom;
+        o_WndMgr->H3Redraw(s_p.x, s_p.y, PANEL_W, redraw_h);
         s_panel_redraw_in_progress = false;
     }
 }
@@ -1250,9 +1307,6 @@ void OpenSettingsPanel_()
             }
         }
     }
-    while (s_p.count < TEST_CELL_COUNT) {
-        ++s_p.count;
-    }
     InstallBattleInputBlocker_();
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
@@ -1307,7 +1361,8 @@ bool HandlePanelClick(int sx, int sy)
         if (!PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H))
             continue;
         // 转发到 CellControl（坐标转相对格子的本地坐标）
-        if (CellControl_OnMouse(&s_p.cells[i], 4, px - cRc.left, py - cRc.top)) {
+        const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+        if (CellControl_OnMouse(&s_p.cells[i], 4, px - cRc.left, py - cRc.top, expand_up)) {
             DrawPanelToBuffer_();
             return true;
         }
@@ -1391,10 +1446,14 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 if (item_index >= s_p.count) break;
                 RECT cRc = CellRect(i);
                 if (PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H)) {
-                    CellControl_OnMouse(&s_p.cells[i], raw_command,
-                        px - cRc.left, py - cRc.top);
-                    DrawPanelToBuffer_();
-                    return;
+                    CellControl* ctrl = &s_p.cells[i];
+                    // 目标下拉是否向上展开：取决于格子底部是否够放下4项
+                    const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+                    if (CellControl_OnMouse(ctrl, raw_command,
+                            px - cRc.left, py - cRc.top, expand_up)) {
+                        DrawPanelToBuffer_();
+                        return;
+                    }
                 }
             }
         }
