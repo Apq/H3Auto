@@ -1593,17 +1593,23 @@ static void HandlePanelInput_()
     static bool previous_down_down = false;
     static bool previous_page_up_down = false;
     static bool previous_page_down_down = false;
+    static bool previous_esc = false;
+    static bool previous_enter = false;
 
     const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
+    const bool esc_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    const bool enter_down = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
     if (!IsGameWindowForeground_()) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
         previous_down_down = down_down;
         previous_page_up_down = page_up_down;
         previous_page_down_down = page_down_down;
+        previous_esc = esc_down;
+        previous_enter = enter_down;
         return;
     }
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
@@ -1612,9 +1618,19 @@ static void HandlePanelInput_()
         SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
+    if (esc_down && !previous_esc) {
+        WriteLog("[Panel] ESC 关闭设置窗口。");
+        CloseSettingsPanel();
+    }
+    if (enter_down && !previous_enter) {
+        WriteLog("[Panel] Enter 确认关闭设置窗口。");
+        CloseSettingsPanel();
+    }
 
     previous_up_down = up_down;
     previous_down_down = down_down;
     previous_page_up_down = page_up_down;
     previous_page_down_down = page_down_down;
+    previous_esc = esc_down;
+    previous_enter = enter_down;
 }
