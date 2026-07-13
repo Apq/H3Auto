@@ -1600,8 +1600,13 @@ static void HandlePanelInput_()
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
-    const bool esc_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    const bool enter_down = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    // GetAsyncKeyState bit0 = 自上次调用以来按键被按过。
+    // 面板帧率低（200ms+ 间隔），纯边沿检测会漏键。
+    // 对 ESC/Enter 用 bit0 确保"按过就生效"，不依赖精确帧时机。
+    const SHORT esc_state = GetAsyncKeyState(VK_ESCAPE);
+    const SHORT enter_state = GetAsyncKeyState(VK_RETURN);
+    const bool esc_down = (esc_state & 0x8000) || (esc_state & 0x01);
+    const bool enter_down = (enter_state & 0x8000) || (enter_state & 0x01);
     if (!IsGameWindowForeground_()) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
@@ -1618,13 +1623,16 @@ static void HandlePanelInput_()
         SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
-    if (esc_down && !previous_esc) {
-        WriteLog("[Panel] ESC 关闭设置窗口。");
+    if (esc_down) {
+        WriteLog("[Panel] ESC pressed, closing.");
         CloseSettingsPanel();
+        return;
     }
     if (enter_down && !previous_enter) {
-        WriteLog("[Panel] Enter 确认关闭设置窗口。");
+        WriteLog("[Panel] Enter pressed, closing.");
         CloseSettingsPanel();
+        previous_enter = true;
+        return;
     }
 
     previous_up_down = up_down;
