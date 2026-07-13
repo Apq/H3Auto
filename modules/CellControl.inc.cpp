@@ -11,6 +11,15 @@ static void WriteLog(const char* fmt, ...);
 // Fill 和 GetSmallFont 定义在 SettingsDlg.inc.cpp（include 顺序保证先看见）
 void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b);
 H3Font* GetSmallFont();
+// PCX 加载/透明绘制定义在 SettingsDlg.inc.cpp（同一编译单元，前向声明即可）
+static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width,
+    int expected_height, H3LoadedPcx16*& cache, bool& load_failed);
+static void DrawTransparentPcx_(H3LoadedPcx16* source,
+    H3LoadedPcx16* destination, int dst_x, int dst_y);
+
+// 图标金框（HA_icon_frame.pcx，60x54，包住 58x52 图标区，每边 +1px）
+static H3LoadedPcx16* s_cc_icon_frame = nullptr;
+static bool s_cc_icon_frame_load_failed = false;
 
 // 写回全局策略数组
 // g_action/target_strategies 定义在 ConfigLog.inc.cpp
@@ -58,7 +67,10 @@ static const int CC_CELL_H    = 83;
 static const int CC_ICON_X   = 4;
 static const int CC_ICON_Y   = 4;
 static const int CC_ICON_W   = 58;
-static const int CC_ICON_H   = 52;
+static const int CC_ICON_H   = 64;
+// 图标金框（HA_icon_frame.pcx 60x66），画在图标区外扩 1px 处
+static const int CC_ICON_FRAME_W = 60;
+static const int CC_ICON_FRAME_H = 66;
 
 // 图标下方标注区域（两行）
 static const int CC_LABEL_H  = 11;  // 每行高度
@@ -372,6 +384,13 @@ static void CellControl_DrawCreatureIcon(CellControl* ctrl, H3LoadedPcx16* scr)
         Fill(scr, CC_ICON_X, CC_ICON_Y, CC_ICON_W, CC_ICON_H, 0, 0, 0);
         def->DrawToPcx16(group, frame, scr, CC_ICON_X, CC_ICON_Y);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    // 画金框，包住图标区（外扩 1px，60x54 画在 (CC_ICON_X-1, CC_ICON_Y-1)）
+    H3LoadedPcx16* frameImg = LoadPanelPcx24_("HA_icon_frame.pcx",
+        CC_ICON_FRAME_W, CC_ICON_FRAME_H, s_cc_icon_frame, s_cc_icon_frame_load_failed);
+    if (frameImg) {
+        DrawTransparentPcx_(frameImg, scr, CC_ICON_X - 1, CC_ICON_Y - 1);
+    }
 }
 
 // ========================================================================
@@ -428,6 +447,10 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         CC_ROW2_Y + CC_ROW_H / 2 - 3, true);
 
     // ---- 第一行：数量标注（右对齐，上移3px）----
+    // 文字位置锚定原始图标高度 52，不随金框放大而下移（保持用户设定）
+    const int label_row1_y = CC_ICON_Y + 52 + 1 - 3;               // 54
+    const int label_row2_y = CC_ICON_Y + 52 + 1 + CC_LABEL_H - 1;  // 67
+
     char count_buf[16] = {};
     if (ctrl->data.count_alive > 0) {
         _snprintf(count_buf, sizeof(count_buf), "%d", ctrl->data.count_alive);
@@ -435,14 +458,14 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         strncpy(count_buf, "--", sizeof(count_buf) - 1);
     }
     CellControl_DrawText(scr, fntS, count_buf,
-        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 - 3, CC_ICON_W, CC_LABEL_H,
+        CC_ICON_X, label_row1_y, CC_ICON_W, CC_LABEL_H,
         0x01, eTextAlignment::TOP_RIGHT);
 
     // ---- 第二行：位置标注（左对齐，上移1px）----
     char pos_buf[8] = {};
     CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
     CellControl_DrawText(scr, fntS, pos_buf,
-        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 + CC_LABEL_H - 1, CC_ICON_W, CC_LABEL_H,
+        CC_ICON_X, label_row2_y, CC_ICON_W, CC_LABEL_H,
         0x01, eTextAlignment::TOP_LEFT);
 
     ctrl->dirty = false;
