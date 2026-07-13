@@ -1,15 +1,18 @@
 @echo off
+setlocal
+
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1"
-if %errorlevel% neq 0 goto error
+if errorlevel 1 goto :error
 
-echo 开始部署...
+echo Deploying...
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1"
-if %errorlevel% neq 0 goto error
+if errorlevel 1 goto :error
 
-echo 编译并部署完成！
+echo Build and deployment completed.
 exit /b 0
 
 :error
-echo 编译或部署失败！
-pause
+echo.
+echo Build or deployment failed. Press any key to close...
+pause >nul
 exit /b 1
