@@ -1603,9 +1603,7 @@ static void HandlePanelInput_()
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
-    // 面板帧率低，用 bit0（自上次调用以来按过）避免漏键
-    const SHORT esc_state = GetAsyncKeyState(VK_ESCAPE);
-    const bool esc_down = (esc_state & 0x8000) != 0 || (esc_state & 1) != 0;
+    const bool esc_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     const bool enter_down = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
     if (!IsGameWindowForeground_()) {
         CancelPanelTransientInput_();
@@ -1623,9 +1621,10 @@ static void HandlePanelInput_()
         SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
-    if (esc_down) {
+    if (esc_down && !previous_esc) {
         WriteLog("[Panel] ESC pressed, closing.");
         CloseSettingsPanel();
+        previous_esc = true;
         return;
     }
     if (enter_down && !previous_enter) {
