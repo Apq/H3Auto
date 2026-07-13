@@ -60,8 +60,8 @@ static const int CC_ICON_Y   = 4;
 static const int CC_ICON_W   = 58;
 static const int CC_ICON_H   = 58;
 
-// 图标下方标注区域高度
-static const int CC_LABEL_H  = 12;
+// 图标下方标注区域（两行）
+static const int CC_LABEL_H  = 9;   // 每行高度
 
 // 右侧控件区域（紧贴左侧图标右边）
 static const int CC_COMBO_X  = CC_ICON_X + CC_ICON_W + 4;  // 66
@@ -427,14 +427,14 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
         CC_ROW2_Y + CC_ROW_H / 2 - 3, true);
 
-    // ---- 位置标注（左下角，图标底部）----
+    // ---- 第一行：位置标注（左对齐）----
     char pos_buf[8] = {};
     CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
     CellControl_DrawText(scr, fntS, pos_buf,
         CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1, CC_ICON_W, CC_LABEL_H,
-        0x01, eTextAlignment::BOTTOM_LEFT);
+        0x01, eTextAlignment::TOP_LEFT);
 
-    // ---- 数量标注（图标右下角）----
+    // ---- 第二行：数量标注（右对齐）----
     char count_buf[16] = {};
     if (ctrl->data.count_alive > 0) {
         _snprintf(count_buf, sizeof(count_buf), "%d", ctrl->data.count_alive);
@@ -442,8 +442,8 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         strncpy(count_buf, "--", sizeof(count_buf) - 1);
     }
     CellControl_DrawText(scr, fntS, count_buf,
-        CC_ICON_X, CC_ICON_Y + CC_ICON_H - CC_LABEL_H - 1, CC_ICON_W, CC_LABEL_H,
-        0x01, eTextAlignment::BOTTOM_RIGHT);
+        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 + CC_LABEL_H, CC_ICON_W, CC_LABEL_H,
+        0x01, eTextAlignment::TOP_RIGHT);
 
     ctrl->dirty = false;
 }
