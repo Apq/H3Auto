@@ -130,7 +130,6 @@ static Patch* s_hd_msgproc_patch = nullptr;
 
 // 面板打开时安装 WH_KEYBOARD 钩子，立即响应 ESC/Enter，不依赖游戏帧率
 static HHOOK s_kb_hook = nullptr;
-static UINT_PTR s_kb_hook_timer = 0;
 
 static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 {
@@ -138,9 +137,7 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         && !(lParam & 0x80000000))  // keydown only
     {
         if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
-            WriteLog("[Panel] %s keydown via hook, closing.",
-                wParam == VK_ESCAPE ? "ESC" : "Enter");
-            CloseSettingsPanel();
+                CloseSettingsPanel();
             return 1;  // swallow the key
         }
     }
@@ -1271,16 +1268,9 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
     (void)h;
-    static int s_diag = 0;
     if (s_p.active && !s_panel_modal_suspended) {
         __try {
             int* msg = *reinterpret_cast<int**>(c->esp + 4);
-            if (s_diag < 40) {
-                s_diag++;
-                WriteLog("[MsgProc] hook 命中 msg=%p type=%d x=%d y=%d",
-                    (void*)msg, msg ? msg[0] : -999,
-                    msg ? msg[4] : -999, msg ? msg[5] : -999);
-            }
             if (msg && msg[0] == 4) {   // 鼠标移动
                 msg[4] = -1000;         // x 离屏
                 msg[5] = -1000;         // y 离屏
@@ -1434,9 +1424,6 @@ void OpenSettingsPanel_()
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
     DrawPanelToBuffer_();
-    // 消费掉打开面板前残留的 ESC/Enter 按键状态，防止首帧误触发关闭
-    GetAsyncKeyState(VK_ESCAPE);
-    GetAsyncKeyState(VK_RETURN);
     // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
     if (!s_kb_hook)
         s_kb_hook = SetWindowsHookExA(WH_KEYBOARD, PanelKbHook_, g_hModule,
