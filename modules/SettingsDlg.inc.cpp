@@ -1240,13 +1240,6 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     (void)h; (void)c;
     static int s_frame = 0;
     s_frame++;
-    // 每30帧输出一次心跳日志
-    if (s_frame % 30 == 0) {
-        H3BaseDlg* top = o_WndMgr ? o_WndMgr->lastDlg : nullptr;
-        UINT vtable = top ? *(UINT*)top : 0;
-        WriteLog("[Blt] frame=%d last_vtable=0x%08X explanation=%d panel=%d",
-            s_frame, vtable, s_saw_explanation_dlg_in_battle, s_p.active);
-    }
     CheckAutoFightDialogClosed();
     if (s_p.active) {
         ForcePanelModalDepth_(true);
