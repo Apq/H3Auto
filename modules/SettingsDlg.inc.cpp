@@ -124,15 +124,8 @@ static bool s_panel_modal_suspended = false;
 static Patch* s_hover_patch_primary = nullptr;
 static Patch* s_hover_patch_secondary = nullptr;
 
-// HD_SOD.dll 高亮屏蔽（参考 docs/队列条定位.md）
-// 高亮总开关 RVA 0x152d14，shown标志 RVA 0x152d18
+// HD_SOD.dll 高亮屏蔽：patch HD 战斗消息钩子 FUN_010d9ce0 (RVA 0xD9CE0) 为 ret 12
 static HMODULE s_hd_sod_module = nullptr;
-static int* s_hd_highlight_flag = nullptr;
-static int* s_hd_shown_flag = nullptr;
-static int  s_hd_saved_highlight = 0;
-static bool s_hd_hover_blocked = false;
-// HD_SOD 的 FUN_010d9ce0 (RVA 0xD9CE0) 是 HD 的战斗消息钩子
-// 它负责鼠标 hover 高亮更新等处理。ret 12 (C2 0C 00) 直接禁用。
 static Patch* s_hd_msgproc_patch = nullptr;
 
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
@@ -876,57 +869,35 @@ static H3CombatManager* GetCombatMgr()
     return H3CombatManager::Get();
 }
 
-// HD_SOD.dll 高亮屏蔽（参考 docs/队列条定位.md）
-// 定位 HD 模块和高亮标志地址，只调一次
+// 定位 HD_SOD.dll 模块基址，只调一次
 static void InitHdHover_()
 {
     if (s_hd_sod_module) return;
     s_hd_sod_module = GetModuleHandleA("HD_SOD.dll");
     if (s_hd_sod_module) {
-        BYTE* base = (BYTE*)s_hd_sod_module;
-        // 文档 RVA 正确：highlight=0x152D14, shown=0x152D18
-        // (之前误用 file offset 当 RVA 导致错误)
-        s_hd_highlight_flag = (int*)(base + 0x152D14);
-        s_hd_shown_flag = (int*)(base + 0x152D18);
-        WriteLog("[Panel] HD_SOD.dll=%p highlight=@%p shown=@%p",
-            (void*)base, (void*)s_hd_highlight_flag, (void*)s_hd_shown_flag);
+        WriteLog("[Panel] HD_SOD.dll=%p", (void*)s_hd_sod_module);
     }
 }
 
-// 面板打开时调：保存原值并清零，使 HD 的鼠标移动分支不再更新高亮
+// 面板打开时调：patch HD 消息钩子为 ret 12，屏蔽 hover 高亮更新
 static void BlockHdHover_()
 {
     InitHdHover_();
-    if (!s_hd_highlight_flag) return;
-    __try {
-        int cur = *s_hd_highlight_flag;
-        int cur_shown = s_hd_shown_flag ? *s_hd_shown_flag : -999;
-        WriteLog("[Panel] HD hover: highlight=%d shown=%d @%p", cur, cur_shown, (void*)s_hd_highlight_flag);
-        if (!s_hd_hover_blocked) {
-            s_hd_saved_highlight = cur;
-            s_hd_hover_blocked = true;
-        }
-        *s_hd_highlight_flag = 0;
-        if (s_hd_shown_flag) *s_hd_shown_flag = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Panel] HD hover 屏蔽异常。");
-    }
+    if (!s_hd_sod_module) return;
 
     // 直接 patch HD 的战斗消息钩子 FUN_010d9ce0 (RVA 0xD9CE0) 为 ret 12
     // 这是 HD 挂在原版战斗消息处理上的钩子，负责 hover 高亮更新。
     // ret 12 (C2 0C 00) 直接跳过整个钩子，高亮不会更新。
     // 面板关闭时 undo，恢复正常功能。
-    if (_PI && s_hd_sod_module) {
+    if (_PI) {
         if (!s_hd_msgproc_patch) {
             BYTE* target = (BYTE*)s_hd_sod_module + 0xD9CE0;
             char ret12[] = "C2 0C 00";
             s_hd_msgproc_patch = _PI->CreateHexPatch(
                 reinterpret_cast<UINT_PTR>(target), ret12);
         }
-        if (s_hd_msgproc_patch && !s_hd_msgproc_patch->IsApplied()) {
-            int r = s_hd_msgproc_patch->Apply();
-            WriteLog("[Panel] HD msgproc ret-12 patch result=%d", r);
-        }
+        if (s_hd_msgproc_patch && !s_hd_msgproc_patch->IsApplied())
+            s_hd_msgproc_patch->Apply();
     }
 }
 
@@ -935,11 +906,6 @@ static void RestoreHdHover_()
 {
     if (s_hd_msgproc_patch && s_hd_msgproc_patch->IsApplied())
         s_hd_msgproc_patch->Undo();
-    if (!s_hd_hover_blocked || !s_hd_highlight_flag) return;
-    __try {
-        *s_hd_highlight_flag = s_hd_saved_highlight;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    s_hd_hover_blocked = false;
 }
 
 // 面板打开时每帧强制清掉战场悬停状态，让 SP 行动顺序条的高亮跟随失效。
@@ -1270,19 +1236,6 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
         ForcePanelModalDepth_(true);
         UpdatePanelModalSuspension_();
         if (s_p.active && !s_panel_modal_suspended) {
-            // HD_SOD 每帧都会重新评估高亮，所以每帧都要清零
-            if (s_hd_highlight_flag) {
-                __try {
-                    static int s_hd_log_cnt = 0;
-                    if (s_hd_log_cnt < 5) {
-                        s_hd_log_cnt++;
-                        WriteLog("[Panel] HD hover per-frame: before clear highlight=%d shown=%d",
-                            *s_hd_highlight_flag, s_hd_shown_flag ? *s_hd_shown_flag : -999);
-                    }
-                    *s_hd_highlight_flag = 0;
-                    if (s_hd_shown_flag) *s_hd_shown_flag = 0;
-                } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            }
             HandlePanelInput_();
             DrawPanelToBuffer_();
             ForcePanelDefaultCursor_();
