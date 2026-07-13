@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 $gameDir = 'D:\Heroes3\Heroes3_2026.05.01'
 $packsDst = "$gameDir\_HD3_Data\Packs\战场自动化"
 $src = "$PSScriptRoot\Release"
@@ -21,6 +21,6 @@ try {
 
     Write-Host "已部署到 $packsDst"
 } catch {
-    Write-Host "Deploy error: $_"
+    Write-Host "部署错误: $_"
     exit 1
 }
