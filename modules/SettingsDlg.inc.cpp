@@ -527,20 +527,15 @@ static bool CopyPanelBackground_(H3LoadedPcx16* destination)
     return true;
 }
 
-static bool IsPanelCellCyanKey_(int red, int green, int blue)
-{
-    // HA_cell.pcx uses cyan as a transparency matte. Its antialiased edge is
-    // blended with that matte, including low-saturation green edge pixels.
-    // The actual frame is gold/brown and therefore always red-dominant.
-    return green > red || blue > red;
-}
-
 static void DrawPanelCell_(H3LoadedPcx16* destination, int dst_x, int dst_y)
 {
     H3LoadedPcx16* cell = LoadPanelCell_();
     if (!cell || !cell->buffer || !destination || !destination->buffer)
         return;
 
+    // HA_cell.pcx 现在是统一金色 2px 边框 + 精确青色键内部，
+    // 与其它边框资源一致，直接用精确青色键判定即可
+    // （32-bit 0x0000FFFF / 16-bit 0x7FDF），不再需要宽松的 red-dominant 判定。
     const bool mode_32_bit = H3BitMode::Get() == 4;
     for (int y = 0; y < CELL_H; ++y) {
         BYTE* dst_row = destination->buffer + (dst_y + y) * destination->scanlineSize;
@@ -550,22 +545,16 @@ static void DrawPanelCell_(H3LoadedPcx16* destination, int dst_x, int dst_y)
             const DWORD* src = reinterpret_cast<const DWORD*>(src_row);
             for (int x = 0; x < CELL_W; ++x) {
                 const DWORD color = src[x];
-                const int red = (color >> 16) & 0xFF;
-                const int green = (color >> 8) & 0xFF;
-                const int blue = color & 0xFF;
-                if (!IsPanelCellCyanKey_(red, green, blue))
-                    dst[x] = src[x];
+                if ((color & 0x00FFFFFFu) == 0x0000FFFFu) continue; // 精确青色键
+                dst[x] = color;
             }
         } else {
             WORD* dst = reinterpret_cast<WORD*>(dst_row) + dst_x;
             const WORD* src = reinterpret_cast<const WORD*>(src_row);
             for (int x = 0; x < CELL_W; ++x) {
                 const WORD color = src[x];
-                const int red = ((color >> 11) & 0x1F) << 3;
-                const int green = ((color >> 5) & 0x3F) << 2;
-                const int blue = (color & 0x1F) << 3;
-                if (!IsPanelCellCyanKey_(red, green, blue))
-                    dst[x] = src[x];
+                if (color == 0x7FDF) continue; // 精确青色键
+                dst[x] = color;
             }
         }
     }
