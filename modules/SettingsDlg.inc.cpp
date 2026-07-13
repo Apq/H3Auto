@@ -497,7 +497,6 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
         }
     }
     free(raw);
-    WriteLog("[Panel] PCX 资源加载成功：%s (%dx%d)。", path, width, height);
     return cache;
 }
 
@@ -1156,19 +1155,6 @@ static void CheckAutoFightDialogClosed()
     H3BaseDlg* combat_dlg = FindDialogByVtable_(s_combat_dialog_vtable);
     INT32 cursor_item_id = GetBattleItemUnderCursor_(combat_dlg);
 
-    // 只在窗口链实际变化时记录，避免每帧刷日志。
-    static UINT s_logged_first_vtable = 0;
-    static UINT s_logged_last_vtable = 0;
-    if (first_vtable != s_logged_first_vtable || last_vtable != s_logged_last_vtable) {
-        WriteLog("[Dlg] 切换 first=0x%08X(vt=0x%08X) last=0x%08X(vt=0x%08X,w=%d,h=%d) cursorItem=0x%X rbutton=%d",
-            (UINT)(INT_PTR)first, first_vtable,
-            (UINT)(INT_PTR)last, last_vtable, last_w, last_h,
-            cursor_item_id,
-            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
-        s_logged_first_vtable = first_vtable;
-        s_logged_last_vtable = last_vtable;
-    }
-
     const bool battle_ui_exists = combat_dlg != nullptr;
     const bool right_button_down = IsGameMouseInputActive_()
         && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
@@ -1191,19 +1177,13 @@ static void CheckAutoFightDialogClosed()
         && !s_autofight_right_press_armed
         && last != s_logged_unarmed_explanation)
     {
-        const H3POINT cursor = H3POINT::GetCursorPosition();
-        WriteLog("[AutoFight] 说明框出现但尚未命中目标按钮 cursor=(%d,%d) cursorItem=0x%X rbutton=%d。",
-            cursor.x, cursor.y, cursor_item_id, right_button_down);
         s_logged_unarmed_explanation = last;
     } else if (last_vtable != s_right_click_dialog_vtable) {
         s_logged_unarmed_explanation = nullptr;
     }
 
     if (battle_ui_exists) {
-        s_battle_ui_missing_frames = 0;
     } else if (++s_battle_ui_missing_frames >= 3) {
-        if (s_saw_explanation_dlg_in_battle || s_panel_popup_done)
-            WriteLog("[State] BattleUI 已离开，重置说明框状态。");
         s_saw_explanation_dlg_in_battle = false;
         s_autofight_right_press_armed = false;
         s_panel_popup_done = false;
@@ -1525,9 +1505,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         if (button != 0) {
             s_p.pressed_button = button;
             DrawPanelToBuffer_();
-            WriteLog(button == 1
-                ? "[Panel] 确定按钮原生按下。"
-                : "[Panel] 取消按钮原生按下。");
             return;
         }
 
@@ -1589,9 +1566,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         s_p.scroll_dragging = false;
         if (redraw) DrawPanelToBuffer_();
         if (activate) {
-            WriteLog(pressed == 1
-                ? "[Panel] 确定按钮原生松开：关闭设置窗口（暂不提交策略）。"
-                : "[Panel] 取消按钮原生松开：关闭设置窗口。");
             CloseSettingsPanel();
         }
     }
