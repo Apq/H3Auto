@@ -427,14 +427,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
         CC_ROW2_Y + CC_ROW_H / 2 - 3, true);
 
-    // ---- 第一行：位置标注（左对齐）----
-    char pos_buf[8] = {};
-    CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
-    CellControl_DrawText(scr, fntS, pos_buf,
-        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1, CC_ICON_W, CC_LABEL_H,
-        0x01, eTextAlignment::TOP_LEFT);
-
-    // ---- 第二行：数量标注（右对齐）----
+    // ---- 第一行：数量标注（右对齐，上移3px）----
     char count_buf[16] = {};
     if (ctrl->data.count_alive > 0) {
         _snprintf(count_buf, sizeof(count_buf), "%d", ctrl->data.count_alive);
@@ -442,8 +435,15 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         strncpy(count_buf, "--", sizeof(count_buf) - 1);
     }
     CellControl_DrawText(scr, fntS, count_buf,
-        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 + CC_LABEL_H, CC_ICON_W, CC_LABEL_H,
+        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 - 3, CC_ICON_W, CC_LABEL_H,
         0x01, eTextAlignment::TOP_RIGHT);
+
+    // ---- 第二行：位置标注（左对齐，上移1px）----
+    char pos_buf[8] = {};
+    CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
+    CellControl_DrawText(scr, fntS, pos_buf,
+        CC_ICON_X, CC_ICON_Y + CC_ICON_H + 1 + CC_LABEL_H - 1, CC_ICON_W, CC_LABEL_H,
+        0x01, eTextAlignment::TOP_LEFT);
 
     ctrl->dirty = false;
 }
