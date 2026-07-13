@@ -37,12 +37,50 @@ static const int CELL_COUNT = COLS * 4;
 static const int MAX_STACKS = 21;
 static const int TEST_CELL_COUNT = 15;
 
-static const char* g_action_labels[] = {
+// 硬编码默认标签（INI 加载失败时使用）
+static const char* DEFAULT_ACTION_LABELS[] = {
     "手动", "防御", "近战攻击", "随机射击", "顺序射击", "循环移动",
 };
-static const char* g_target_labels[] = {
+static const char* DEFAULT_TARGET_LABELS[] = {
     "无", "指定位置", "远程和高速优先", "数量优先",
 };
+
+// 运行时标签（从 H3Auto_labels.txt 加载）
+static const char* g_action_labels[6] = {};
+static const char* g_target_labels[4] = {};
+static char g_panel_title[64] = {};
+static bool g_labels_loaded = false;
+
+// 从 H3Auto_labels.txt 加载所有标签
+static void LoadLabels_(const char* ini_path)
+{
+    if (g_labels_loaded) return;
+    g_labels_loaded = true;
+    for (int i = 0; i < 6; i++) {
+        char key[8] = {};
+        char buf[64] = {};
+        sprintf(key, "%d", i);
+        GetPrivateProfileStringA("Action", key, DEFAULT_ACTION_LABELS[i],
+            buf, sizeof(buf), ini_path);
+        static char storage_action[6][64] = {};
+        strncpy(storage_action[i], buf, 63);
+        g_action_labels[i] = storage_action[i];
+    }
+    for (int i = 0; i < 4; i++) {
+        char key[8] = {};
+        char buf[64] = {};
+        sprintf(key, "%d", i);
+        GetPrivateProfileStringA("Target", key, DEFAULT_TARGET_LABELS[i],
+            buf, sizeof(buf), ini_path);
+        static char storage_target[4][64] = {};
+        strncpy(storage_target[i], buf, 63);
+        g_target_labels[i] = storage_target[i];
+    }
+    WriteLog("[Panel] 标签已从 %s 加载。", ini_path);
+    GetPrivateProfileStringA("Panel", "Title", "部队自动行动设置",
+        g_panel_title, sizeof(g_panel_title), ini_path);
+}
+
 
 static const INT32 COL_TITLE_TEXT  = 0x03;
 static const INT32 COL_TEXT        = 0x01;
@@ -1120,7 +1158,7 @@ static void DrawPanelToBuffer_()
         Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
-    DrawTxt(scr, GetPanelFont(), "部队自动行动设置",
+    DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "部队自动行动设置",
         px + 20, py + 13, PANEL_W - 40, TITLE_H,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
