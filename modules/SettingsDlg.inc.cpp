@@ -128,6 +128,25 @@ static Patch* s_hover_patch_secondary = nullptr;
 static HMODULE s_hd_sod_module = nullptr;
 static Patch* s_hd_msgproc_patch = nullptr;
 
+// 面板打开时安装 WH_KEYBOARD 钩子，立即响应 ESC/Enter，不依赖游戏帧率
+static HHOOK s_kb_hook = nullptr;
+static UINT_PTR s_kb_hook_timer = 0;
+
+static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
+        && !(lParam & 0x80000000))  // keydown only
+    {
+        if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
+            WriteLog("[Panel] %s keydown via hook, closing.",
+                wParam == VK_ESCAPE ? "ESC" : "Enter");
+            CloseSettingsPanel();
+            return 1;  // swallow the key
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
 // 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
 // 真正的战斗窗口。0x0063A5E4 是战斗底下仍保留的冒险地图窗口。
@@ -1418,6 +1437,10 @@ void OpenSettingsPanel_()
     // 消费掉打开面板前残留的 ESC/Enter 按键状态，防止首帧误触发关闭
     GetAsyncKeyState(VK_ESCAPE);
     GetAsyncKeyState(VK_RETURN);
+    // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
+    if (!s_kb_hook)
+        s_kb_hook = SetWindowsHookExA(WH_KEYBOARD, PanelKbHook_, g_hModule,
+            GetWindowThreadProcessId(*reinterpret_cast<HWND*>(0x699650), nullptr));
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
 }
 
@@ -1439,6 +1462,10 @@ void CloseSettingsPanel()
     s_p.scroll_button_pressed = 0;
     s_p.scroll_dragging = false;
     RemoveBattleInputBlocker_();
+    if (s_kb_hook) {
+        UnhookWindowsHookEx(s_kb_hook);
+        s_kb_hook = nullptr;
+    }
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
             mouse->SetCursor(s_p.saved_cursor_frame, s_p.saved_cursor_type);
@@ -1596,23 +1623,17 @@ static void HandlePanelInput_()
     static bool previous_down_down = false;
     static bool previous_page_up_down = false;
     static bool previous_page_down_down = false;
-    static bool previous_esc = false;
-    static bool previous_enter = false;
 
     const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
-    const bool esc_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    const bool enter_down = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
     if (!IsGameWindowForeground_()) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
         previous_down_down = down_down;
         previous_page_up_down = page_up_down;
         previous_page_down_down = page_down_down;
-        previous_esc = esc_down;
-        previous_enter = enter_down;
         return;
     }
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
@@ -1621,23 +1642,9 @@ static void HandlePanelInput_()
         SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
-    if (esc_down && !previous_esc) {
-        WriteLog("[Panel] ESC pressed, closing.");
-        CloseSettingsPanel();
-        previous_esc = true;
-        return;
-    }
-    if (enter_down && !previous_enter) {
-        WriteLog("[Panel] Enter pressed, closing.");
-        CloseSettingsPanel();
-        previous_enter = true;
-        return;
-    }
 
     previous_up_down = up_down;
     previous_down_down = down_down;
     previous_page_up_down = page_up_down;
     previous_page_down_down = page_down_down;
-    previous_esc = esc_down;
-    previous_enter = enter_down;
 }
