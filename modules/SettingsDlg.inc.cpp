@@ -51,33 +51,33 @@ static const char* g_target_labels[4] = {};
 static char g_panel_title[64] = {};
 static bool g_labels_loaded = false;
 
-// 从 H3Auto_labels.txt 加载所有标签
+// 从 H3Auto.ini [Labels] 节加载所有标签
 static void LoadLabels_(const char* ini_path)
 {
     if (g_labels_loaded) return;
     g_labels_loaded = true;
     for (int i = 0; i < 6; i++) {
-        char key[8] = {};
+        char key[16] = {};
         char buf[64] = {};
-        sprintf(key, "%d", i);
-        GetPrivateProfileStringA("Action", key, DEFAULT_ACTION_LABELS[i],
+        sprintf(key, "Action%d", i);
+        GetPrivateProfileStringA("Labels", key, DEFAULT_ACTION_LABELS[i],
             buf, sizeof(buf), ini_path);
         static char storage_action[6][64] = {};
         strncpy(storage_action[i], buf, 63);
         g_action_labels[i] = storage_action[i];
     }
     for (int i = 0; i < 4; i++) {
-        char key[8] = {};
+        char key[16] = {};
         char buf[64] = {};
-        sprintf(key, "%d", i);
-        GetPrivateProfileStringA("Target", key, DEFAULT_TARGET_LABELS[i],
+        sprintf(key, "Target%d", i);
+        GetPrivateProfileStringA("Labels", key, DEFAULT_TARGET_LABELS[i],
             buf, sizeof(buf), ini_path);
         static char storage_target[4][64] = {};
         strncpy(storage_target[i], buf, 63);
         g_target_labels[i] = storage_target[i];
     }
     WriteLog("[Panel] 标签已从 %s 加载。", ini_path);
-    GetPrivateProfileStringA("Panel", "Title", "部队自动行动设置",
+    GetPrivateProfileStringA("Labels", "Title", "部队自动行动设置",
         g_panel_title, sizeof(g_panel_title), ini_path);
 }
 

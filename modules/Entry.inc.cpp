@@ -41,14 +41,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (!_PI) { WriteLog("CreateInstance failed."); return TRUE; }
         WriteLog("CreateInstance ok.");
         ReadConfig();
-        // 构建 labels 文件路径：与 H3Auto.ini 同目录的 H3Auto_labels.txt
-        {
-            char labels_path[MAX_PATH] = {};
-            strncpy(labels_path, g_ini_path, MAX_PATH - 1);
-            char* dot = strrchr(labels_path, '.');
-            if (dot) strcpy(dot, "_labels.txt");
-            LoadLabels_(labels_path);
-        }
+        LoadLabels_(g_ini_path);
         StartPlugin();
     }
     if (reason == DLL_PROCESS_DETACH) {
