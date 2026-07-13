@@ -3,6 +3,7 @@
 
 extern void ResetAutoState();
 extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
+extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern void LoadLabels_(const char* ini_path);
 
 // ---- Plugin start ----
@@ -13,6 +14,10 @@ static void StartPlugin()
     // LoHook: 每帧检测自动战斗对话框 + 画面板
     _PI->WriteLoHook(0x600430, Hook_BltComplete);
     WriteLog("LoHook 0x600430 registered.");
+
+    // LoHook: 战斗消息处理入口，面板打开时拦掉鼠标移动的 hover 重算
+    _PI->WriteLoHook(0x4746B0, Hook_BattleMsgProc);
+    WriteLog("LoHook 0x4746B0 registered.");
 
     ResetAutoState();
     WriteLog("H3Auto: plugin enabled.");

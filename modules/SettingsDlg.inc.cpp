@@ -865,6 +865,21 @@ static H3CombatManager* GetCombatMgr()
     return H3CombatManager::Get();
 }
 
+// 面板打开时每帧强制清掉战场悬停状态，让 SP 行动顺序条的高亮跟随失效。
+// SP 插件的队列高亮每帧读 creatureAtMousePos(0x132D0) 和 mouseCoord(0x132D4)
+// 重画。游戏鼠标离场时也是把这两个值设成 -1，所以这里直接置 -1，
+// SP 下一帧重算就认为鼠标不在任何单位上，自动清高亮。
+static void ClearBattleHoverState_()
+{
+    H3CombatManager* mgr = GetCombatMgr();
+    if (!mgr) return;
+    BYTE* base = reinterpret_cast<BYTE*>(mgr);
+    __try {
+        *reinterpret_cast<INT32*>(base + 0x132D0) = -1; // creatureAtMousePos
+        *reinterpret_cast<INT32*>(base + 0x132D4) = -1; // mouseCoord
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static bool BlockBattleHover_()
 {
     if (!_PI) return false;
@@ -971,13 +986,29 @@ static void RemoveBattleInputBlocker_()
     WriteLog("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
 }
 
+// 实验：面板打开时把 H3 模态深度计数器（0x69FEA4）顶成 1，看 HD.dll 的
+// 行动顺序条会不会因此停止响应鼠标 hover。真模态对话框会把计数器顶到 2 以上，
+// 所以挂起判定用 >= 2 区分。面板关闭时归 0。
+static void ForcePanelModalDepth_(bool on)
+{
+    __try {
+        INT32* depth = reinterpret_cast<INT32*>(0x69FEA4);
+        if (on) {
+            if (*depth < 1) *depth = 1;
+        } else {
+            if (*depth > 0) *depth = 0;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static void UpdatePanelModalSuspension_()
 {
     if (!s_p.active) return;
     const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
     // The same counter also rises while the game is inactive. Only an in-game
     // modal dialog should hide the panel; clicking outside must leave it intact.
-    const bool system_modal_active = modal_depth > 0 && IsGameWindowForeground_();
+    // 我们自己每帧把计数器顶到 1，所以真模态对话框的阈值是 >= 2。
+    const bool system_modal_active = modal_depth >= 2 && IsGameWindowForeground_();
     if (system_modal_active == s_panel_modal_suspended) return;
 
     s_panel_modal_suspended = system_modal_active;
@@ -1157,12 +1188,40 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     }
     CheckAutoFightDialogClosed();
     if (s_p.active) {
+        ForcePanelModalDepth_(true);
         UpdatePanelModalSuspension_();
         if (s_p.active && !s_panel_modal_suspended) {
             HandlePanelInput_();
             DrawPanelToBuffer_();
             ForcePanelDefaultCursor_();
         }
+    }
+    return EXEC_DEFAULT;
+}
+
+// 战斗消息处理入口（FUN_004746b0 @ 0x4746B0）。this=H3CombatManager 在 ECX，
+// 消息指针 msg 在栈上 [esp+4]。msg[0]=类型（4=鼠标移动），msg[4]=x，msg[5]=y。
+// 面板打开时，把鼠标移动消息的坐标改成离屏值，让原函数走它自己的离屏
+// 清除分支，自然清掉 creatureAtMousePos/mouseCoord，行动顺序条高亮随之消失。
+// 这是原版例程，不依赖 SP/HD。面板点击用独立的 GetCursorPosition，不受影响。
+INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
+{
+    (void)h;
+    static int s_diag = 0;
+    if (s_p.active && !s_panel_modal_suspended) {
+        __try {
+            int* msg = *reinterpret_cast<int**>(c->esp + 4);
+            if (s_diag < 40) {
+                s_diag++;
+                WriteLog("[MsgProc] hook 命中 msg=%p type=%d x=%d y=%d",
+                    (void*)msg, msg ? msg[0] : -999,
+                    msg ? msg[4] : -999, msg ? msg[5] : -999);
+            }
+            if (msg && msg[0] == 4) {   // 鼠标移动
+                msg[4] = -1000;         // x 离屏
+                msg[5] = -1000;         // y 离屏
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return EXEC_DEFAULT;
 }
@@ -1321,6 +1380,7 @@ void CloseSettingsPanel()
     if (!s_p.active) return;
     s_p.active = false;
     s_panel_modal_suspended = false;
+    ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
     // right-click -> explanation shown -> explanation closed sequence.
