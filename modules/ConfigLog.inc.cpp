@@ -1,33 +1,82 @@
 // ========== 配置与策略枚举 ==========
+// 新模型：行动策略与目标策略正交；见 H3Note/H3Auto行动与目标策略实现方案.md
 
-// 行动策略枚举
-enum ActionStrategy {
-    AS_MANUAL     = 0,  // 手动
-    AS_DEFEND     = 1,  // 防御
-    AS_MELEE      = 2,  // 近战攻击
-    AS_RANDOM     = 3,  // 随机射击
-    AS_SEQUENTIAL = 4,  // 顺序射击
-    AS_CYCLE_MOVE = 5,  // 循环移动
+enum AutoActionKind : uint8_t {
+    AA_MANUAL = 0,        // 手动（不干预）
+    AA_DEFEND,            // 防御
+    AA_WAIT,              // 等待
+    AA_MOVE,              // 移动
+    AA_MELEE_ATTACK,      // 近战攻击
+    AA_RANGED_ATTACK,     // 远程攻击
+    AA_FIRST_AID,         // 急救帐篷疗伤
+    AA_CATAPULT,          // 投石车攻击城墙
+    AA_COUNT
 };
 
-// 目标策略枚举
-enum TargetStrategy {
-    TS_NONE       = 0,  // 无（默认）
-    TS_POSITION   = 1,  // 指定位置
-    TS_RANGED_SPD = 2,  // 远程和高速优先
-    TS_COUNT_PRI  = 3,  // 数量优先
+enum AutoTargetKind : uint8_t {
+    AT_NONE = 0,          // 无目标
+    AT_STACK,             // 部队目标
+    AT_POSITION,          // 战场位置目标
+    AT_COUNT
 };
 
-// 五套仅驻留内存的已确认方案；方案1默认全为0（手动/无）。
-int g_action_profiles[5][21] = {};
-int g_target_profiles[5][21] = {};
-bool g_downgrade_profiles[5][21] = {};
+enum AutoTargetSide : uint8_t {
+    ATS_OWN = 0,          // 己方
+    ATS_ENEMY,            // 敌方
+    ATS_EITHER,           // 双方均可（执行前仍受兼容矩阵约束）
+    ATS_COUNT
+};
+
+enum AutoTargetSelector : uint8_t {
+    SEL_FIXED = 0,        // 指定部队或指定位置
+    SEL_RANDOM,           // 随机
+    SEL_SEQUENTIAL,       // 顺序轮换
+    SEL_NEAREST,          // 最近
+    SEL_FARTHEST,         // 最远
+    SEL_RANGED_SPEED,     // 远程优先 + 高速
+    SEL_COUNT_HIGH,       // 数量最多
+    SEL_COUNT_LOW,        // 数量最少
+    SEL_MOST_WOUNDED,     // 损失生命最多（帐篷）
+    SEL_COUNT
+};
+
+struct AutoTargetRule {
+    AutoTargetKind kind;
+    AutoTargetSide side;
+    AutoTargetSelector selector;
+    int8_t  fixedSide;         // 固定部队：0/1，-1=未设
+    int8_t  fixedSlot;         // 固定部队：0..20，-1=未设
+    int16_t fixedCreatureId;   // 跨战斗指纹；-1=未设
+    int16_t fixedHex;          // 固定位置：原版 hex 0..186，-1=未设
+};
+
+struct AutoStackRule {
+    AutoActionKind action;
+    AutoTargetRule target;
+    bool allowDefendFallback;  // 允许降级为防御（仅普通部队）
+};
+
+static AutoStackRule MakeDefaultRule_()
+{
+    AutoStackRule r = {};
+    r.action = AA_MANUAL;
+    r.target.kind = AT_NONE;
+    r.target.side = ATS_ENEMY;
+    r.target.selector = SEL_RANDOM;
+    r.target.fixedSide = -1;
+    r.target.fixedSlot = -1;
+    r.target.fixedCreatureId = -1;
+    r.target.fixedHex = -1;
+    r.allowDefendFallback = false;
+    return r;
+}
+
+// 五套仅驻留内存的已确认方案；默认全为手动。
+AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;
 
-// 当前生效方案的兼容视图
-int g_action_strategies[21] = {0};
-int g_target_strategies[21] = {0};
-bool g_downgrade_strategies[21] = {0};
+// 当前生效方案（运行时视图）
+AutoStackRule g_active_rules[21] = {};
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用

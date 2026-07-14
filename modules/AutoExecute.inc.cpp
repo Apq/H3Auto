@@ -3,16 +3,10 @@
 
 static void WriteLog(const char* fmt, ...);
 
-extern void CommitProfiles(int active_profile,
-    int actions[5][21], int targets[5][21],
-    bool downgrade[5][21]);
-extern int  g_action_profiles[5][21];
-extern int  g_target_profiles[5][21];
-extern bool g_downgrade_profiles[5][21];
+extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21]);
+extern AutoStackRule g_profiles[5][21];
+extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
-extern int  g_action_strategies[21];
-extern int  g_target_strategies[21];
-extern bool g_downgrade_strategies[21];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -86,99 +80,94 @@ static bool HeroHasSkill(_BattleMgr_* mgr, int skill_index)
     return hero->second_skill[skill_index] > 0;
 }
 
-// CommitProfiles：勾号/Enter一次性提交全部5套内存方案，当前选中方案立即生效
-void CommitProfiles(int active_profile, int actions[5][21], int targets[5][21],
-    bool downgrade[5][21])
+// CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
+void CommitProfiles(int active_profile, AutoStackRule rules[5][21])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
-    memcpy(g_action_profiles, actions, sizeof(g_action_profiles));
-    memcpy(g_target_profiles, targets, sizeof(g_target_profiles));
-    memcpy(g_downgrade_profiles, downgrade, sizeof(g_downgrade_profiles));
+    memcpy(g_profiles, rules, sizeof(g_profiles));
     g_active_profile = active_profile;
-    memcpy(g_action_strategies, g_action_profiles[g_active_profile],
-        sizeof(g_action_strategies));
-    memcpy(g_target_strategies, g_target_profiles[g_active_profile],
-        sizeof(g_target_strategies));
-    memcpy(g_downgrade_strategies, g_downgrade_profiles[g_active_profile],
-        sizeof(g_downgrade_strategies));
+    memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     WriteLog("[Auto] 5 profiles committed; active profile=%d", g_active_profile + 1);
 }
 
 // 接管决策结果：判定点注入只能表达两种结果。
 enum TakeoverDecision {
-    TD_LEAVE_ORIGINAL = 0,  // 不干预：保持原版返回值（人类输入 / 啥也不做交给玩家）
-    TD_HAND_TO_AI     = 1,  // 交回 AI：hook 返回 1，原版自动执行该单位
+    TD_LEAVE_ORIGINAL = 0,  // 不干预：保持原版返回值
+    TD_HAND_TO_AI     = 1,  // 交回 AI
 };
 
-// “按设置方式执行”的主动射击提交尚未落地（需实测验证的高风险部分）。
-// 本轮先把完整决策分类树建好：安全分支（交回AI / 不干预）全部落地；
-// “按设置执行”分支暂时不干预（留给原版），待下一轮实现主动提交。
-static const bool AUTO_SHOOT_EXECUTION_READY = false;
+// 主动动作提交尚未落地；“按设置执行”分支暂时不干预，待后续实现。
+static const bool AUTO_ACTION_EXECUTION_READY = false;
 
-// 某策略值是否为“已设置射击方式”（非手动）。
-static bool HasShootStrategy(int strategy)
-{
-    return strategy != AS_MANUAL;
-}
-
-// DecideTakeover：轮到某活动单位时，按用户规范判定处理方式。
-// 规范：
-//   1. 弹药车/急救帐篷：总是不改变原版处理。
-//   2. 投石车：有设置射击方式→按设置；否则有弹道术→啥也不做，无→交回AI。
-//   3. 弩车/箭塔：有设置射击方式→按设置；否则有炮术→啥也不做，无→交回AI。
-//   4. 其它部队：手动→啥也不做；非手动→按设置执行（绝不交回AI）。
-// 返回 TD_HAND_TO_AI 表示交给原版 AI；TD_LEAVE_ORIGINAL 表示不干预。
-// “按设置执行”当前回落为 TD_LEAVE_ORIGINAL（主动提交未就绪）。
+// DecideTakeover：按最终规范判定当前活动单位。
+// 1. 弹药车：永远不干预。
+// 2. 急救帐篷：有急救术且配置了急救治疗→主动执行（未就绪则暂不干预）；否则不干预。
+// 3. 投石车：配置了投石车攻击→主动执行；否则有弹道术→不干预，无→交回AI。
+// 4. 弩车/箭塔：配置了远程攻击→主动执行；否则有炮术→不干预，无→交回AI。
+// 5. 其它部队：手动→不干预；非手动→主动执行（绝不交回AI）。
 int DecideTakeover(_BattleMgr_* mgr)
 {
     if (!mgr) return TD_LEAVE_ORIGINAL;
-    if (mgr->auto_combat) return TD_LEAVE_ORIGINAL;    // 已是整场自动战斗
-    if (IsHiddenBattle(mgr)) return TD_LEAVE_ORIGINAL; // 回放/隐藏战斗
+    if (mgr->auto_combat) return TD_LEAVE_ORIGINAL;
+    if (IsHiddenBattle(mgr)) return TD_LEAVE_ORIGINAL;
     _BattleStack_* stack = mgr->active_stack;
     if (!stack || stack->count_current <= 0) return TD_LEAVE_ORIGINAL;
 
     int idx = stack->army_slot_ix;
     if (idx < 0 || idx >= 21) return TD_LEAVE_ORIGINAL;
-    const int strategy = g_action_strategies[idx];
+    const AutoStackRule& rule = g_active_rules[idx];
     const int cid = stack->creature_id;
 
     switch (cid) {
     case WM_AMMO_CART:
+        return TD_LEAVE_ORIGINAL;
+
     case WM_FIRST_AID:
-        // 规则 1：弹药车、急救帐篷总是不改变原版处理。
+        // 无急救术时面板已排除；有急救术且配置了治疗→主动执行。
+        if (rule.action == AA_FIRST_AID) {
+            if (AUTO_ACTION_EXECUTION_READY) {
+                // TODO: 主动急救。
+            }
+            WriteLog("[Auto] tent slot #%d first-aid (主动执行未就绪，暂不干预)", idx);
+            return TD_LEAVE_ORIGINAL;
+        }
         return TD_LEAVE_ORIGINAL;
 
     case WM_CATAPULT:
-        // 规则 2：投石车。
-        if (HasShootStrategy(strategy)) {
-            // TODO(主动执行未就绪)：按设置方式执行。
-            WriteLog("[Auto] catapult slot #%d shoot=%d (主动执行未就绪，暂不干预)", idx, strategy);
+        if (rule.action == AA_CATAPULT) {
+            if (AUTO_ACTION_EXECUTION_READY) {
+                // TODO: 主动投石。
+            }
+            WriteLog("[Auto] catapult slot #%d (主动执行未就绪，暂不干预)", idx);
             return TD_LEAVE_ORIGINAL;
         }
         if (HeroHasSkill(mgr, SK_BALLISTICS))
-            return TD_LEAVE_ORIGINAL;  // 有弹道术：啥也不做（留给玩家）
-        return TD_HAND_TO_AI;          // 无弹道术：交回 AI
+            return TD_LEAVE_ORIGINAL;
+        return TD_HAND_TO_AI;
 
     case WM_BALLISTA:
     case WM_ARROW_TOWER:
-        // 规则 3：弩车、箭塔。
-        if (HasShootStrategy(strategy)) {
-            // TODO(主动执行未就绪)：按设置方式执行。
-            WriteLog("[Auto] ballista/tower slot #%d shoot=%d (主动执行未就绪，暂不干预)", idx, strategy);
+        if (rule.action == AA_RANGED_ATTACK) {
+            if (AUTO_ACTION_EXECUTION_READY) {
+                // TODO: 主动远程。
+            }
+            WriteLog("[Auto] ballista/tower slot #%d (主动执行未就绪，暂不干预)", idx);
             return TD_LEAVE_ORIGINAL;
         }
         if (HeroHasSkill(mgr, SK_ARTILLERY))
-            return TD_LEAVE_ORIGINAL;  // 有炮术：啥也不做
-        return TD_HAND_TO_AI;          // 无炮术：交回 AI
+            return TD_LEAVE_ORIGINAL;
+        return TD_HAND_TO_AI;
 
     default:
-        // 规则 4：其它部队。手动→不干预；非手动→按设置执行（绝不交回AI）。
-        if (strategy == AS_MANUAL)
+        if (rule.action == AA_MANUAL)
             return TD_LEAVE_ORIGINAL;
-        // TODO(主动执行未就绪)：按设置方式执行；无法操作且允许降级→防御。
-        WriteLog("[Auto] unit slot #%d strategy=%d (主动执行未就绪，暂不干预)", idx, strategy);
-        return TD_LEAVE_ORIGINAL;  // 绝不交回AI；主动执行就绪前保持原版
+        if (AUTO_ACTION_EXECUTION_READY) {
+            // TODO: 主动执行；失败且允许降级→防御。
+        }
+        WriteLog("[Auto] unit slot #%d action=%d (主动执行未就绪，暂不干预)",
+            idx, (int)rule.action);
+        return TD_LEAVE_ORIGINAL;
     }
 }
 
