@@ -1575,7 +1575,7 @@ static bool HandleExpandedDropdownClick_(int px, int py, int cell_msg)
         if (ctrl->action_expanded)
             CellControl_GetActionDropdownRect(cRc.left, cRc.top, &dropRc);
         else
-            CellControl_GetTargetDropdownRect(cRc.left, cRc.top, &dropRc);
+            CellControl_GetTargetDropdownRect(cRc.left, cRc.top, &dropRc, expand_up);
 
         const bool in_drop = PointInRect_(px, py, dropRc.left, dropRc.top,
             dropRc.right - dropRc.left, dropRc.bottom - dropRc.top);

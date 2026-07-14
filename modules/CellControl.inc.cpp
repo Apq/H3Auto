@@ -192,36 +192,20 @@ static bool CellControl_GetActionDropdownRect(int cell_panel_x, int cell_panel_y
 }
 
 // 获取目标下拉框展开项的绝对区域（可能向下也可能向上展开）
-// 如果展开后超出格子底部，则向上展开；否则向下展开
-// 返回 false 表示没有展开
-static bool CellControl_GetTargetDropdownRect(int cell_panel_x, int cell_panel_y, RECT* out_rc)
+// 获取目标下拉框展开项的绝对区域
+// expand_up: true=向上展开, false=向下展开
+static bool CellControl_GetTargetDropdownRect(int cell_panel_x, int cell_panel_y,
+    RECT* out_rc, bool expand_up)
 {
     if (!out_rc) return false;
-
-    int base_x = cell_panel_x + CC_COMBO_X;
-
-    // 向下展开时
-    const int down_top = cell_panel_y + CC_ROW2_Y + CC_ROW_H;
-    const int down_bottom = down_top + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
-
-    // 向上展开时（下拉项在按钮上方）
-    const int up_bottom = cell_panel_y + CC_ROW2_Y;  // 按钮顶部
-    const int up_top    = up_bottom - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
-
-    // 判断格子底部是否足够容纳（如果行动下拉也展开，可能空间不够）
-    const int CELL_BOTTOM = cell_panel_y + CC_CELL_H;
-    const bool can_expand_down = (down_bottom <= CELL_BOTTOM + 2);
-
-    if (can_expand_down) {
-        out_rc->left   = base_x;
-        out_rc->top    = down_top;
-        out_rc->right  = base_x + CC_COMBO_W;
-        out_rc->bottom = down_bottom;
+    out_rc->left   = cell_panel_x + CC_COMBO_X;
+    out_rc->right  = out_rc->left + CC_COMBO_W;
+    if (expand_up) {
+        out_rc->bottom = cell_panel_y + CC_ROW2_Y;
+        out_rc->top    = out_rc->bottom - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
     } else {
-        out_rc->left   = base_x;
-        out_rc->top    = up_top;
-        out_rc->right  = base_x + CC_COMBO_W;
-        out_rc->bottom = up_bottom;
+        out_rc->top    = cell_panel_y + CC_ROW2_Y + CC_ROW_H;
+        out_rc->bottom = out_rc->top + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H;
     }
     return true;
 }
@@ -422,7 +406,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         ctrl->action_pressed, false);
     CellControl_DrawText(scr, fntS, action_label,
         CC_COMBO_X + 4, CC_ROW1_Y, CC_COMBO_W - 20, CC_ROW_H,
-        0x1A, eTextAlignment::MIDDLE_LEFT);
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
     // 展开时箭头向上，收起时向下
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
         CC_ROW1_Y + CC_ROW_H / 2 - 3, !ctrl->action_expanded);
@@ -435,7 +419,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         ctrl->target_pressed, false);
     CellControl_DrawText(scr, fntS, target_label,
         CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 20, CC_ROW_H,
-        0x0D, eTextAlignment::MIDDLE_LEFT);
+        (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
     // 展开时箭头向上，收起时向下
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
         CC_ROW2_Y + CC_ROW_H / 2 - 3, !ctrl->target_expanded);
@@ -482,25 +466,30 @@ static void CellControl_DrawDropdownItem(H3LoadedPcx16* scr, H3Font* fnt,
     int item_w = CC_COMBO_W;
     int item_h = CC_DROPDOWN_ITEM_H;
 
-    // 背景
+    // 行动列表使用暖色主题：深棕底、琥珀选中、亮金悬停。
     BYTE bg_r, bg_g, bg_b;
+    BYTE frame_r, frame_g, frame_b;
+    INT32 text_color;
     if (is_hovered) {
-        bg_r = 210; bg_g = 170; bg_b = 72;  // 金色悬停
+        bg_r = 184; bg_g = 136; bg_b = 48;
+        frame_r = 246; frame_g = 214; frame_b = 116;
+        text_color = (INT32)eTextColor::WHITE;
     } else if (is_selected) {
-        bg_r = 140; bg_g = 100; bg_b = 36;  // 深金选中
+        bg_r = 136; bg_g = 88; bg_b = 24;
+        frame_r = 232; frame_g = 184; frame_b = 76;
+        text_color = (INT32)eTextColor::WHITE;
     } else {
-        bg_r = 74; bg_g = 52; bg_b = 24;    // 棕色默认
+        bg_r = 68; bg_g = 42; bg_b = 18;
+        frame_r = 166; frame_g = 112; frame_b = 40;
+        text_color = (INT32)eTextColor::YELLOW;
     }
     Fill(scr, item_x, item_y, item_w, item_h, bg_r, bg_g, bg_b);
     scr->DrawFrame(item_x, item_y, item_w, item_h,
-        (BYTE)(is_hovered ? 235 : 184),
-        (BYTE)(is_hovered ? 205 : 139),
-        (BYTE)(is_hovered ? 116 : 62));
+        frame_r, frame_g, frame_b);
 
-    // 文字（右侧留箭头空间）
     CellControl_DrawText(scr, fnt, label,
         item_x + 4, item_y, item_w - 20, item_h,
-        is_selected ? (INT32)0x03 : (INT32)0x01,
+        text_color,
         eTextAlignment::MIDDLE_LEFT);
 }
 
@@ -553,23 +542,30 @@ static void CellControl_DrawTargetDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
         int item_w = CC_COMBO_W;
         int item_h = CC_DROPDOWN_ITEM_H;
 
+        // 目标列表使用冷色主题：深蓝灰底、青蓝选中、亮青悬停。
         BYTE bg_r, bg_g, bg_b;
+        BYTE frame_r, frame_g, frame_b;
+        INT32 text_color;
         if (is_hovered) {
-            bg_r = 210; bg_g = 170; bg_b = 72;
+            bg_r = 66; bg_g = 154; bg_b = 170;
+            frame_r = 150; frame_g = 238; frame_b = 244;
+            text_color = (INT32)eTextColor::WHITE;
         } else if (is_selected) {
-            bg_r = 140; bg_g = 100; bg_b = 36;
+            bg_r = 34; bg_g = 90; bg_b = 110;
+            frame_r = 82; frame_g = 190; frame_b = 204;
+            text_color = (INT32)eTextColor::CYAN;
         } else {
-            bg_r = 74; bg_g = 52; bg_b = 24;
+            bg_r = 25; bg_g = 42; bg_b = 50;
+            frame_r = 62; frame_g = 116; frame_b = 128;
+            text_color = (INT32)eTextColor::CYAN2;
         }
         Fill(scr, item_x, item_y, item_w, item_h, bg_r, bg_g, bg_b);
         scr->DrawFrame(item_x, item_y, item_w, item_h,
-            (BYTE)(is_hovered ? 235 : 184),
-            (BYTE)(is_hovered ? 205 : 139),
-            (BYTE)(is_hovered ? 116 : 62));
+            frame_r, frame_g, frame_b);
 
         CellControl_DrawText(scr, fntS, g_target_labels[i],
             item_x + 4, item_y, item_w - 20, item_h,
-            is_selected ? (INT32)0x03 : (INT32)0x01,
+            text_color,
             eTextAlignment::MIDDLE_LEFT);
     }
 }
@@ -588,7 +584,8 @@ enum CellHitArea
     CELL_HIT_DROP_TARGET = 5, // 目标下拉展开项
 };
 
-static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y)
+static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y,
+    bool expand_up_for_target)
 {
     // 行动下拉框区域（收起时）
     if (!ctrl->action_expanded
@@ -615,11 +612,14 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                 return CELL_HIT_DROP_ACTION;
         }
     }
-    // 目标下拉展开项（向下展开）
+    // 目标下拉展开项（根据空间向上或向下展开）
     if (ctrl->target_expanded
         && local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W)
     {
-        int rel_y = local_y - (CC_ROW2_Y + CC_ROW_H);
+        const int list_top = expand_up_for_target
+            ? CC_ROW2_Y - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H
+            : CC_ROW2_Y + CC_ROW_H;
+        int rel_y = local_y - list_top;
         if (rel_y >= 0) {
             int idx = rel_y / CC_DROPDOWN_ITEM_H;
             if (idx >= 0 && idx < MAX_TARGET_LABELS)
@@ -646,7 +646,8 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
     int mouse_local_x, int mouse_local_y, bool expand_up_for_target)
 {
     // msg_type: 4=WM_LBUTTONDOWN, 8=WM_LBUTTONUP
-    CellHitArea hit = CellControl_HitTestInCell(ctrl, mouse_local_x, mouse_local_y);
+    CellHitArea hit = CellControl_HitTestInCell(ctrl,
+        mouse_local_x, mouse_local_y, expand_up_for_target);
 
     if (msg_type == 4) { // LButtonDown
         if (hit == CELL_HIT_ACTION) {
@@ -663,6 +664,10 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
+        // 展开列表项在按下阶段只消费，不收起；松开阶段再执行选择。
+        // 否则按下会先关闭列表，导致松开无法选择且继续穿透到下方格子。
+        if (hit == CELL_HIT_DROP_ACTION || hit == CELL_HIT_DROP_TARGET)
+            return true;
         // 点击空白区域：收起下拉框
         if (ctrl->action_expanded || ctrl->target_expanded) {
             ctrl->action_expanded = false;
