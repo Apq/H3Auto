@@ -3,7 +3,11 @@
 
 static void WriteLog(const char* fmt, ...);
 
-extern void CommitStrategies(int side, int* actions, int* targets);
+extern void CommitProfiles(int active_profile,
+    int actions[5][21], int targets[5][21]);
+extern int  g_action_profiles[5][21];
+extern int  g_target_profiles[5][21];
+extern int  g_active_profile;
 extern int  g_action_strategies[21];
 extern int  g_target_strategies[21];
 extern bool IsPanelActive();
@@ -18,9 +22,8 @@ void ResetAutoState()
     if (IsPanelActive())
         CloseSettingsPanel();
     g_auto_state.enabled = false;
-    memset(g_action_strategies, 0, sizeof(g_action_strategies));
-    memset(g_target_strategies, 0, sizeof(g_target_strategies));
-    WriteLog("Auto state reset.");
+    // 策略是本进程内的已确认设置，战斗状态重置时保留。
+    WriteLog("Auto state reset; confirmed strategies preserved.");
 }
 
 int GetAliveStacks(_BattleStack_* out_stacks[], int max_count, int side)
@@ -65,14 +68,19 @@ void DoSequentialShot(_BattleStack_* self)
     WriteLog("[Auto] Stack #%d sequential shot (TODO: commit)", self->army_slot_ix);
 }
 
-// CommitStrategies：SettingsDlg 关闭时调用，写入策略
-void CommitStrategies(int side, int* actions, int* targets)
+// CommitProfiles：勾号/Enter一次性提交全部5套内存方案，当前选中方案立即生效
+void CommitProfiles(int active_profile, int actions[5][21], int targets[5][21])
 {
-    for (int i = 0; i < 21; ++i) {
-        g_action_strategies[i] = actions[i];
-        g_target_strategies[i] = targets[i];
-    }
-    WriteLog("[Auto] Strategies committed for side %d", side);
+    if (active_profile < 0 || active_profile >= 5)
+        active_profile = 0;
+    memcpy(g_action_profiles, actions, sizeof(g_action_profiles));
+    memcpy(g_target_profiles, targets, sizeof(g_target_profiles));
+    g_active_profile = active_profile;
+    memcpy(g_action_strategies, g_action_profiles[g_active_profile],
+        sizeof(g_action_strategies));
+    memcpy(g_target_strategies, g_target_profiles[g_active_profile],
+        sizeof(g_target_strategies));
+    WriteLog("[Auto] 5 profiles committed; active profile=%d", g_active_profile + 1);
 }
 
 void ExecuteForStack(_BattleStack_* self, int action, int target)

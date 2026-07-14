@@ -18,7 +18,7 @@ static const int CELL_H     = 83;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
 static const int GRID_X      = 36;
-static const int GRID_Y      = 70;
+static const int GRID_Y      = 80;
 static const int SCROLL_X    = GRID_X + CELL_W + (COLS - 1) * CELL_STEP_X + 18;
 static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_W    = 16;
@@ -35,13 +35,21 @@ static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
 static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * 4;
 static const int MAX_STACKS = 21;
+static const int PROFILE_COUNT = 5;
+static const int PROFILE_BTN_W = 104;
+static const int PROFILE_BTN_H = 18;
+static const int PROFILE_BTN_GAP = 8;
+static const int PROFILE_BTN_Y = 47;
+static const int PROFILE_BTNS_W = PROFILE_COUNT * PROFILE_BTN_W
+    + (PROFILE_COUNT - 1) * PROFILE_BTN_GAP;
+static const int PROFILE_BTN_X = (PANEL_W - PROFILE_BTNS_W) / 2;
 
 // 网格金框（HA_grid_frame.pcx 624x342），框住 4 行格子 + 右侧滚动条。
-// 内容区 x=36..645, y=70..396；框画在 (29,62)，四周留约 7px。
+// 整个滚动区域较原布局下移10px，为上方5个方案按钮留出空间。
 static const int GRID_FRAME_W = 624;
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 29;
-static const int GRID_FRAME_Y = 62;
+static const int GRID_FRAME_Y = 72;
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[] = {
@@ -98,6 +106,10 @@ static struct Panel {
     int x, y;
     int action[MAX_STACKS];
     int target[MAX_STACKS];
+    int draft_action[PROFILE_COUNT][MAX_STACKS];
+    int draft_target[PROFILE_COUNT][MAX_STACKS];
+    int selected_profile;
+    int pressed_profile;
     int count;
     int scroll_row;
     bool scroll_dragging;
@@ -140,6 +152,7 @@ static HMODULE s_hd_sod_module = nullptr;
 static Patch* s_hd_msgproc_patch = nullptr;
 
 // 面板打开时安装 WH_KEYBOARD 钩子，立即响应 ESC/Enter，不依赖游戏帧率
+static void CommitAndCloseSettingsPanel_();
 static HHOOK s_kb_hook = nullptr;
 
 static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
@@ -147,9 +160,13 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
         && !(lParam & 0x80000000))  // keydown only
     {
-        if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
-                CloseSettingsPanel();
-            return 1;  // swallow the key
+        if (wParam == VK_ESCAPE) {
+            CloseSettingsPanel();
+            return 1;  // cancel and swallow the key
+        }
+        if (wParam == VK_RETURN) {
+            CommitAndCloseSettingsPanel_();
+            return 1;  // commit and swallow the key
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -214,6 +231,7 @@ static int s_battle_ui_missing_frames = 0;
 
 // 前向声明
 static void OpenSettingsPanel_();
+static void CommitAndCloseSettingsPanel_();
 void CloseSettingsPanel();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
@@ -314,8 +332,20 @@ static bool IsGameMouseInputActive_()
 static void CancelPanelTransientInput_()
 {
     s_p.pressed_button = 0;
+    s_p.pressed_profile = -1;
     s_p.scroll_button_pressed = 0;
     s_p.scroll_dragging = false;
+}
+
+static RECT ProfileButtonRect_(int profile)
+{
+    RECT rc = {};
+    if (profile < 0 || profile >= PROFILE_COUNT) return rc;
+    rc.left = PROFILE_BTN_X + profile * (PROFILE_BTN_W + PROFILE_BTN_GAP);
+    rc.top = PROFILE_BTN_Y;
+    rc.right = rc.left + PROFILE_BTN_W;
+    rc.bottom = rc.top + PROFILE_BTN_H;
+    return rc;
 }
 
 static RECT CellRect(int idx)
@@ -743,6 +773,38 @@ static void EnsurePanelButtonPcxResources_()
         s_panel_cancel_normal, s_panel_cancel_normal_load_failed);
     LoadPanelPcx24_("HA_cancel_pressed.pcx", BTN_W, BTN_H,
         s_panel_cancel_pressed, s_panel_cancel_pressed_load_failed);
+}
+
+static void DrawProfileButtons_(H3LoadedPcx16* destination)
+{
+    H3Font* font = GetSmallFont();
+    for (int i = 0; i < PROFILE_COUNT; ++i) {
+        const RECT rc = ProfileButtonRect_(i);
+        const bool selected = i == s_p.selected_profile;
+        const bool pressed = i == s_p.pressed_profile;
+        if (selected) {
+            Fill(destination, rc.left, rc.top, PROFILE_BTN_W, PROFILE_BTN_H,
+                pressed ? 122 : 154, pressed ? 86 : 112, pressed ? 30 : 38);
+            destination->DrawFrame(rc.left - 1, rc.top - 1,
+                PROFILE_BTN_W + 2, PROFILE_BTN_H + 2,
+                (BYTE)255, (BYTE)218, (BYTE)108);
+            destination->DrawFrame(rc.left, rc.top,
+                PROFILE_BTN_W, PROFILE_BTN_H,
+                (BYTE)224, (BYTE)176, (BYTE)62);
+        } else {
+            Fill(destination, rc.left, rc.top, PROFILE_BTN_W, PROFILE_BTN_H,
+                pressed ? 68 : 48, pressed ? 48 : 36, pressed ? 22 : 18);
+            destination->DrawFrame(rc.left, rc.top,
+                PROFILE_BTN_W, PROFILE_BTN_H,
+                (BYTE)142, (BYTE)108, (BYTE)54);
+        }
+        char text[16];
+        _snprintf(text, sizeof(text), "方案 %d", i + 1);
+        DrawTxt(destination, font, text,
+            rc.left, rc.top, PROFILE_BTN_W, PROFILE_BTN_H,
+            selected ? (INT32)eTextColor::WHITE : (INT32)eTextColor::GOLD,
+            eTextAlignment::MIDDLE_CENTER);
+    }
 }
 
 static void DrawPanelButtons_(H3LoadedPcx16* destination)
@@ -1325,8 +1387,9 @@ static void DrawPanelToBuffer_()
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
     DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "部队自动行动设置",
-        px + 20, py + 13, PANEL_W - 40, TITLE_H,
+        px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
+    DrawProfileButtons_(scr);
 
     // 下拉悬停高亮由 WH_MOUSE 钩子即时更新到 s_p.hover_cell/hover_idx，
     // 绘制时直接使用，不再依赖低帧率的游戏坐标。
@@ -1433,6 +1496,52 @@ static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Her
     }
 }
 
+static void SaveCurrentCellsToDraft_()
+{
+    const int profile = s_p.selected_profile;
+    if (profile < 0 || profile >= PROFILE_COUNT) return;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->has_data) continue;
+        const int slot = ctrl->data.army_slot_ix;
+        if (slot < 0 || slot >= MAX_STACKS) continue;
+        s_p.draft_action[profile][slot] = ctrl->data.action_id;
+        s_p.draft_target[profile][slot] = ctrl->data.target_id;
+    }
+}
+
+static void LoadSelectedProfileIntoCells_()
+{
+    const int profile = s_p.selected_profile;
+    if (profile < 0 || profile >= PROFILE_COUNT) return;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->has_data) continue;
+        const int slot = ctrl->data.army_slot_ix;
+        if (slot < 0 || slot >= MAX_STACKS) continue;
+        ctrl->data.action_id = s_p.draft_action[profile][slot];
+        ctrl->data.target_id = s_p.draft_target[profile][slot];
+        ctrl->action_expanded = false;
+        ctrl->target_expanded = false;
+        ctrl->action_pressed = false;
+        ctrl->target_pressed = false;
+        ctrl->dirty = true;
+    }
+    s_p.hover_cell = -1;
+    s_p.hover_idx = -1;
+}
+
+static void SelectProfile_(int profile)
+{
+    if (profile < 0 || profile >= PROFILE_COUNT
+        || profile == s_p.selected_profile)
+        return;
+    SaveCurrentCellsToDraft_();
+    s_p.selected_profile = profile;
+    LoadSelectedProfileIntoCells_();
+    DrawPanelToBuffer_();
+}
+
 void OpenSettingsPanel_()
 {
     H3MouseManager* mouse = H3MouseManager::Get();
@@ -1454,10 +1563,16 @@ void OpenSettingsPanel_()
     s_p.hover_cell = -1;
     s_p.hover_idx = -1;
     s_p.pressed_button = 0;
+    s_p.pressed_profile = -1;
+    s_p.selected_profile = g_active_profile;
+    if (s_p.selected_profile < 0 || s_p.selected_profile >= PROFILE_COUNT)
+        s_p.selected_profile = 0;
+    memcpy(s_p.draft_action, g_action_profiles, sizeof(s_p.draft_action));
+    memcpy(s_p.draft_target, g_target_profiles, sizeof(s_p.draft_target));
     for (int i = 0; i < CELL_COUNT; ++i)
         CellControl_Init(&s_p.cells[i]);
-    memset(s_p.action, 0, sizeof(s_p.action));
-    memset(s_p.target, 0, sizeof(s_p.target));
+    memcpy(s_p.action, s_p.draft_action[s_p.selected_profile], sizeof(s_p.action));
+    memcpy(s_p.target, s_p.draft_target[s_p.selected_profile], sizeof(s_p.target));
 
     if (o_WndMgr && o_WndMgr->screenPcx16) {
         s_p.x = (o_WndMgr->screenPcx16->width  - PANEL_W) / 2;
@@ -1473,8 +1588,6 @@ void OpenSettingsPanel_()
         for (int i = 0; i < MAX_STACKS && s_p.count < MAX_STACKS; ++i) {
             H3CombatCreature& stack = mgr->stacks[0][i];
             if (IsConfigurablePanelStack_(stack, hero)) {
-                s_p.action[i] = g_action_strategies[i];
-                s_p.target[i] = g_target_strategies[i];
                 CellData cd = {};
                 cd.creature_type = stack.type;
                 cd.position      = stack.position;
@@ -1508,6 +1621,16 @@ void OpenSettingsPanel_()
 
 void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer_(); }
 
+static void CommitAndCloseSettingsPanel_()
+{
+    if (!s_p.active) return;
+
+    // 保存当前表格到当前方案副本，再一次性提交全部5套。
+    SaveCurrentCellsToDraft_();
+    CommitProfiles(s_p.selected_profile, s_p.draft_action, s_p.draft_target);
+    CloseSettingsPanel();
+}
+
 void CloseSettingsPanel()
 {
     if (!s_p.active) return;
@@ -1521,6 +1644,7 @@ void CloseSettingsPanel()
     s_saw_explanation_dlg_in_battle = false;
     s_autofight_right_press_armed = false;
     s_p.pressed_button = 0;
+    s_p.pressed_profile = -1;
     s_p.scroll_button_pressed = 0;
     s_p.scroll_dragging = false;
     RemoveBattleInputBlocker_();
@@ -1694,6 +1818,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     }
 
     if (raw_command == 8) {
+        for (int i = 0; i < PROFILE_COUNT; ++i) {
+            const RECT rc = ProfileButtonRect_(i);
+            if (PointInRect_(px, py, rc.left, rc.top,
+                    rc.right - rc.left, rc.bottom - rc.top)) {
+                s_p.pressed_profile = i;
+                DrawPanelToBuffer_();
+                return;
+            }
+        }
+
         int button = 0;
         if (PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)) button = 1;
         else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
@@ -1753,6 +1887,18 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     }
 
     if (raw_command == 16) {
+        const int pressed_profile = s_p.pressed_profile;
+        s_p.pressed_profile = -1;
+        if (pressed_profile >= 0 && pressed_profile < PROFILE_COUNT) {
+            const RECT rc = ProfileButtonRect_(pressed_profile);
+            if (PointInRect_(px, py, rc.left, rc.top,
+                    rc.right - rc.left, rc.bottom - rc.top))
+                SelectProfile_(pressed_profile);
+            else
+                DrawPanelToBuffer_();
+            return;
+        }
+
         const int pressed = s_p.pressed_button;
         const bool activate = pressed == 1
             ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
@@ -1766,7 +1912,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         s_p.scroll_dragging = false;
         if (redraw) DrawPanelToBuffer_();
         if (activate) {
-            CloseSettingsPanel();
+            if (pressed == 1)
+                CommitAndCloseSettingsPanel_();
+            else
+                CloseSettingsPanel();
             return;
         }
 

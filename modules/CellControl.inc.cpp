@@ -23,16 +23,7 @@ static bool s_cc_icon_frame_load_failed = false;
 
 // 写回全局策略数组
 // g_action/target_strategies 定义在 ConfigLog.inc.cpp
-extern "C" INT g_action_strategies[21];
-extern "C" INT g_target_strategies[21];
-
-// 当 CellData::army_slot_ix >= 0 时，将选中的值写回全局策略数组
-static void SyncStrategyBack_(INT army_slot_ix, int action_id, int target_id)
-{
-    if (army_slot_ix < 0 || army_slot_ix >= 21) return;
-    g_action_strategies[army_slot_ix] = action_id;
-    g_target_strategies[army_slot_ix] = target_id;
-}
+// 下拉控件只修改自己的临时 CellData；全局策略由设置面板点击确定时统一提交。
 
 // ========================================================================
 // 公共类型（与外部共享）
@@ -692,7 +683,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->action_expanded = false;
                 ctrl->action_pressed = false;
                 ctrl->dirty = true;
-                SyncStrategyBack_(ctrl->data.army_slot_ix, ctrl->data.action_id, ctrl->data.target_id);
                 return true;
             }
         }
@@ -708,7 +698,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->target_expanded = false;
                 ctrl->target_pressed = false;
                 ctrl->dirty = true;
-                SyncStrategyBack_(ctrl->data.army_slot_ix, ctrl->data.action_id, ctrl->data.target_id);
                 return true;
             }
         }
