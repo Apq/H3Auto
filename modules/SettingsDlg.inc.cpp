@@ -108,6 +108,7 @@ static struct Panel {
     int target[MAX_STACKS];
     int draft_action[PROFILE_COUNT][MAX_STACKS];
     int draft_target[PROFILE_COUNT][MAX_STACKS];
+    bool draft_downgrade[PROFILE_COUNT][MAX_STACKS];
     int selected_profile;
     int pressed_profile;
     int count;
@@ -1481,17 +1482,13 @@ static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Her
 
     switch (stack.type) {
     case eCreature::AMMO_CART:
-    case eCreature::CATAPULT:
-        // 弹药车和投石车没有可配置行为，始终排除。
+        // 弹药车没有可配置行为，始终排除。
         return false;
-    case eCreature::BALLISTA:
-    case eCreature::ARROW_TOWER:
-        // 弩车、箭塔仅在英雄掌握炮术时可控制。
-        return hero && hero->secSkill[eSecondary::ARTILLERY] > 0;
-    case eCreature::FIRST_AID_TENT:
-        // 急救帐篷仅在英雄掌握急救术时可控制。
-        return hero && hero->secSkill[eSecondary::FIRST_AID] > 0;
+    case eCreature::CATAPULT:
+        // 投石车仅在英雄掌握弹道术时可控制。
+        return hero && hero->secSkill[eSecondary::BALLISTICS] > 0;
     default:
+        // 其它单位（包括弩车、箭塔、急救帐篷）全部保留。
         return true;
     }
 }
@@ -1507,6 +1504,7 @@ static void SaveCurrentCellsToDraft_()
         if (slot < 0 || slot >= MAX_STACKS) continue;
         s_p.draft_action[profile][slot] = ctrl->data.action_id;
         s_p.draft_target[profile][slot] = ctrl->data.target_id;
+        s_p.draft_downgrade[profile][slot] = ctrl->data.allow_downgrade;
     }
 }
 
@@ -1521,6 +1519,7 @@ static void LoadSelectedProfileIntoCells_()
         if (slot < 0 || slot >= MAX_STACKS) continue;
         ctrl->data.action_id = s_p.draft_action[profile][slot];
         ctrl->data.target_id = s_p.draft_target[profile][slot];
+        ctrl->data.allow_downgrade = s_p.draft_downgrade[profile][slot];
         ctrl->action_expanded = false;
         ctrl->target_expanded = false;
         ctrl->action_pressed = false;
@@ -1569,6 +1568,7 @@ void OpenSettingsPanel_()
         s_p.selected_profile = 0;
     memcpy(s_p.draft_action, g_action_profiles, sizeof(s_p.draft_action));
     memcpy(s_p.draft_target, g_target_profiles, sizeof(s_p.draft_target));
+    memcpy(s_p.draft_downgrade, g_downgrade_profiles, sizeof(s_p.draft_downgrade));
     for (int i = 0; i < CELL_COUNT; ++i)
         CellControl_Init(&s_p.cells[i]);
     memcpy(s_p.action, s_p.draft_action[s_p.selected_profile], sizeof(s_p.action));
@@ -1595,6 +1595,7 @@ void OpenSettingsPanel_()
                 cd.creature_def  = stack.def;
                 cd.action_id     = s_p.action[i];
                 cd.target_id     = s_p.target[i];
+                cd.allow_downgrade = s_p.draft_downgrade[s_p.selected_profile][i];
                 cd.army_slot_ix  = i;  // 槽位索引，提交时需要
                 if (s_p.count < CELL_COUNT)
                     CellControl_SetData(&s_p.cells[s_p.count], &cd);
@@ -1627,7 +1628,8 @@ static void CommitAndCloseSettingsPanel_()
 
     // 保存当前表格到当前方案副本，再一次性提交全部5套。
     SaveCurrentCellsToDraft_();
-    CommitProfiles(s_p.selected_profile, s_p.draft_action, s_p.draft_target);
+    CommitProfiles(s_p.selected_profile, s_p.draft_action, s_p.draft_target,
+        s_p.draft_downgrade);
     CloseSettingsPanel();
 }
 

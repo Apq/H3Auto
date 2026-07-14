@@ -44,6 +44,9 @@ struct CellData
 
     // 所属阵营槽位（确定按钮提交时需要写回 g_action/target_strategies）
     INT     army_slot_ix;
+
+    // 附加选项
+    bool    allow_downgrade;  // 允许降级为防御
 };
 
 // ========================================================================
@@ -69,11 +72,13 @@ static const int CC_LABEL_H  = 11;  // 每行高度
 // 右侧控件区域（紧贴左侧图标右边）
 static const int CC_COMBO_X  = CC_ICON_X + CC_ICON_W + 4;  // 66
 static const int CC_COMBO_W  = CC_CELL_W - CC_COMBO_X - 4;  // 123
-static const int CC_ROW1_Y   = 4;   // 第一行下拉框 Y（顶部对齐）
+static const int CC_ROW1_Y   = 4;   // 第一行下拉框 Y
 static const int CC_ROW_H    = 22;  // 每行高度
 static const int CC_ROW_GAP  = 2;   // 两行间距
-static const int CC_ROW2_Y   = CC_ROW1_Y + CC_ROW_H + CC_ROW_GAP; // 28
-static const int CC_LABEL_Y  = CC_ROW2_Y + CC_ROW_H + 2;  // 52，底部位置标注
+static const int CC_CHECKBOX_Y = CC_ROW1_Y + CC_ROW_H + CC_ROW_GAP;      // 28
+static const int CC_CHECKBOX_H = 14;
+static const int CC_ROW2_Y   = CC_CHECKBOX_Y + CC_CHECKBOX_H + CC_ROW_GAP; // 44
+static const int CC_LABEL_Y  = 52;  // 图标下部文字保持原位置
 
 // 下拉框展开高度（每项 18px）
 static const int CC_DROPDOWN_ITEM_H = 18;
@@ -409,6 +414,30 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
         CC_ROW1_Y + CC_ROW_H / 2 - 3, !ctrl->action_expanded);
 
+    // ---- 复选框：允许降级为防御 ----
+    {
+        const int cb_x = CC_COMBO_X + 2;
+        const int cb_y = CC_CHECKBOX_Y;
+        const int cb_box = 10;
+        // 复选框背景
+        Fill(scr, cb_x, cb_y, cb_box, cb_box, 40, 28, 12);
+        scr->DrawFrame(cb_x, cb_y, cb_box, cb_box,
+            (BYTE)184, (BYTE)139, (BYTE)62);
+        // 勾号（如果已选）：左侧短笔画向下，右侧长笔画向上。
+        if (ctrl->data.allow_downgrade) {
+            Fill(scr, cb_x + 2, cb_y + 4, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 3, cb_y + 5, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 4, cb_y + 6, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 5, cb_y + 5, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 6, cb_y + 4, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
+        }
+        // 标签
+        CellControl_DrawText(scr, fntS, "允许降级为防御",
+            cb_x + cb_box + 4, cb_y - 1, CC_COMBO_W - cb_box - 8, CC_CHECKBOX_H,
+            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    }
+
     // ---- 目标下拉框（收起状态）----
     const char* target_label = ctrl->data.target_id >= 0
         && ctrl->data.target_id < MAX_TARGET_LABELS
@@ -423,7 +452,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         CC_ROW2_Y + CC_ROW_H / 2 - 3, !ctrl->target_expanded);
 
     // ---- 第一行：数量标注（右对齐，上移3px）----
-    // 文字位置锚定原始图标高度 52，不随金框放大而下移（保持用户设定）
+    // 文字位置保持原布局，不随右侧复选框和目标下拉框移动
     const int label_row1_y = CC_ICON_Y + 52 + 1 - 3;               // 54
     const int label_row2_y = CC_ICON_Y + 52 + 1 + CC_LABEL_H - 1;  // 67
 
@@ -580,6 +609,7 @@ enum CellHitArea
     CELL_HIT_TARGET  = 3,   // 目标下拉框
     CELL_HIT_DROP_ACTION = 4, // 行动下拉展开项
     CELL_HIT_DROP_TARGET = 5, // 目标下拉展开项
+    CELL_HIT_CHECKBOX = 6,    // 允许降级为防御
 };
 
 static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y,
@@ -591,6 +621,12 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         && local_y >= CC_ROW1_Y && local_y < CC_ROW1_Y + CC_ROW_H)
     {
         return CELL_HIT_ACTION;
+    }
+    // 复选框及标签区域
+    if (local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
+        && local_y >= CC_CHECKBOX_Y && local_y < CC_CHECKBOX_Y + CC_CHECKBOX_H)
+    {
+        return CELL_HIT_CHECKBOX;
     }
     // 目标下拉框区域（收起时）
     if (!ctrl->target_expanded
@@ -652,6 +688,13 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->action_expanded = !ctrl->action_expanded;
             ctrl->target_expanded = false;
             ctrl->action_pressed = true;
+            ctrl->dirty = true;
+            return true;
+        }
+        if (hit == CELL_HIT_CHECKBOX) {
+            ctrl->data.allow_downgrade = !ctrl->data.allow_downgrade;
+            ctrl->action_expanded = false;
+            ctrl->target_expanded = false;
             ctrl->dirty = true;
             return true;
         }

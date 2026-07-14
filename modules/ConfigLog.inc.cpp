@@ -21,11 +21,13 @@ enum TargetStrategy {
 // 五套仅驻留内存的已确认方案；方案1默认全为0（手动/无）。
 int g_action_profiles[5][21] = {};
 int g_target_profiles[5][21] = {};
+bool g_downgrade_profiles[5][21] = {};
 int g_active_profile = 0;
 
-// 当前生效方案的兼容视图，自动执行模块继续直接读取这两组数组。
+// 当前生效方案的兼容视图
 int g_action_strategies[21] = {0};
 int g_target_strategies[21] = {0};
+bool g_downgrade_strategies[21] = {0};
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用

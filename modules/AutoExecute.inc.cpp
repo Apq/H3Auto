@@ -4,12 +4,15 @@
 static void WriteLog(const char* fmt, ...);
 
 extern void CommitProfiles(int active_profile,
-    int actions[5][21], int targets[5][21]);
+    int actions[5][21], int targets[5][21],
+    bool downgrade[5][21]);
 extern int  g_action_profiles[5][21];
 extern int  g_target_profiles[5][21];
+extern bool g_downgrade_profiles[5][21];
 extern int  g_active_profile;
 extern int  g_action_strategies[21];
 extern int  g_target_strategies[21];
+extern bool g_downgrade_strategies[21];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -69,17 +72,21 @@ void DoSequentialShot(_BattleStack_* self)
 }
 
 // CommitProfiles：勾号/Enter一次性提交全部5套内存方案，当前选中方案立即生效
-void CommitProfiles(int active_profile, int actions[5][21], int targets[5][21])
+void CommitProfiles(int active_profile, int actions[5][21], int targets[5][21],
+    bool downgrade[5][21])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
     memcpy(g_action_profiles, actions, sizeof(g_action_profiles));
     memcpy(g_target_profiles, targets, sizeof(g_target_profiles));
+    memcpy(g_downgrade_profiles, downgrade, sizeof(g_downgrade_profiles));
     g_active_profile = active_profile;
     memcpy(g_action_strategies, g_action_profiles[g_active_profile],
         sizeof(g_action_strategies));
     memcpy(g_target_strategies, g_target_profiles[g_active_profile],
         sizeof(g_target_strategies));
+    memcpy(g_downgrade_strategies, g_downgrade_profiles[g_active_profile],
+        sizeof(g_downgrade_strategies));
     WriteLog("[Auto] 5 profiles committed; active profile=%d", g_active_profile + 1);
 }
 
