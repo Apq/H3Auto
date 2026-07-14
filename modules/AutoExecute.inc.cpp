@@ -297,17 +297,62 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRu
     return true;
 }
 
-// 提交近战：action=6, actionTarget=敌方 hex, actionParameter 暂 -1。
-// 完整近战还需攻击邻接格/方向（FUN_00476500 case7 用 0x132d8）；
-// 先提交目标格，让原版执行器尽量消化；失败则调用方降级。
+// 判断某 hex 是否被敌方部队占据（双格头/尾都算）。
+// 尾格用 GetSecondSquare(0x4463C0)；失败则仅比头格。
+static _BattleStack_* FindEnemyOccupyingHex_(_BattleMgr_* mgr, _BattleStack_* self, int hex)
+{
+    if (!mgr || !self || hex < 1 || hex > 185) return nullptr;
+    const int enemy_side = 1 - self->def_group_ix;
+    for (int i = 0; i < 21; ++i) {
+        _BattleStack_* t = &mgr->stack[enemy_side][i];
+        if (t->count_current <= 0 || t->count_at_start <= 0) continue;
+        if (t->creature_id < 0) continue;
+        if (t->hex_ix == hex) return t;
+        int second = -1;
+        __try {
+            second = THISCALL_1(int, 0x4463C0, t);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            second = -1;
+        }
+        if (second == hex) return t;
+    }
+    return nullptr;
+}
+
+// 提交近战：配置 = 站立格(meleeStandHex) + 攻击格(meleeAttackHex)。
+// 规则：攻击格上有敌人（头或尾）才出手；站立格为 -1 表示保持当前位置。
+// 提交：action=6, actionTarget=攻击格, actionParameter=站立格
+// （对应 FUN_00476500 case7 的 0x132d4/0x132d8）。
+// 同时写入 mouse_coord/attacker_coord，贴近玩家点击后的状态。
 static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
 {
-    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false, false);
-    if (!target) return false;
-    if (!WriteAction_(mgr, self, BA_WALK_ATTACK, -1, target->hex_ix))
+    if (!mgr || !self) return false;
+    const int attack_hex = rule.target.meleeAttackHex;
+    if (attack_hex < 1 || attack_hex > 185) {
+        WriteLog("[Auto] melee missing attack hex slot=%d", self->army_slot_ix);
         return false;
-    WriteLog("[Auto] submit WALK_ATTACK slot=%d -> hex=%d target_slot=%d",
-        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+    }
+
+    _BattleStack_* enemy = FindEnemyOccupyingHex_(mgr, self, attack_hex);
+    if (!enemy) {
+        WriteLog("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
+            attack_hex, self->army_slot_ix);
+        return false;
+    }
+
+    int stand_hex = rule.target.meleeStandHex;
+    if (stand_hex < 1 || stand_hex > 185)
+        stand_hex = self->hex_ix; // 未设站立格：原地攻击
+
+    // 写悬停相关字段，模拟玩家点过该攻击格
+    mgr->mouse_coord = attack_hex;
+    mgr->attacker_coord = stand_hex;
+    mgr->move_type = 7; // 近战悬停类型（FUN_00475dc0 返回 7）
+
+    if (!WriteAction_(mgr, self, BA_WALK_ATTACK, stand_hex, attack_hex))
+        return false;
+    WriteLog("[Auto] submit MELEE stand=%d attack=%d enemy_slot=%d enemy_hex=%d",
+        stand_hex, attack_hex, enemy->army_slot_ix, enemy->hex_ix);
     return true;
 }
 

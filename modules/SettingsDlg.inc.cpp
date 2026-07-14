@@ -182,6 +182,10 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 static HHOOK s_mouse_hook = nullptr;
 static bool UpdateDropdownHover_(int px, int py);  // 前向声明（钩子先用到）
 
+// 近战选格：1=站立格，2=攻击格；pick_cell 为格子控件索引
+static int s_melee_pick_mode = 0;
+static int s_melee_pick_cell = -1;
+
 static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
@@ -1364,6 +1368,50 @@ extern bool TryAutoExecuteActiveStack();
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
     (void)h;
+
+    // 近战选格模式优先：面板可能已 modal-suspended，但仍需接收战场点击。
+    if (s_p.active && s_melee_pick_mode != 0) {
+        __try {
+            int* msg = *reinterpret_cast<int**>(c->esp + 4);
+            if (msg && msg[0] == 16 /* LBUTTONUP */) {
+                H3CombatManager* mgr = GetCombatMgr();
+                if (mgr && s_melee_pick_cell >= 0 && s_melee_pick_cell < CELL_COUNT) {
+                    const int sx = msg[4];
+                    const int sy = msg[5];
+                    const int px = sx - s_p.x;
+                    const int py = sy - s_p.y;
+                    const bool in_panel = (px >= 0 && py >= 0 && px < PANEL_W && py < PANEL_H);
+                    if (!in_panel) {
+                        int hex = -1;
+                        __try {
+                            hex = THISCALL_3(int, 0x464380, mgr, sx, sy);
+                        } __except (EXCEPTION_EXECUTE_HANDLER) {
+                            hex = -1;
+                        }
+                        CellControl* ctrl = &s_p.cells[s_melee_pick_cell];
+                        if (hex >= 1 && hex <= 185 && ctrl->has_data) {
+                            if (s_melee_pick_mode == 1)
+                                ctrl->data.rule.target.meleeStandHex = (int16_t)hex;
+                            else if (s_melee_pick_mode == 2)
+                                ctrl->data.rule.target.meleeAttackHex = (int16_t)hex;
+                            ctrl->dirty = true;
+                            WriteLog("[Panel] melee pick mode=%d hex=%d cell=%d",
+                                s_melee_pick_mode, hex, s_melee_pick_cell);
+                        } else {
+                            WriteLog("[Panel] melee pick invalid hex=%d", hex);
+                        }
+                        s_melee_pick_mode = 0;
+                        s_melee_pick_cell = -1;
+                        s_panel_modal_suspended = false;
+                        ForcePanelModalDepth_(true);
+                        DrawPanelToBuffer_();
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return EXEC_DEFAULT; // 选格期间不屏蔽 hover，也不自动执行
+    }
+
     if (s_p.active && !s_panel_modal_suspended) {
         __try {
             int* msg = *reinterpret_cast<int**>(c->esp + 4);
@@ -1375,7 +1423,7 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
         return EXEC_DEFAULT;
     }
 
-    // 面板未打开：尝试主动提交当前单位动作（防御/远程等）。
+    // 面板未打开：尝试主动提交当前单位动作（防御/远程/近战等）。
     // 只写 battle->action，不跳过原函数；原函数看到 action!=0 会走执行路径。
     __try {
         TryAutoExecuteActiveStack();
@@ -1650,6 +1698,8 @@ void CloseSettingsPanel()
     if (!s_p.active) return;
     s_p.active = false;
     s_panel_modal_suspended = false;
+    s_melee_pick_mode = 0;
+    s_melee_pick_cell = -1;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -1879,6 +1929,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     // 面板按下(raw 8) → 格子按下(4)，触发下拉展开/收起
                     if (CellControl_OnMouse(ctrl, 4,
                             px - cRc.left, py - cRc.top, false)) {
+                        // 近战选格请求：暂时挂起面板，等战场点击
+                        if (ctrl->melee_pick_request != 0) {
+                            s_melee_pick_mode = ctrl->melee_pick_request;
+                            s_melee_pick_cell = i;
+                            ctrl->melee_pick_request = 0;
+                            s_panel_modal_suspended = true;
+                            ForcePanelModalDepth_(false);
+                            WriteLog("[Panel] enter melee pick mode=%d cell=%d",
+                                s_melee_pick_mode, s_melee_pick_cell);
+                        }
                         DrawPanelToBuffer_();
                         return;
                     }

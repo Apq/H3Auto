@@ -48,6 +48,11 @@ struct AutoTargetRule {
     int8_t  fixedSlot;         // 固定部队：0..20，-1=未设
     int16_t fixedCreatureId;   // 跨战斗指纹；-1=未设
     int16_t fixedHex;          // 固定位置：原版 hex 0..186，-1=未设
+
+    // 近战专用：模拟玩家“站到 standHex，再点 attackHex”。
+    // attackHex 上有敌人（头格或双格尾格都算）时才提交近战。
+    int16_t meleeStandHex;     // 站立/接近格，-1=未设
+    int16_t meleeAttackHex;    // 攻击点击格，-1=未设
 };
 
 struct AutoStackRule {
@@ -67,6 +72,8 @@ static AutoStackRule MakeDefaultRule_()
     r.target.fixedSlot = -1;
     r.target.fixedCreatureId = -1;
     r.target.fixedHex = -1;
+    r.target.meleeStandHex = -1;
+    r.target.meleeAttackHex = -1;
     r.allowDefendFallback = false;
     return r;
 }

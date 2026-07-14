@@ -89,6 +89,9 @@ struct CellControl
     bool             dirty;
     bool             has_data;
     H3LoadedDef*     def_cache;
+
+    // 近战选格请求：1=选站立格，2=选攻击格，0=无（由面板消费后清零）
+    int              melee_pick_request;
 };
 
 // ========================================================================
@@ -195,6 +198,13 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
         t.selector = SEL_NEAREST;
         break;
     case AA_MELEE_ATTACK:
+        // 近战：站立格 + 攻击格（模拟点击）
+        t.kind = AT_POSITION;
+        t.side = ATS_ENEMY;
+        t.selector = SEL_FIXED;
+        t.meleeStandHex = -1;
+        t.meleeAttackHex = -1;
+        break;
     case AA_RANGED_ATTACK:
         t.kind = AT_STACK;
         t.side = ATS_ENEMY;
@@ -246,6 +256,14 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bo
 
     switch (rule->action) {
     case AA_MELEE_ATTACK:
+        rule->target.kind = AT_POSITION;
+        rule->target.side = ATS_ENEMY;
+        rule->target.selector = SEL_FIXED;
+        if (rule->target.meleeStandHex < 1 || rule->target.meleeStandHex > 185)
+            rule->target.meleeStandHex = -1;
+        if (rule->target.meleeAttackHex < 1 || rule->target.meleeAttackHex > 185)
+            rule->target.meleeAttackHex = -1;
+        break;
     case AA_RANGED_ATTACK:
         rule->target.kind = AT_STACK;
         rule->target.side = ATS_ENEMY;
@@ -317,7 +335,12 @@ static int CellControl_GetAllowedSelectors(AutoActionKind action, AutoTargetKind
         }
         return n;
     }
-    // 近战/远程
+    if (action == AA_MELEE_ATTACK) {
+        // 近战固定为“站立格+攻击格”，选择器仅保留指定
+        push(SEL_FIXED);
+        return n;
+    }
+    // 远程
     push(SEL_RANDOM);
     push(SEL_SEQUENTIAL);
     push(SEL_NEAREST);
@@ -340,6 +363,7 @@ static const char* CellControl_FixedSideHint(AutoActionKind action)
 {
     switch (action) {
     case AA_MELEE_ATTACK:
+        return "站立格+攻击格";
     case AA_RANGED_ATTACK:
         return "敌方部队";
     case AA_FIRST_AID:
@@ -368,6 +392,7 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->data.army_slot_ix = -1;
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
+    ctrl->melee_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -593,41 +618,64 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         CC_ROW1_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_ACTION);
 
     if (needs_target) {
-        // ---- 第二行：阵营 / 固定说明 ----
-        if (CellControl_ShowsSideRow(rule.action)) {
-            const char* side_label =
-                (rule.target.side < ATS_COUNT && g_side_labels[rule.target.side])
-                ? g_side_labels[rule.target.side] : "---";
+        if (rule.action == AA_MELEE_ATTACK) {
+            // 近战：第二行站立格，第三行攻击格
+            char stand_buf[24] = {};
+            char atk_buf[24] = {};
+            char pos1[8] = {}, pos2[8] = {};
+            CellControl_FormatPosition(pos1, sizeof(pos1), rule.target.meleeStandHex);
+            CellControl_FormatPosition(pos2, sizeof(pos2), rule.target.meleeAttackHex);
+            _snprintf(stand_buf, sizeof(stand_buf), "站立: %s", pos1);
+            _snprintf(atk_buf, sizeof(atk_buf), "攻击: %s", pos2);
+
             CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H,
                 ctrl->side_pressed, false);
-            CellControl_DrawText(scr, fntS, side_label,
-                CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 20, CC_ROW_H,
+            CellControl_DrawText(scr, fntS, stand_buf,
+                CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 8, CC_ROW_H,
                 (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
-            CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
-                CC_ROW2_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SIDE);
-        } else {
-            const char* hint = CellControl_FixedSideHint(rule.action);
-            if (hint) {
-                Fill(scr, CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H, 48, 36, 20);
-                scr->DrawFrame(CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H,
-                    (BYTE)120, (BYTE)96, (BYTE)48);
-                CellControl_DrawText(scr, fntS, hint,
-                    CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 8, CC_ROW_H,
-                    (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-            }
-        }
 
-        // ---- 第三行：选择器 ----
-        const char* sel_label =
-            (rule.target.selector < SEL_COUNT && g_selector_labels[rule.target.selector])
-            ? g_selector_labels[rule.target.selector] : "---";
-        CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW3_Y, CC_COMBO_W, CC_ROW_H,
-            ctrl->selector_pressed, false);
-        CellControl_DrawText(scr, fntS, sel_label,
-            CC_COMBO_X + 4, CC_ROW3_Y, CC_COMBO_W - 20, CC_ROW_H,
-            (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_LEFT);
-        CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
-            CC_ROW3_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SELECTOR);
+            CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW3_Y, CC_COMBO_W, CC_ROW_H,
+                ctrl->selector_pressed, false);
+            CellControl_DrawText(scr, fntS, atk_buf,
+                CC_COMBO_X + 4, CC_ROW3_Y, CC_COMBO_W - 8, CC_ROW_H,
+                (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_LEFT);
+        } else {
+            // ---- 第二行：阵营 / 固定说明 ----
+            if (CellControl_ShowsSideRow(rule.action)) {
+                const char* side_label =
+                    (rule.target.side < ATS_COUNT && g_side_labels[rule.target.side])
+                    ? g_side_labels[rule.target.side] : "---";
+                CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H,
+                    ctrl->side_pressed, false);
+                CellControl_DrawText(scr, fntS, side_label,
+                    CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 20, CC_ROW_H,
+                    (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
+                CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
+                    CC_ROW2_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SIDE);
+            } else {
+                const char* hint = CellControl_FixedSideHint(rule.action);
+                if (hint) {
+                    Fill(scr, CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H, 48, 36, 20);
+                    scr->DrawFrame(CC_COMBO_X, CC_ROW2_Y, CC_COMBO_W, CC_ROW_H,
+                        (BYTE)120, (BYTE)96, (BYTE)48);
+                    CellControl_DrawText(scr, fntS, hint,
+                        CC_COMBO_X + 4, CC_ROW2_Y, CC_COMBO_W - 8, CC_ROW_H,
+                        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+                }
+            }
+
+            // ---- 第三行：选择器 ----
+            const char* sel_label =
+                (rule.target.selector < SEL_COUNT && g_selector_labels[rule.target.selector])
+                ? g_selector_labels[rule.target.selector] : "---";
+            CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW3_Y, CC_COMBO_W, CC_ROW_H,
+                ctrl->selector_pressed, false);
+            CellControl_DrawText(scr, fntS, sel_label,
+                CC_COMBO_X + 4, CC_ROW3_Y, CC_COMBO_W - 20, CC_ROW_H,
+                (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_LEFT);
+            CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
+                CC_ROW3_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SELECTOR);
+        }
     }
 
     // ---- 降级复选框 ----
@@ -841,6 +889,8 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
+    CELL_HIT_MELEE_STAND,  // 近战站立格
+    CELL_HIT_MELEE_ATTACK, // 近战攻击格
 };
 
 static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y)
@@ -870,16 +920,25 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         return CELL_HIT_ACTION;
 
     if (needs_target) {
-        if (CellControl_ShowsSideRow(ctrl->data.rule.action)
-            && ctrl->expanded != CEX_SIDE
-            && local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
-            && local_y >= CC_ROW2_Y && local_y < CC_ROW2_Y + CC_ROW_H)
-            return CELL_HIT_SIDE;
+        if (ctrl->data.rule.action == AA_MELEE_ATTACK) {
+            if (local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
+                && local_y >= CC_ROW2_Y && local_y < CC_ROW2_Y + CC_ROW_H)
+                return CELL_HIT_MELEE_STAND;
+            if (local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
+                && local_y >= CC_ROW3_Y && local_y < CC_ROW3_Y + CC_ROW_H)
+                return CELL_HIT_MELEE_ATTACK;
+        } else {
+            if (CellControl_ShowsSideRow(ctrl->data.rule.action)
+                && ctrl->expanded != CEX_SIDE
+                && local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
+                && local_y >= CC_ROW2_Y && local_y < CC_ROW2_Y + CC_ROW_H)
+                return CELL_HIT_SIDE;
 
-        if (ctrl->expanded != CEX_SELECTOR
-            && local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
-            && local_y >= CC_ROW3_Y && local_y < CC_ROW3_Y + CC_ROW_H)
-            return CELL_HIT_SELECTOR;
+            if (ctrl->expanded != CEX_SELECTOR
+                && local_x >= CC_COMBO_X && local_x < CC_COMBO_X + CC_COMBO_W
+                && local_y >= CC_ROW3_Y && local_y < CC_ROW3_Y + CC_ROW_H)
+                return CELL_HIT_SELECTOR;
+        }
     }
 
     if (shows_fallback
@@ -943,6 +1002,20 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         if (hit == CELL_HIT_CHECKBOX) {
             ctrl->data.rule.allowDefendFallback = !ctrl->data.rule.allowDefendFallback;
             ctrl->expanded = CEX_NONE;
+            ctrl->dirty = true;
+            return true;
+        }
+        if (hit == CELL_HIT_MELEE_STAND) {
+            ctrl->melee_pick_request = 1; // 选站立格
+            ctrl->expanded = CEX_NONE;
+            ctrl->side_pressed = true;
+            ctrl->dirty = true;
+            return true;
+        }
+        if (hit == CELL_HIT_MELEE_ATTACK) {
+            ctrl->melee_pick_request = 2; // 选攻击格
+            ctrl->expanded = CEX_NONE;
+            ctrl->selector_pressed = true;
             ctrl->dirty = true;
             return true;
         }

@@ -138,9 +138,10 @@ struct _BattleMgr_ {
     int  current_active_side;  // 0=下方, 1=上方
     int  auto_combat;          // 非0=AI自动战斗模式
     _BattleStack_* active_stack;
-    char _pad132CC[0x132D8 - 0x132CC];
-    int  attacker_coord;
-    int  move_type;
+    char _pad132CC[0x132D4 - 0x132CC]; // blueHighlight + creatureAtMousePos 等
+    int  mouse_coord;          // 0x132D4 悬停/点击目标格
+    int  attacker_coord;       // 0x132D8 近战攻击站立格/方向参数
+    int  move_type;            // 0x132DC 悬停动作类型（7=近战等）
     char _pad132E0[0x132F8 - 0x132E0];
     int  finished;
     void* dlg;                 // 战斗对话框指针
