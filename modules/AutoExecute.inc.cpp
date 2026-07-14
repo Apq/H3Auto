@@ -91,83 +91,259 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21])
     WriteLog("[Auto] 5 profiles committed; active profile=%d", g_active_profile + 1);
 }
 
-// 接管决策结果：判定点注入只能表达两种结果。
-enum TakeoverDecision {
-    TD_LEAVE_ORIGINAL = 0,  // 不干预：保持原版返回值
-    TD_HAND_TO_AI     = 1,  // 交回 AI
+// 控制权三态：
+// KEEP_ORIGINAL = 保持原版（人类输入/原版逻辑）
+// HAND_TO_AI    = 交给原版 AI
+// EXECUTE_H3AUTO= 本回合由 H3Auto 提交主动动作
+enum ControlDecision {
+    CD_KEEP_ORIGINAL = 0,
+    CD_HAND_TO_AI    = 1,
+    CD_EXECUTE_H3AUTO = 2,
 };
 
-// 主动动作提交尚未落地；“按设置执行”分支暂时不干预，待后续实现。
-static const bool AUTO_ACTION_EXECUTION_READY = false;
+// 原版 eBattleAction 值（与 H3API 一致）
+enum BattleActionCode {
+    BA_DEFEND = 3,
+    BA_SHOOT  = 7,
+};
 
-// DecideTakeover：按最终规范判定当前活动单位。
-// 1. 弹药车：永远不干预。
-// 2. 急救帐篷：有急救术且配置了急救治疗→主动执行（未就绪则暂不干预）；否则不干预。
-// 3. 投石车：配置了投石车攻击→主动执行；否则有弹道术→不干预，无→交回AI。
-// 4. 弩车/箭塔：配置了远程攻击→主动执行；否则有炮术→不干预，无→交回AI。
-// 5. 其它部队：手动→不干预；非手动→主动执行（绝不交回AI）。
+static bool IsWarMachineCid_(int cid)
+{
+    return cid == WM_CATAPULT || cid == WM_BALLISTA
+        || cid == WM_FIRST_AID || cid == WM_AMMO_CART
+        || cid == WM_ARROW_TOWER;
+}
+
+// 选择远程目标：按选择器从敌方存活部队中挑一个，并过 CanShoot。
+static _BattleStack_* SelectRangedTarget_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule)
+{
+    if (!mgr || !self) return nullptr;
+    const int my_side = self->def_group_ix;
+    const int enemy_side = 1 - my_side;
+
+    _BattleStack_* candidates[21] = {};
+    int count = 0;
+    for (int i = 0; i < 21 && count < 21; ++i) {
+        _BattleStack_* t = &mgr->stack[enemy_side][i];
+        if (t->count_current <= 0 || t->count_at_start <= 0) continue;
+        if (t->creature_id < 0) continue;
+        if (!self->CanShoot(t)) continue;
+        candidates[count++] = t;
+    }
+    if (count <= 0) return nullptr;
+
+    // 固定部队：side+slot 指纹
+    if (rule.target.selector == SEL_FIXED
+        && rule.target.fixedSide >= 0 && rule.target.fixedSlot >= 0
+        && rule.target.fixedSide <= 1 && rule.target.fixedSlot < 21)
+    {
+        _BattleStack_* t = &mgr->stack[rule.target.fixedSide][rule.target.fixedSlot];
+        if (t->count_current > 0
+            && (rule.target.fixedCreatureId < 0
+                || t->creature_id == rule.target.fixedCreatureId)
+            && self->CanShoot(t))
+            return t;
+        return nullptr;
+    }
+
+    switch (rule.target.selector) {
+    case SEL_SEQUENTIAL: {
+        // 简单顺序：按 army_slot_ix 升序第一个
+        _BattleStack_* best = candidates[0];
+        for (int i = 1; i < count; ++i)
+            if (candidates[i]->army_slot_ix < best->army_slot_ix)
+                best = candidates[i];
+        return best;
+    }
+    case SEL_COUNT_HIGH: {
+        _BattleStack_* best = candidates[0];
+        for (int i = 1; i < count; ++i)
+            if (candidates[i]->count_current > best->count_current)
+                best = candidates[i];
+        return best;
+    }
+    case SEL_COUNT_LOW: {
+        _BattleStack_* best = candidates[0];
+        for (int i = 1; i < count; ++i)
+            if (candidates[i]->count_current < best->count_current)
+                best = candidates[i];
+        return best;
+    }
+    case SEL_NEAREST:
+    case SEL_FARTHEST: {
+        _BattleStack_* best = candidates[0];
+        int best_d = abs(best->hex_ix - self->hex_ix);
+        for (int i = 1; i < count; ++i) {
+            int d = abs(candidates[i]->hex_ix - self->hex_ix);
+            if ((rule.target.selector == SEL_NEAREST && d < best_d)
+                || (rule.target.selector == SEL_FARTHEST && d > best_d))
+            {
+                best = candidates[i];
+                best_d = d;
+            }
+        }
+        return best;
+    }
+    case SEL_RANGED_SPEED:
+        // 暂无 creature speed 细节字段时，回退随机
+    case SEL_RANDOM:
+    default:
+        return candidates[rand() % count];
+    }
+}
+
+// 提交防御：仅写 battle->action=3，由主循环自然进入 FUN_004786b0。
+static bool SubmitDefend_(_BattleMgr_* mgr, _BattleStack_* self)
+{
+    if (!mgr || !self) return false;
+    if (mgr->action != 0) return false; // 已有动作
+    mgr->action = BA_DEFEND;
+    mgr->action_parameter = -1;
+    mgr->action_target = -1;
+    mgr->action_parameter2 = 0;
+    g_auto_state.last_handled_stack = self;
+    WriteLog("[Auto] submit DEFEND slot=%d creature=0x%X",
+        self->army_slot_ix, self->creature_id);
+    return true;
+}
+
+// 提交远程攻击：action=7, actionTarget=目标 hex。
+static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    if (!mgr || !self) return false;
+    if (mgr->action != 0) return false;
+    _BattleStack_* target = SelectRangedTarget_(mgr, self, rule);
+    if (!target) return false;
+    mgr->action = BA_SHOOT;
+    mgr->action_parameter = -1;
+    mgr->action_target = target->hex_ix;
+    mgr->action_parameter2 = 0;
+    g_auto_state.last_handled_stack = self;
+    WriteLog("[Auto] submit SHOOT slot=%d -> hex=%d target_slot=%d",
+        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+    return true;
+}
+
+// 尝试按规则提交主动动作；成功返回 true。
+static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr)
+{
+    if (!mgr) return false;
+    if (mgr->auto_combat) return false;
+    if (IsHiddenBattle(mgr)) return false;
+    if (mgr->action != 0) return false;
+    _BattleStack_* self = mgr->active_stack;
+    if (!self || self->count_current <= 0) return false;
+    if (g_auto_state.last_handled_stack == self) return false; // 本单位已处理
+
+    const int idx = self->army_slot_ix;
+    if (idx < 0 || idx >= 21) return false;
+    const AutoStackRule& rule = g_active_rules[idx];
+    const int cid = self->creature_id;
+
+    // 弹药车永不主动。
+    if (cid == WM_AMMO_CART)
+        return false;
+
+    // 急救帐篷：仅配置了急救时主动（暂未实现治疗提交）。
+    if (cid == WM_FIRST_AID) {
+        if (rule.action != AA_FIRST_AID) return false;
+        WriteLog("[Auto] tent first-aid not implemented yet, leave original");
+        return false;
+    }
+
+    // 投石车：仅配置了投石时主动（暂未实现）。
+    if (cid == WM_CATAPULT) {
+        if (rule.action != AA_CATAPULT) return false;
+        WriteLog("[Auto] catapult action not implemented yet, leave original");
+        return false;
+    }
+
+    // 弩车/箭塔/普通远程：远程攻击
+    if (rule.action == AA_RANGED_ATTACK) {
+        if (SubmitRanged_(mgr, self, rule))
+            return true;
+        // 失败：普通部队可降级防御；战争机器不降级
+        if (!IsWarMachineCid_(cid) && rule.allowDefendFallback)
+            return SubmitDefend_(mgr, self);
+        return false;
+    }
+
+    // 防御
+    if (rule.action == AA_DEFEND)
+        return SubmitDefend_(mgr, self);
+
+    // 其它动作（移动/近战/等待/急救/投石）尚未实现。
+    // 普通部队失败时若允许降级则防御。
+    if (!IsWarMachineCid_(cid) && rule.action != AA_MANUAL) {
+        if (rule.allowDefendFallback)
+            return SubmitDefend_(mgr, self);
+        WriteLog("[Auto] action %d not implemented; leave original slot=%d",
+            (int)rule.action, idx);
+    }
+    return false;
+}
+
+// DecideTakeover：仅用于 FUN_004744d0 返回值改写（交回AI / 保持原版）。
+// 主动执行不在此函数写动作，而在 TrySubmitConfiguredAction_。
 int DecideTakeover(_BattleMgr_* mgr)
 {
-    if (!mgr) return TD_LEAVE_ORIGINAL;
-    if (mgr->auto_combat) return TD_LEAVE_ORIGINAL;
-    if (IsHiddenBattle(mgr)) return TD_LEAVE_ORIGINAL;
+    if (!mgr) return CD_KEEP_ORIGINAL;
+    if (mgr->auto_combat) return CD_KEEP_ORIGINAL;
+    if (IsHiddenBattle(mgr)) return CD_KEEP_ORIGINAL;
     _BattleStack_* stack = mgr->active_stack;
-    if (!stack || stack->count_current <= 0) return TD_LEAVE_ORIGINAL;
+    if (!stack || stack->count_current <= 0) return CD_KEEP_ORIGINAL;
 
     int idx = stack->army_slot_ix;
-    if (idx < 0 || idx >= 21) return TD_LEAVE_ORIGINAL;
+    if (idx < 0 || idx >= 21) return CD_KEEP_ORIGINAL;
     const AutoStackRule& rule = g_active_rules[idx];
     const int cid = stack->creature_id;
 
     switch (cid) {
     case WM_AMMO_CART:
-        return TD_LEAVE_ORIGINAL;
+        return CD_KEEP_ORIGINAL;
 
     case WM_FIRST_AID:
-        // 无急救术时面板已排除；有急救术且配置了治疗→主动执行。
-        if (rule.action == AA_FIRST_AID) {
-            if (AUTO_ACTION_EXECUTION_READY) {
-                // TODO: 主动急救。
-            }
-            WriteLog("[Auto] tent slot #%d first-aid (主动执行未就绪，暂不干预)", idx);
-            return TD_LEAVE_ORIGINAL;
-        }
-        return TD_LEAVE_ORIGINAL;
+        // 配置了急救→主动执行；否则保持原版。
+        if (rule.action == AA_FIRST_AID)
+            return CD_EXECUTE_H3AUTO;
+        return CD_KEEP_ORIGINAL;
 
     case WM_CATAPULT:
-        if (rule.action == AA_CATAPULT) {
-            if (AUTO_ACTION_EXECUTION_READY) {
-                // TODO: 主动投石。
-            }
-            WriteLog("[Auto] catapult slot #%d (主动执行未就绪，暂不干预)", idx);
-            return TD_LEAVE_ORIGINAL;
-        }
+        if (rule.action == AA_CATAPULT)
+            return CD_EXECUTE_H3AUTO;
         if (HeroHasSkill(mgr, SK_BALLISTICS))
-            return TD_LEAVE_ORIGINAL;
-        return TD_HAND_TO_AI;
+            return CD_KEEP_ORIGINAL;
+        return CD_HAND_TO_AI;
 
     case WM_BALLISTA:
     case WM_ARROW_TOWER:
-        if (rule.action == AA_RANGED_ATTACK) {
-            if (AUTO_ACTION_EXECUTION_READY) {
-                // TODO: 主动远程。
-            }
-            WriteLog("[Auto] ballista/tower slot #%d (主动执行未就绪，暂不干预)", idx);
-            return TD_LEAVE_ORIGINAL;
-        }
+        if (rule.action == AA_RANGED_ATTACK)
+            return CD_EXECUTE_H3AUTO;
         if (HeroHasSkill(mgr, SK_ARTILLERY))
-            return TD_LEAVE_ORIGINAL;
-        return TD_HAND_TO_AI;
+            return CD_KEEP_ORIGINAL;
+        return CD_HAND_TO_AI;
 
     default:
         if (rule.action == AA_MANUAL)
-            return TD_LEAVE_ORIGINAL;
-        if (AUTO_ACTION_EXECUTION_READY) {
-            // TODO: 主动执行；失败且允许降级→防御。
-        }
-        WriteLog("[Auto] unit slot #%d action=%d (主动执行未就绪，暂不干预)",
-            idx, (int)rule.action);
-        return TD_LEAVE_ORIGINAL;
+            return CD_KEEP_ORIGINAL;
+        return CD_EXECUTE_H3AUTO; // 绝不交回 AI
+    }
+}
+
+// 供战斗消息入口调用：若当前单位应由 H3Auto 主动执行，则提交动作。
+// 返回 true 表示已写入 action，原版输入可继续走默认路径处理后续。
+bool TryAutoExecuteActiveStack()
+{
+    _BattleMgr_* mgr = o_BattleMgr;
+    if (!mgr) return false;
+    __try {
+        const int decision = DecideTakeover(mgr);
+        if (decision != CD_EXECUTE_H3AUTO)
+            return false;
+        return TrySubmitConfiguredAction_(mgr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
 }
 
@@ -183,8 +359,24 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
     if (orig != 0)
         return orig;            // 原版已判定自动执行，保持不变
     __try {
-        if (DecideTakeover(This) == TD_HAND_TO_AI)
-            return 1;           // 交回 AI：原版自动执行该单位
+        // 活动单位变化时允许重新提交
+        if (This && This->active_stack
+            && g_auto_state.last_handled_stack != This->active_stack)
+        {
+            // 不在这里清空 last_handled；由提交成功时写入
+        }
+        if (This && This->active_stack
+            && g_auto_state.last_handled_stack
+            && g_auto_state.last_handled_stack != This->active_stack)
+        {
+            g_auto_state.last_handled_stack = nullptr;
+        }
+
+        const int decision = DecideTakeover(This);
+        if (decision == CD_HAND_TO_AI)
+            return 1;           // 交回 AI
+        // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0，走人类输入路径；
+        // 主动动作在 Hook_BattleMsgProc 入口提交。
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return 0;
 }

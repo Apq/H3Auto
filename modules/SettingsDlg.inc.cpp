@@ -1357,9 +1357,10 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 
 // 战斗消息处理入口（FUN_004746b0 @ 0x4746B0）。this=H3CombatManager 在 ECX，
 // 消息指针 msg 在栈上 [esp+4]。msg[0]=类型（4=鼠标移动），msg[4]=x，msg[5]=y。
-// 面板打开时，把鼠标移动消息的坐标改成离屏值，让原函数走它自己的离屏
-// 清除分支，自然清掉 creatureAtMousePos/mouseCoord，行动顺序条高亮随之消失。
-// 这是原版例程，不依赖 SP/HD。面板点击用独立的 GetCursorPosition，不受影响。
+// 1) 面板打开时：把鼠标移动坐标改成离屏，清掉 hover 高亮。
+// 2) 面板关闭时：若当前活动单位应由 H3Auto 主动执行，则在此提交 action 字段，
+//    让原版主循环自然进入 FUN_004786b0 执行动画/伤害/回合推进。
+extern bool TryAutoExecuteActiveStack();
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
     (void)h;
@@ -1371,7 +1372,14 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
                 msg[5] = -1000;         // y 离屏
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return EXEC_DEFAULT;
     }
+
+    // 面板未打开：尝试主动提交当前单位动作（防御/远程等）。
+    // 只写 battle->action，不跳过原函数；原函数看到 action!=0 会走执行路径。
+    __try {
+        TryAutoExecuteActiveStack();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return EXEC_DEFAULT;
 }
 
