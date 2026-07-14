@@ -155,7 +155,49 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-// 战斗内右键说明使用通用 TDialogBox；自动战斗按钮说明实测为 448x128。
+// 面板打开时安装 WH_MOUSE 钩子，鼠标移动立即刷新下拉悬停高亮，不依赖游戏帧率
+static HHOOK s_mouse_hook = nullptr;
+static bool UpdateDropdownHover_(int px, int py);  // 前向声明（钩子先用到）
+
+static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
+        && wParam == WM_MOUSEMOVE)
+    {
+        // 有下拉展开时才需要即时刷新高亮
+        bool any_expanded = false;
+        for (int i = 0; i < CELL_COUNT; ++i) {
+            if (s_p.cells[i].action_expanded || s_p.cells[i].target_expanded) {
+                any_expanded = true;
+                break;
+            }
+        }
+        if (any_expanded) {
+            const MOUSEHOOKSTRUCT* ms = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
+            if (ms) {
+                HWND game_wnd = *reinterpret_cast<HWND*>(0x699650);
+                POINT pt = ms->pt;
+                RECT client = {};
+                if (game_wnd && ScreenToClient(game_wnd, &pt)
+                    && GetClientRect(game_wnd, &client)
+                    && o_WndMgr && o_WndMgr->screenPcx16
+                    && client.right > client.left && client.bottom > client.top)
+                {
+                    // WH_MOUSE 给出窗口客户区像素坐标；HD 模式下客户区会缩放，
+                    // 而 CellRect/s_p 使用 screenPcx16 的游戏逻辑坐标。
+                    const int game_x = MulDiv(pt.x - client.left,
+                        o_WndMgr->screenPcx16->width, client.right - client.left);
+                    const int game_y = MulDiv(pt.y - client.top,
+                        o_WndMgr->screenPcx16->height, client.bottom - client.top);
+                    const int hpx = game_x - s_p.x;
+                    const int hpy = game_y - s_p.y;
+                    UpdateDropdownHover_(hpx, hpy);
+                }
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
 // 真正的战斗窗口。0x0063A5E4 是战斗底下仍保留的冒险地图窗口。
 static const UINT s_combat_dialog_vtable = 0x0063D528;
@@ -176,6 +218,7 @@ void CloseSettingsPanel();
 static void DrawPanelToBuffer_();
 static void HandlePanelInput_();
 static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y);
+static bool UpdateDropdownHover_(int px, int py);
 static bool BlockBattleHover_();
 static void RestoreBattleHover_();
 static void UpdatePanelModalSuspension_();
@@ -1285,11 +1328,8 @@ static void DrawPanelToBuffer_()
         px + 20, py + 13, PANEL_W - 40, TITLE_H,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
 
-    // 计算鼠标在面板上的相对坐标（用于下拉项悬停高亮）
-    H3POINT cursor = H3POINT::GetCursorPosition();
-    const int mouse_px = cursor.x - s_p.x;
-    const int mouse_py = cursor.y - s_p.y;
-
+    // 下拉悬停高亮由 WH_MOUSE 钩子即时更新到 s_p.hover_cell/hover_idx，
+    // 绘制时直接使用，不再依赖低帧率的游戏坐标。
     H3Font* fntS = GetSmallFont();
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
@@ -1318,17 +1358,19 @@ static void DrawPanelToBuffer_()
         if (!ctrl->buffer || !ctrl->buffer->buffer) continue;
         RECT cRc = CellRect(i);
         if (ctrl->action_expanded) {
+            const int h_idx = (s_p.hover_cell == i) ? s_p.hover_idx : -1;
             CellControl_DrawActionDropdownTo(ctrl, scr,
-                cRc.left, cRc.top, mouse_px - cRc.left, mouse_py - cRc.top);
+                cRc.left, cRc.top, h_idx);
             int bottom = cRc.top + CC_ROW1_Y + CC_ROW_H
                 + MAX_ACTION_LABELS * CC_DROPDOWN_ITEM_H;
             if (bottom > max_redraw_bottom) max_redraw_bottom = bottom;
         }
         if (ctrl->target_expanded) {
             const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+            const int h_idx = (s_p.hover_cell == i) ? s_p.hover_idx : -1;
             CellControl_DrawTargetDropdownTo(ctrl, scr,
                 cRc.left, cRc.top,
-                mouse_px - cRc.left, mouse_py - cRc.top,
+                h_idx,
                 expand_up);
             int bottom = expand_up
                 ? cRc.top + CC_ROW2_Y
@@ -1428,9 +1470,15 @@ void OpenSettingsPanel_()
     ForcePanelDefaultCursor_();
     DrawPanelToBuffer_();
     // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
+    const DWORD panel_thread = GetWindowThreadProcessId(
+        *reinterpret_cast<HWND*>(0x699650), nullptr);
     if (!s_kb_hook)
         s_kb_hook = SetWindowsHookExA(WH_KEYBOARD, PanelKbHook_, g_hModule,
-            GetWindowThreadProcessId(*reinterpret_cast<HWND*>(0x699650), nullptr));
+            panel_thread);
+    // 安装鼠标钩子，下拉展开时立即刷新悬停高亮，不受游戏帧率影响
+    if (!s_mouse_hook)
+        s_mouse_hook = SetWindowsHookExA(WH_MOUSE, PanelMouseHook_, g_hModule,
+            panel_thread);
     WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
 }
 
@@ -1455,6 +1503,10 @@ void CloseSettingsPanel()
     if (s_kb_hook) {
         UnhookWindowsHookEx(s_kb_hook);
         s_kb_hook = nullptr;
+    }
+    if (s_mouse_hook) {
+        UnhookWindowsHookEx(s_mouse_hook);
+        s_mouse_hook = nullptr;
     }
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
@@ -1549,6 +1601,47 @@ static bool HandleExpandedDropdownClick_(int px, int py, int cell_msg)
     return false;
 }
 
+// 根据鼠标面板坐标更新展开下拉的悬停项，只在悬停项变化时重绘（无延迟）。
+// 返回 true 表示重绘了。
+static bool UpdateDropdownHover_(int px, int py)
+{
+    const int first_item = s_p.scroll_row * COLS;
+    int new_hover_cell = -1, new_hover_idx = -1;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        const int item_index = first_item + i;
+        if (item_index >= s_p.count) break;
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->action_expanded && !ctrl->target_expanded) continue;
+        RECT cRc = CellRect(i);
+        const int lx = px - cRc.left;
+        const int ly = py - cRc.top;
+        if (lx < CC_COMBO_X || lx >= CC_COMBO_X + CC_COMBO_W) { new_hover_cell = -1; new_hover_idx = -1; break; }
+        if (ctrl->action_expanded) {
+            const int rel_y = ly - (CC_ROW1_Y + CC_ROW_H);
+            int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
+            if (idx < 0 || idx >= MAX_ACTION_LABELS) idx = -1;
+            new_hover_cell = i; new_hover_idx = idx;
+        } else {
+            const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+            const int list_top = expand_up
+                ? CC_ROW2_Y - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H
+                : CC_ROW2_Y + CC_ROW_H;
+            const int rel_y = ly - list_top;
+            int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
+            if (idx < 0 || idx >= MAX_TARGET_LABELS) idx = -1;
+            new_hover_cell = i; new_hover_idx = idx;
+        }
+        break;
+    }
+    if (new_hover_cell != s_p.hover_cell || new_hover_idx != s_p.hover_idx) {
+        s_p.hover_cell = new_hover_cell;
+        s_p.hover_idx = new_hover_idx;
+        DrawPanelToBuffer_();
+        return true;
+    }
+    return false;
+}
+
 static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y)
 {
     if (!s_p.active) return;
@@ -1571,43 +1664,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             }
             return;
         }
-        // 下拉展开时，鼠标移动立即重绘以刷新悬停高亮（无延迟）。
-        // 只在悬停项变化时重绘，避免每像素重绘。
-        {
-            const int first_item = s_p.scroll_row * COLS;
-            int new_hover_cell = -1, new_hover_idx = -1;
-            for (int i = 0; i < CELL_COUNT; ++i) {
-                const int item_index = first_item + i;
-                if (item_index >= s_p.count) break;
-                CellControl* ctrl = &s_p.cells[i];
-                if (!ctrl->action_expanded && !ctrl->target_expanded) continue;
-                RECT cRc = CellRect(i);
-                const int lx = px - cRc.left;
-                const int ly = py - cRc.top;
-                if (lx < CC_COMBO_X || lx >= CC_COMBO_X + CC_COMBO_W) { new_hover_cell = -1; new_hover_idx = -1; break; }
-                if (ctrl->action_expanded) {
-                    const int rel_y = ly - (CC_ROW1_Y + CC_ROW_H);
-                    int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
-                    if (idx < 0 || idx >= MAX_ACTION_LABELS) idx = -1;
-                    new_hover_cell = i; new_hover_idx = idx;
-                } else {
-                    const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
-                    const int list_top = expand_up
-                        ? CC_ROW2_Y - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H
-                        : CC_ROW2_Y + CC_ROW_H;
-                    const int rel_y = ly - list_top;
-                    int idx = rel_y >= 0 ? rel_y / CC_DROPDOWN_ITEM_H : -1;
-                    if (idx < 0 || idx >= MAX_TARGET_LABELS) idx = -1;
-                    new_hover_cell = i; new_hover_idx = idx;
-                }
-                break;
-            }
-            if (new_hover_cell != s_p.hover_cell || new_hover_idx != s_p.hover_idx) {
-                s_p.hover_cell = new_hover_cell;
-                s_p.hover_idx = new_hover_idx;
-                DrawPanelToBuffer_();
-            }
-        }
+        // 下拉展开时，鼠标移动立即刷新悬停高亮（无延迟）。
+        UpdateDropdownHover_(px, py);
         return;
     }
 

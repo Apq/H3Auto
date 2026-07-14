@@ -506,28 +506,16 @@ static void CellControl_DrawDropdownItem(H3LoadedPcx16* scr, H3Font* fnt,
 
 // 绘制展开的行动下拉列表到面板
 static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
-    int cell_panel_x, int cell_panel_y, int mouse_local_x, int mouse_local_y)
+    int cell_panel_x, int cell_panel_y, int hover_idx)
 {
     if (!ctrl || !ctrl->action_expanded || !scr) return;
 
     H3Font* fntS = GetSmallFont();
     if (!fntS) return;
 
-    // 计算鼠标悬停在哪一项（相对于格子左上角）
-    const int list_top = CC_ROW1_Y + CC_ROW_H;  // 下拉项从格子内按钮下方开始
-    int hovered_idx = -1;
-    if (mouse_local_x >= CC_COMBO_X && mouse_local_x < CC_COMBO_X + CC_COMBO_W) {
-        int rel_y = mouse_local_y - list_top;
-        if (rel_y >= 0) {
-            hovered_idx = rel_y / CC_DROPDOWN_ITEM_H;
-            if (hovered_idx < 0 || hovered_idx >= MAX_ACTION_LABELS)
-                hovered_idx = -1;
-        }
-    }
-
     for (int i = 0; i < MAX_ACTION_LABELS; ++i) {
         bool is_selected = (i == ctrl->data.action_id);
-        bool is_hovered  = (i == hovered_idx);
+        bool is_hovered  = (i == hover_idx);
         CellControl_DrawDropdownItem(scr, fntS,
             g_action_labels[i], i,
             cell_panel_x, cell_panel_y,
@@ -544,7 +532,7 @@ static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
 // expand_up：如果 true，下拉项向上展开（超出格子底部时使用）
 static void CellControl_DrawTargetDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
     int cell_panel_x, int cell_panel_y,
-    int mouse_local_x, int mouse_local_y,
+    int hover_idx,
     bool expand_up)
 {
     if (!ctrl || !ctrl->target_expanded || !scr) return;
@@ -557,20 +545,9 @@ static void CellControl_DrawTargetDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
         ? CC_ROW2_Y - MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H
         : CC_ROW2_Y + CC_ROW_H;
 
-    // 计算鼠标悬停在哪一项
-    int hovered_idx = -1;
-    if (mouse_local_x >= CC_COMBO_X && mouse_local_x < CC_COMBO_X + CC_COMBO_W) {
-        int rel_y = mouse_local_y - list_top;
-        if (rel_y >= 0) {
-            hovered_idx = rel_y / CC_DROPDOWN_ITEM_H;
-            if (hovered_idx < 0 || hovered_idx >= MAX_TARGET_LABELS)
-                hovered_idx = -1;
-        }
-    }
-
     for (int i = 0; i < MAX_TARGET_LABELS; ++i) {
         bool is_selected = (i == ctrl->data.target_id);
-        bool is_hovered  = (i == hovered_idx);
+        bool is_hovered  = (i == hover_idx);
         int item_x = cell_panel_x + CC_COMBO_X;
         int item_y = cell_panel_y + list_top + i * CC_DROPDOWN_ITEM_H;
         int item_w = CC_COMBO_W;
