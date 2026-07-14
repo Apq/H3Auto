@@ -43,7 +43,7 @@ struct CellData
 {
     // 来自 H3CombatCreature
     INT32   creature_type;       // eCreatureType
-    INT32   position;           // 战场坐标 0-186（-1 表示空/测试数据）
+    INT32   position;           // 与HD行动顺序条相同的战场 hex 索引（正常为1-185）
     INT32   count_alive;        // 当前存活数量
     H3LoadedDef* creature_def;   // 生物 DEF 精灵（可为 nullptr）
 
@@ -226,17 +226,24 @@ static H3LoadedPcx16* CellControl_EnsureBuffer(CellControl* ctrl)
     return ctrl->buffer;
 }
 
-// 将堆叠坐标 0-186 转为棋盘格标签 A01-H15
-static void CellControl_FormatPosition(char* buf, int bufsize, int pos)
+// 按HD行动顺序条使用的战场hex编号格式化位置。
+// HD的0x464380返回1-185；战场每行17格，左右边界列不可站立，
+// 因而有效部队位置为：行0-10、列1-15，显示为A01-K15。
+static void CellControl_FormatPosition(char* buf, int bufsize, int hex)
 {
-    if (pos < 0 || pos > 186) {
+    if (hex < 1 || hex > 185) {
         strncpy(buf, "--", bufsize - 1);
         buf[bufsize - 1] = 0;
         return;
     }
-    int col = pos % 8;
-    int row = pos / 8 + 1;
-    _snprintf(buf, bufsize, "%c%02d", 'A' + col, row);
+    const int row = hex / 17;
+    const int col = hex % 17;
+    if (row < 0 || row > 10 || col < 1 || col > 15) {
+        strncpy(buf, "--", bufsize - 1);
+        buf[bufsize - 1] = 0;
+        return;
+    }
+    _snprintf(buf, bufsize, "%c%02d", 'A' + row, col);
 }
 
 // 绘制一行文字（自动处理 GBK 转换）

@@ -1411,6 +1411,28 @@ static void DrawPanelToBuffer_()
 // 第七部分：面板控制
 // ========================================================================
 
+static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Hero* hero)
+{
+    if (stack.numberAlive <= 0)
+        return false;
+
+    switch (stack.type) {
+    case eCreature::AMMO_CART:
+    case eCreature::CATAPULT:
+        // 弹药车和投石车没有可配置行为，始终排除。
+        return false;
+    case eCreature::BALLISTA:
+    case eCreature::ARROW_TOWER:
+        // 弩车、箭塔仅在英雄掌握炮术时可控制。
+        return hero && hero->secSkill[eSecondary::ARTILLERY] > 0;
+    case eCreature::FIRST_AID_TENT:
+        // 急救帐篷仅在英雄掌握急救术时可控制。
+        return hero && hero->secSkill[eSecondary::FIRST_AID] > 0;
+    default:
+        return true;
+    }
+}
+
 void OpenSettingsPanel_()
 {
     H3MouseManager* mouse = H3MouseManager::Get();
@@ -1447,15 +1469,17 @@ void OpenSettingsPanel_()
 
     H3CombatManager* mgr = GetCombatMgr();
     if (mgr) {
+        H3Hero* hero = mgr->hero[0];
         for (int i = 0; i < MAX_STACKS && s_p.count < MAX_STACKS; ++i) {
-            if (mgr->stacks[0][i].numberAlive > 0) {
+            H3CombatCreature& stack = mgr->stacks[0][i];
+            if (IsConfigurablePanelStack_(stack, hero)) {
                 s_p.action[i] = g_action_strategies[i];
                 s_p.target[i] = g_target_strategies[i];
                 CellData cd = {};
-                cd.creature_type = mgr->stacks[0][i].type;
-                cd.position      = mgr->stacks[0][i].position;
-                cd.count_alive   = mgr->stacks[0][i].numberAlive;
-                cd.creature_def  = mgr->stacks[0][i].def;
+                cd.creature_type = stack.type;
+                cd.position      = stack.position;
+                cd.count_alive   = stack.numberAlive;
+                cd.creature_def  = stack.def;
                 cd.action_id     = s_p.action[i];
                 cd.target_id     = s_p.target[i];
                 cd.army_slot_ix  = i;  // 槽位索引，提交时需要
