@@ -1504,6 +1504,51 @@ static bool PointInRect_(int x, int y, int left, int top, int width, int height)
     return x >= left && x < left + width && y >= top && y < top + height;
 }
 
+// 优先处理已展开下拉的点击：下拉展开区可能覆盖到下方格子，必须在普通
+// 格子循环之前用展开区 rect 判定并消费，防止点击穿透到下面的格子。
+// cell_msg: 4=按下（展开区外点击则收起），8=松开（选中下拉项）。
+// 返回 true 表示已消费该点击。
+static bool HandleExpandedDropdownClick_(int px, int py, int cell_msg)
+{
+    const int first_item = s_p.scroll_row * COLS;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        const int item_index = first_item + i;
+        if (item_index >= s_p.count) break;
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->action_expanded && !ctrl->target_expanded) continue;
+        RECT cRc = CellRect(i);
+        const bool expand_up = (cRc.bottom + MAX_TARGET_LABELS * CC_DROPDOWN_ITEM_H > PANEL_H);
+
+        RECT dropRc = {};
+        if (ctrl->action_expanded)
+            CellControl_GetActionDropdownRect(cRc.left, cRc.top, &dropRc);
+        else
+            CellControl_GetTargetDropdownRect(cRc.left, cRc.top, &dropRc);
+
+        const bool in_drop = PointInRect_(px, py, dropRc.left, dropRc.top,
+            dropRc.right - dropRc.left, dropRc.bottom - dropRc.top);
+        // 下拉按钮本身（展开时点它是收起）也算在拥有者格子内。
+        const bool in_cell = PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H);
+
+        if (in_drop || in_cell) {
+            CellControl_OnMouse(ctrl, cell_msg,
+                px - cRc.left, py - cRc.top, expand_up);
+            DrawPanelToBuffer_();
+            return true;  // 无论是否改变状态都消费，阻止穿透
+        }
+
+        // 点在展开区和拥有者格子之外：按下时收起下拉，但不消费该点击，
+        // 让它继续走正常处理（例如点到另一个格子的下拉按钮时应能展开）。
+        if (cell_msg == 4) {
+            ctrl->action_expanded = false;
+            ctrl->target_expanded = false;
+            ctrl->dirty = true;
+            DrawPanelToBuffer_();
+        }
+    }
+    return false;
+}
+
 static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y)
 {
     if (!s_p.active) return;
@@ -1598,6 +1643,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             return;
         }
 
+        // ---- 优先处理展开的下拉：其展开区可能覆盖到下方格子，须先消费防穿透 ----
+        if (HandleExpandedDropdownClick_(px, py, 4))
+            return;
+
         // ---- 格子单元格点击 ----
         {
             const int first_item = s_p.scroll_row * COLS;
@@ -1638,6 +1687,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             CloseSettingsPanel();
             return;
         }
+
+        // 优先处理展开的下拉：防止选中点击穿透到下方格子
+        if (HandleExpandedDropdownClick_(px, py, 8))
+            return;
 
         // 面板松开(raw 16) → 格子松开(8)，选中展开的下拉项
         {
