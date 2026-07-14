@@ -101,10 +101,15 @@ enum ControlDecision {
     CD_EXECUTE_H3AUTO = 2,
 };
 
-// 原版 eBattleAction 值（与 H3API 一致）
+// 原版 eBattleAction 值（与 H3API / FUN_00476500 映射一致）
 enum BattleActionCode {
-    BA_DEFEND = 3,
-    BA_SHOOT  = 7,
+    BA_WALK        = 2,
+    BA_DEFEND      = 3,
+    BA_WALK_ATTACK = 6,
+    BA_SHOOT       = 7,
+    BA_WAIT        = 8,
+    BA_CATAPULT    = 9,
+    BA_FIRST_AID   = 11,
 };
 
 static bool IsWarMachineCid_(int cid)
@@ -114,26 +119,14 @@ static bool IsWarMachineCid_(int cid)
         || cid == WM_ARROW_TOWER;
 }
 
-// 选择远程目标：按选择器从敌方存活部队中挑一个，并过 CanShoot。
-static _BattleStack_* SelectRangedTarget_(_BattleMgr_* mgr, _BattleStack_* self,
-    const AutoStackRule& rule)
+// 通用部队选择：side_filter = 0己方 / 1敌方 / 2双方；require_wounded 用于急救。
+static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule, int side_filter, bool require_wounded,
+    bool require_can_shoot)
 {
     if (!mgr || !self) return nullptr;
-    const int my_side = self->def_group_ix;
-    const int enemy_side = 1 - my_side;
 
-    _BattleStack_* candidates[21] = {};
-    int count = 0;
-    for (int i = 0; i < 21 && count < 21; ++i) {
-        _BattleStack_* t = &mgr->stack[enemy_side][i];
-        if (t->count_current <= 0 || t->count_at_start <= 0) continue;
-        if (t->creature_id < 0) continue;
-        if (!self->CanShoot(t)) continue;
-        candidates[count++] = t;
-    }
-    if (count <= 0) return nullptr;
-
-    // 固定部队：side+slot 指纹
+    // 固定部队优先
     if (rule.target.selector == SEL_FIXED
         && rule.target.fixedSide >= 0 && rule.target.fixedSlot >= 0
         && rule.target.fixedSide <= 1 && rule.target.fixedSlot < 21)
@@ -142,14 +135,38 @@ static _BattleStack_* SelectRangedTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         if (t->count_current > 0
             && (rule.target.fixedCreatureId < 0
                 || t->creature_id == rule.target.fixedCreatureId)
-            && self->CanShoot(t))
-            return t;
+            && (!require_can_shoot || self->CanShoot(t))
+            && (!require_wounded || t->lost_hp > 0 || t->count_current < t->count_at_start))
+        {
+            if (side_filter == 2
+                || (side_filter == 0 && t->def_group_ix == self->def_group_ix)
+                || (side_filter == 1 && t->def_group_ix != self->def_group_ix))
+                return t;
+        }
         return nullptr;
     }
 
+    _BattleStack_* candidates[42] = {};
+    int count = 0;
+    for (int side = 0; side < 2; ++side) {
+        if (side_filter == 0 && side != self->def_group_ix) continue;
+        if (side_filter == 1 && side == self->def_group_ix) continue;
+        for (int i = 0; i < 21 && count < 42; ++i) {
+            _BattleStack_* t = &mgr->stack[side][i];
+            if (t == self) continue;
+            if (t->count_current <= 0 || t->count_at_start <= 0) continue;
+            if (t->creature_id < 0) continue;
+            if (require_can_shoot && !self->CanShoot(t)) continue;
+            if (require_wounded
+                && t->lost_hp <= 0 && t->count_current >= t->count_at_start)
+                continue;
+            candidates[count++] = t;
+        }
+    }
+    if (count <= 0) return nullptr;
+
     switch (rule.target.selector) {
     case SEL_SEQUENTIAL: {
-        // 简单顺序：按 army_slot_ix 升序第一个
         _BattleStack_* best = candidates[0];
         for (int i = 1; i < count; ++i)
             if (candidates[i]->army_slot_ix < best->army_slot_ix)
@@ -170,6 +187,22 @@ static _BattleStack_* SelectRangedTarget_(_BattleMgr_* mgr, _BattleStack_* self,
                 best = candidates[i];
         return best;
     }
+    case SEL_MOST_WOUNDED: {
+        _BattleStack_* best = candidates[0];
+        int best_loss = best->count_at_start - best->count_current;
+        if (best_loss < 0) best_loss = 0;
+        best_loss = best_loss * 1000 + best->lost_hp;
+        for (int i = 1; i < count; ++i) {
+            int loss = candidates[i]->count_at_start - candidates[i]->count_current;
+            if (loss < 0) loss = 0;
+            loss = loss * 1000 + candidates[i]->lost_hp;
+            if (loss > best_loss) {
+                best = candidates[i];
+                best_loss = loss;
+            }
+        }
+        return best;
+    }
     case SEL_NEAREST:
     case SEL_FARTHEST: {
         _BattleStack_* best = candidates[0];
@@ -186,11 +219,28 @@ static _BattleStack_* SelectRangedTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         return best;
     }
     case SEL_RANGED_SPEED:
-        // 暂无 creature speed 细节字段时，回退随机
     case SEL_RANDOM:
     default:
         return candidates[rand() % count];
     }
+}
+
+// 解析位置目标：固定 hex 优先，否则用部队目标的位置，或随机合法邻格占位。
+static int ResolvePositionTarget_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule)
+{
+    if (!mgr || !self) return -1;
+    if (rule.target.kind == AT_POSITION
+        && rule.target.fixedHex >= 1 && rule.target.fixedHex <= 185)
+        return rule.target.fixedHex;
+
+    // 部队作为靠近锚点：返回该部队 hex
+    int side_filter = 2;
+    if (rule.target.side == ATS_OWN) side_filter = 0;
+    else if (rule.target.side == ATS_ENEMY) side_filter = 1;
+    _BattleStack_* t = SelectStackTarget_(mgr, self, rule, side_filter, false, false);
+    if (t) return t->hex_ix;
+    return -1;
 }
 
 // 提交防御：仅写 battle->action=3，由主循环自然进入 FUN_004786b0。
@@ -208,20 +258,94 @@ static bool SubmitDefend_(_BattleMgr_* mgr, _BattleStack_* self)
     return true;
 }
 
-// 提交远程攻击：action=7, actionTarget=目标 hex。
-static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+static bool WriteAction_(_BattleMgr_* mgr, _BattleStack_* self,
+    int action, int param, int target_hex)
 {
     if (!mgr || !self) return false;
     if (mgr->action != 0) return false;
-    _BattleStack_* target = SelectRangedTarget_(mgr, self, rule);
-    if (!target) return false;
-    mgr->action = BA_SHOOT;
-    mgr->action_parameter = -1;
-    mgr->action_target = target->hex_ix;
+    mgr->action = action;
+    mgr->action_parameter = param;
+    mgr->action_target = target_hex;
     mgr->action_parameter2 = 0;
     g_auto_state.last_handled_stack = self;
+    return true;
+}
+
+// 提交远程攻击：action=7, actionTarget=目标 hex。
+static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false, true);
+    if (!target) return false;
+    if (!WriteAction_(mgr, self, BA_SHOOT, -1, target->hex_ix))
+        return false;
     WriteLog("[Auto] submit SHOOT slot=%d -> hex=%d target_slot=%d",
         self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+    return true;
+}
+
+// 提交移动：action=2, actionTarget=目标 hex。
+// 注：可达性未做完整原版寻路校验；固定位置优先，否则靠近目标部队格子。
+static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    int hex = ResolvePositionTarget_(mgr, self, rule);
+    if (hex < 1 || hex > 185) return false;
+    if (hex == self->hex_ix) return false;
+    if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
+        return false;
+    WriteLog("[Auto] submit WALK slot=%d -> hex=%d",
+        self->army_slot_ix, hex);
+    return true;
+}
+
+// 提交近战：action=6, actionTarget=敌方 hex, actionParameter 暂 -1。
+// 完整近战还需攻击邻接格/方向（FUN_00476500 case7 用 0x132d8）；
+// 先提交目标格，让原版执行器尽量消化；失败则调用方降级。
+static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false, false);
+    if (!target) return false;
+    if (!WriteAction_(mgr, self, BA_WALK_ATTACK, -1, target->hex_ix))
+        return false;
+    WriteLog("[Auto] submit WALK_ATTACK slot=%d -> hex=%d target_slot=%d",
+        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+    return true;
+}
+
+// 提交等待：action=8。
+static bool SubmitWait_(_BattleMgr_* mgr, _BattleStack_* self)
+{
+    if (!WriteAction_(mgr, self, BA_WAIT, -1, -1))
+        return false;
+    WriteLog("[Auto] submit WAIT slot=%d", self->army_slot_ix);
+    return true;
+}
+
+// 提交急救：action=11, actionTarget=己方伤员 hex。
+static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 0, true, false);
+    if (!target) return false;
+    if (!WriteAction_(mgr, self, BA_FIRST_AID, -1, target->hex_ix))
+        return false;
+    WriteLog("[Auto] submit FIRST_AID slot=%d -> hex=%d target_slot=%d",
+        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+    return true;
+}
+
+// 提交投石：action=9, actionTarget=城墙/位置 hex。
+// 城墙合法性未完整复用 FUN_00473530；先按位置目标提交。
+static bool SubmitCatapult_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+{
+    int hex = ResolvePositionTarget_(mgr, self, rule);
+    if (hex < 1 || hex > 185) {
+        // 无配置位置时给一个常见城墙 hex 占位（后续替换为原版城墙枚举）
+        hex = rule.target.fixedHex;
+        if (hex < 1 || hex > 185) return false;
+    }
+    if (!WriteAction_(mgr, self, BA_CATAPULT, -1, hex))
+        return false;
+    WriteLog("[Auto] submit CATAPULT slot=%d -> hex=%d",
+        self->army_slot_ix, hex);
     return true;
 }
 
@@ -245,43 +369,36 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr)
     if (cid == WM_AMMO_CART)
         return false;
 
-    // 急救帐篷：仅配置了急救时主动（暂未实现治疗提交）。
-    if (cid == WM_FIRST_AID) {
-        if (rule.action != AA_FIRST_AID) return false;
-        WriteLog("[Auto] tent first-aid not implemented yet, leave original");
-        return false;
-    }
-
-    // 投石车：仅配置了投石时主动（暂未实现）。
-    if (cid == WM_CATAPULT) {
-        if (rule.action != AA_CATAPULT) return false;
-        WriteLog("[Auto] catapult action not implemented yet, leave original");
-        return false;
-    }
-
-    // 弩车/箭塔/普通远程：远程攻击
-    if (rule.action == AA_RANGED_ATTACK) {
-        if (SubmitRanged_(mgr, self, rule))
-            return true;
-        // 失败：普通部队可降级防御；战争机器不降级
+    auto fallback_or_fail = [&](bool ok) -> bool {
+        if (ok) return true;
+        // 战争机器不降级；普通部队可降级防御。
         if (!IsWarMachineCid_(cid) && rule.allowDefendFallback)
             return SubmitDefend_(mgr, self);
         return false;
-    }
+    };
 
-    // 防御
-    if (rule.action == AA_DEFEND)
+    switch (rule.action) {
+    case AA_MANUAL:
+        return false;
+    case AA_DEFEND:
         return SubmitDefend_(mgr, self);
-
-    // 其它动作（移动/近战/等待/急救/投石）尚未实现。
-    // 普通部队失败时若允许降级则防御。
-    if (!IsWarMachineCid_(cid) && rule.action != AA_MANUAL) {
-        if (rule.allowDefendFallback)
-            return SubmitDefend_(mgr, self);
-        WriteLog("[Auto] action %d not implemented; leave original slot=%d",
-            (int)rule.action, idx);
+    case AA_WAIT:
+        return fallback_or_fail(SubmitWait_(mgr, self));
+    case AA_MOVE:
+        return fallback_or_fail(SubmitMove_(mgr, self, rule));
+    case AA_MELEE_ATTACK:
+        return fallback_or_fail(SubmitMelee_(mgr, self, rule));
+    case AA_RANGED_ATTACK:
+        return fallback_or_fail(SubmitRanged_(mgr, self, rule));
+    case AA_FIRST_AID:
+        if (cid != WM_FIRST_AID) return false;
+        return SubmitFirstAid_(mgr, self, rule); // 帐篷不降级
+    case AA_CATAPULT:
+        if (cid != WM_CATAPULT) return false;
+        return SubmitCatapult_(mgr, self, rule); // 投石不降级
+    default:
+        return false;
     }
-    return false;
 }
 
 // DecideTakeover：仅用于 FUN_004744d0 返回值改写（交回AI / 保持原版）。
