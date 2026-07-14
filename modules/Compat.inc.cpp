@@ -114,7 +114,14 @@ struct _Hero_ {
 };
 
 struct _BattleMgr_ {
-    char _pad0[0x53C0];
+    char _pad0[0x3C];
+    // 动作提交字段（官方 H3CombatManager 布局）：原版回合调度
+    // FUN_00473a00 读取 action，非 0 时转交执行器 FUN_004786b0 落地。
+    int  action;               // 0x3C eCombatAction：3=防御, 7=射击/远程攻击, 0=未设置
+    int  action_parameter;     // 0x40
+    int  action_target;        // 0x44 目标格子(position)
+    int  action_parameter2;    // 0x48
+    char _pad4C[0x53C0 - 0x4C];
     int  spec_terr_type;
     char _pad53C4[0x53CC - 0x53C4];
     _Hero_* hero[2];           // [0]=下方玩家, [1]=上方敌方

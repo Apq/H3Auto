@@ -4,6 +4,7 @@
 extern void ResetAutoState();
 extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
 extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
+extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
 extern void LoadLabels_(const char* ini_path);
 
 // ---- Plugin start ----
@@ -18,6 +19,12 @@ static void StartPlugin()
     // LoHook: 战斗消息处理入口，面板打开时拦掉鼠标移动的 hover 重算
     _PI->WriteLoHook(0x4746B0, Hook_BattleMsgProc);
     WriteLog("LoHook 0x4746B0 registered.");
+
+    // HiHook: 战争机器接管判定点。FUN_004744d0 判定当前活动单位是否走自动
+    // 执行；我们在原版返回“等待人类输入”时，若该战争机器已配置非手动策略，
+    // 改返回“自动执行”，复用原版 AI 执行、动画、回合推进。
+    _PI->WriteHiHook(0x4744D0, SPLICE_, THISCALL_, HH_ShouldAutoExecute);
+    WriteLog("HiHook 0x4744D0 registered.");
 
     ResetAutoState();
     WriteLog("H3Auto: plugin enabled.");
