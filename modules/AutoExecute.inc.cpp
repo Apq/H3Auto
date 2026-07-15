@@ -218,7 +218,22 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         }
         return best;
     }
-    case SEL_RANGED_SPEED:
+    case SEL_RANGED_SPEED: {
+        // 远程优先 → 速度降序。射手（shots>0）排在近战前；同类按 speed 高者优先。
+        _BattleStack_* best = candidates[0];
+        int best_ranged = (best->creature.shots > 0) ? 1 : 0;
+        int best_speed = best->creature.speed;
+        for (int i = 1; i < count; ++i) {
+            int r = (candidates[i]->creature.shots > 0) ? 1 : 0;
+            int s = candidates[i]->creature.speed;
+            if (r > best_ranged || (r == best_ranged && s > best_speed)) {
+                best = candidates[i];
+                best_ranged = r;
+                best_speed = s;
+            }
+        }
+        return best;
+    }
     case SEL_RANDOM:
     default:
         return candidates[rand() % count];
@@ -284,9 +299,50 @@ static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStack
 }
 
 // 提交移动：action=2, actionTarget=目标 hex。
-// 注：可达性未做完整原版寻路校验；固定位置优先，否则靠近目标部队格子。
-static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+// 循环移动：按 moveWaypoints 有序巡逻，逐点走向下一个路径点，到达后推进游标（末点回首点）。
+// 无路径点时回退到旧的单目标移动（固定位置 / 靠近目标部队）。
+// 注：可达性未做完整原版寻路校验。
+static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self, AutoStackRule& rule)
 {
+    if (!mgr || !self) return false;
+
+    // 收集有效路径点（1..185，跳过空槽与当前所在格）。
+    int wps[6];
+    int n = 0;
+    for (int i = 0; i < 6 && i < 6; ++i) {
+        int h = rule.target.moveWaypoints[i];
+        if (h >= 1 && h <= 185) wps[n++] = h;
+    }
+
+    if (n > 0) {
+        // 规范化游标。
+        int cur = rule.target.moveWaypointCursor;
+        if (cur < 0 || cur >= n) cur = 0;
+
+        // 若当前已站在游标点上，推进到下一个点（末点回首点）。
+        if (self->hex_ix == wps[cur]) {
+            cur = (cur + 1) % n;
+            rule.target.moveWaypointCursor = (int8_t)cur;
+        }
+
+        // 若下一目标仍是当前格（路径点重复等），再找一个不同的点。
+        int guard = 0;
+        while (wps[cur] == self->hex_ix && guard < n) {
+            cur = (cur + 1) % n;
+            ++guard;
+        }
+        rule.target.moveWaypointCursor = (int8_t)cur;
+
+        int hex = wps[cur];
+        if (hex == self->hex_ix) return false; // 所有点都在脚下
+        if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
+            return false;
+        WriteLog("[Auto] submit WALK(patrol) slot=%d -> hex=%d cursor=%d/%d",
+            self->army_slot_ix, hex, cur, n);
+        return true;
+    }
+
+    // 回退：旧单目标移动。
     int hex = ResolvePositionTarget_(mgr, self, rule);
     if (hex < 1 || hex > 185) return false;
     if (hex == self->hex_ix) return false;
@@ -430,7 +486,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr)
     case AA_WAIT:
         return fallback_or_fail(SubmitWait_(mgr, self));
     case AA_MOVE:
-        return fallback_or_fail(SubmitMove_(mgr, self, rule));
+        return fallback_or_fail(SubmitMove_(mgr, self, g_active_rules[idx]));
     case AA_MELEE_ATTACK:
         return fallback_or_fail(SubmitMelee_(mgr, self, rule));
     case AA_RANGED_ATTACK:
