@@ -5,8 +5,8 @@ const fs = require('fs');
 const path = require('path');
 
 const OUT = path.join(__dirname, '..', 'img', 'HA_cell.pcx');
-const W = 193;
-const H = 83;
+const W = Number(process.argv[2]) || 193;
+const H = Number(process.argv[3]) || 96;
 const BORDER = 2;
 const GOLD = [168, 141, 68];
 const CYAN = [0, 255, 255]; // exact transparency key

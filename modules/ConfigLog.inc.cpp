@@ -37,6 +37,7 @@ enum AutoTargetSelector : uint8_t {
     SEL_COUNT_HIGH,       // 数量最多
     SEL_COUNT_LOW,        // 数量最少
     SEL_MOST_WOUNDED,     // 损失生命最多（帐篷）
+    SEL_NONE,             // 无：不按选择器挑目标（不需要目标/不自动挑）
     SEL_COUNT
 };
 
@@ -53,12 +54,20 @@ struct AutoTargetRule {
     // attackHex 上有敌人（头格或双格尾格都算）时才提交近战。
     int16_t meleeStandHex;     // 站立/接近格，-1=未设
     int16_t meleeAttackHex;    // 攻击点击格，-1=未设
+
+    // 循环移动专用：有序路径点列表，逐点巡逻循环（末点回首点）。
+    // 从战场直接点选追加；-1=空槽。
+    int16_t moveWaypoints[6];  // 路径点，原版 hex 1..185，-1=空
+    int8_t  moveWaypointCount; // 有效点数 0..6
+    int8_t  moveWaypointCursor;// 运行时游标：下一个要走向的点索引
 };
 
 struct AutoStackRule {
     AutoActionKind action;
     AutoTargetRule target;
     bool allowDefendFallback;  // 允许降级为防御（仅普通部队）
+    bool quickCastFirst;       // 先快捷施法（本回合行动前先施一个法术）
+    int8_t spellSlot;          // 快捷施法槽位：1-9,0；默认 1
 };
 
 static AutoStackRule MakeDefaultRule_()
@@ -74,7 +83,12 @@ static AutoStackRule MakeDefaultRule_()
     r.target.fixedHex = -1;
     r.target.meleeStandHex = -1;
     r.target.meleeAttackHex = -1;
+    for (int i = 0; i < 6; ++i) r.target.moveWaypoints[i] = -1;
+    r.target.moveWaypointCount = 0;
+    r.target.moveWaypointCursor = 0;
     r.allowDefendFallback = false;
+    r.quickCastFirst = false;
+    r.spellSlot = 1;
     return r;
 }
 
