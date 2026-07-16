@@ -13,9 +13,11 @@
 static const int PANEL_W    = 680;
 static const int PANEL_H    = 480;
 static const int COLS       = 1;   // 一行一格（单列宽格）
-static const int VISIBLE_ROWS = 4; // 金框内可见行数
+static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
 static const int CELL_W     = 568; // 横向占满金框宽（右侧留滚动条）
-static const int CELL_H     = 72;  // 刚好放下图标(金框高66) + 上下边距
+// 金框恢复旧尺寸 624×342；上下各留 8px 内边距后，
+// SCROLL_H = 342-16 = 326 = CELL_H + 2*(CELL_H-2) → CELL_H = 110。
+static const int CELL_H     = 110;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
 static const int GRID_X      = 41;
@@ -23,7 +25,7 @@ static const int GRID_Y      = 80;
 static const int SCROLL_X    = GRID_X + CELL_W + (COLS - 1) * CELL_STEP_X + 18;
 static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_W    = 16;
-static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 对齐可见行
+static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 326
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 64;
@@ -45,9 +47,7 @@ static const int PROFILE_BTNS_W = PROFILE_COUNT * PROFILE_BTN_W
     + (PROFILE_COUNT - 1) * PROFILE_BTN_GAP;
 static const int PROFILE_BTN_X = (PANEL_W - PROFILE_BTNS_W) / 2;
 
-// 网格金框（HA_grid_frame.pcx 624x342），框住 3 行格子 + 右侧滚动条。
-// CELL_H 提到 96 后，可见行从 4 改为 3，避免滚动条/格子超出金框。
-// 整个滚动区域较原布局下移10px，为上方5个方案按钮留出空间。
+// 网格金框恢复旧尺寸 624×342，框住 3 行卡片 + 右侧滚动条。
 static const int GRID_FRAME_W = 624;
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 29;
@@ -163,20 +163,53 @@ static Patch* s_hd_msgproc_patch = nullptr;
 
 // 面板打开时安装 WH_KEYBOARD 钩子，立即响应 ESC/Enter，不依赖游戏帧率
 static void CommitAndCloseSettingsPanel_();
+static void EndSpellPick_();
+static bool CommitSpellSlotPick_(int slot_value);
+// 循环施法录入状态需在键盘钩子前声明。
+static int s_spell_pick_cell = -1;
+static int s_spell_pick_slot = -1;
 static HHOOK s_kb_hook = nullptr;
+
+// 设置面板存活期间（含隐藏拾取态）拦截 0-9/小键盘，避免原版快捷施法抢键。
+static bool IsDigitKey_(WPARAM vk)
+{
+    return (vk >= '0' && vk <= '9')
+        || (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9);
+}
+
+static int DigitFromVk_(WPARAM vk)
+{
+    if (vk >= '0' && vk <= '9') return (int)(vk - '0');
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return (int)(vk - VK_NUMPAD0);
+    return -1;
+}
 
 static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
-        && !(lParam & 0x80000000))  // keydown only
+    // 只要设置面板还在（含 s_panel_hidden_for_pick），就拦截相关键。
+    // 不再判断 s_panel_modal_suspended：隐藏拾取时也要挡住快捷施法。
+    if (code == HC_ACTION && s_p.active && !(lParam & 0x80000000)) // keydown only
     {
         if (wParam == VK_ESCAPE) {
-            CloseSettingsPanel();
-            return 1;  // cancel and swallow the key
+            if (s_spell_pick_cell >= 0)
+                EndSpellPick_();
+            else if (!s_panel_hidden_for_pick)
+                CloseSettingsPanel();
+            return 1;  // swallow
         }
-        if (wParam == VK_RETURN) {
+        // 快捷键模态框打开时：Enter 不提交设置面板，仅吞掉。
+        if (wParam == VK_RETURN && !s_panel_hidden_for_pick && s_spell_pick_cell < 0) {
             CommitAndCloseSettingsPanel_();
-            return 1;  // commit and swallow the key
+            return 1;  // swallow
+        }
+        if (wParam == VK_RETURN) return 1;
+        if (IsDigitKey_(wParam)) {
+            // 循环施法录入中：数字键由我们消费；其它时候也吞掉，防止快捷施法。
+            if (s_spell_pick_cell >= 0) {
+                const int d = DigitFromVk_(wParam);
+                if (d >= 0) CommitSpellSlotPick_(d);
+            }
+            return 1;  // 始终吞掉 0-9，防止原版快捷施法捕获
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -199,7 +232,11 @@ static bool s_pick_wait_button_release = false;
 static int s_move_pick_cell = -1;
 static int s_move_pick_wp = -1;
 static void EndMovePathPick_();
+// 循环施法录入：弹出模态框，仅按 1-9/0 记录同一数字。
 static void DoPickCapture_(int hex, bool right_click);
+static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
+static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int* out_h);
+static void DrawSpellKeyModal_(H3LoadedPcx16* scr);
 
 static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
@@ -1506,6 +1543,46 @@ static void EndMovePathPick_()
     WriteLog("[Panel] 结束循环移动拾取 cell=%d wp=%d", old_cell, old_wp);
 }
 
+// 结束循环施法录入：面板始终保持打开，仅清掉“待按数字键”状态。
+static void EndSpellPick_()
+{
+    if (s_spell_pick_cell < 0) return;
+    const int old_cell = s_spell_pick_cell;
+    const int old_slot = s_spell_pick_slot;
+    s_spell_pick_cell = -1;
+    s_spell_pick_slot = -1;
+    if (old_cell >= 0 && old_cell < CELL_COUNT)
+        s_p.cells[old_cell].spell_pick_request = 0;
+    DrawPanelToBuffer_();
+    WriteLog("[Panel] 结束循环施法录入 cell=%d slot=%d", old_cell, old_slot);
+}
+
+// 写入一个快捷施法数字（1-9/0）到当前拾取槽；成功返回 true。
+static bool CommitSpellSlotPick_(int slot_value)
+{
+    if (s_spell_pick_cell < 0 || s_spell_pick_cell >= CELL_COUNT) return false;
+    if (!(slot_value == 0 || (slot_value >= 1 && slot_value <= 9))) return false;
+    if (s_spell_pick_slot < 0 || s_spell_pick_slot >= SPELL_SLOT_CAPACITY) return false;
+
+    CellControl* ctrl = &s_p.cells[s_spell_pick_cell];
+    if (!ctrl->has_data) return false;
+
+    AutoStackRule& rule = ctrl->data.rule;
+    const int slot_index = s_spell_pick_slot;
+    const bool append = slot_index == rule.spellSlotCount;
+    if (!(slot_index < rule.spellSlotCount || append)) return false;
+
+    rule.spellSlots[slot_index] = static_cast<int8_t>(slot_value);
+    if (append && rule.spellSlotCount < SPELL_SLOT_CAPACITY)
+        ++rule.spellSlotCount;
+    CellControl_NormalizeSpellSlots(&rule);
+    ctrl->dirty = true;
+    WriteLog("[Panel] spell slot saved cell=%d idx=%d key=%d count=%d",
+        s_spell_pick_cell, slot_index, slot_value, (int)rule.spellSlotCount);
+    EndSpellPick_();
+    return true;
+}
+
 // 结束近战选格：恢复面板输入/绘制（屏障始终保留，无需重装）。
 static void EndMeleePick_()
 {
@@ -1815,12 +1892,25 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
     // BlockBattleItemMessage_ 里处理（靠 StopProcessing 吞点击，绝不触发
     // 部队行动）。此处不再处理拾取，避免与屏障逻辑冲突、空转。
 
-    if (s_p.active && !s_panel_modal_suspended && !s_panel_hidden_for_pick) {
+    // 设置面板存活期间（含隐藏拾取态）：吞掉 0-9 数字键消息，
+    // 防止原版/HD 快捷施法在战斗消息链里捕获热键。
+    if (s_p.active) {
         __try {
             int* msg = *reinterpret_cast<int**>(c->esp + 4);
-            if (msg && msg[0] == 4) {   // 鼠标移动
-                msg[4] = -1000;         // x 离屏
-                msg[5] = -1000;         // y 离屏
+            if (msg) {
+                const int cmd = msg[0];
+                // KEY_DOWN=1 / KEY_UP=2 / KEY_HELD=0x100；键码在 subtype(=msg[1])。
+                if (cmd == 1 || cmd == 2 || cmd == 0x100) {
+                    const int key = msg[1];
+                    // H3 虚拟键：H3VK_1=2 ... H3VK_9=10, H3VK_0=11
+                    if (key >= 2 && key <= 11)
+                        return NO_EXEC_DEFAULT;
+                }
+                if (!s_panel_modal_suspended && !s_panel_hidden_for_pick
+                    && cmd == 4) {   // 鼠标移动
+                    msg[4] = -1000; // x 离屏
+                    msg[5] = -1000; // y 离屏
+                }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return EXEC_DEFAULT;
@@ -1837,6 +1927,70 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 // ========================================================================
 // 第六部分：绘制
 // ========================================================================
+
+static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    const int w = 360;
+    const int h = 164;
+    if (out_x) *out_x = (PANEL_W - w) / 2;
+    if (out_y) *out_y = (PANEL_H - h) / 2;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+}
+
+static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetSpellKeyModalRect_(&x, &y, &w, &h);
+    const int bw = 84;
+    const int bh = 26;
+    if (out_x) *out_x = x + (w - bw) / 2;
+    if (out_y) *out_y = y + h - bh - 16;
+    if (out_w) *out_w = bw;
+    if (out_h) *out_h = bh;
+}
+
+static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
+{
+    if (!scr || s_spell_pick_cell < 0) return;
+    int x = 0, y = 0, w = 0, h = 0;
+    GetSpellKeyModalRect_(&x, &y, &w, &h);
+
+    // 先遮暗整个设置面板，形成明确模态层。
+    for (int yy = 0; yy < PANEL_H; yy += 2)
+        Fill(scr, 0, yy, PANEL_W, 1, 22, 18, 14);
+
+    // 模态框本体：深色底 + 双层金框。
+    Fill(scr, x, y, w, h, 52, 35, 20);
+    scr->DrawFrame(x, y, w, h, (BYTE)232, (BYTE)196, (BYTE)96);
+    scr->DrawFrame(x + 2, y + 2, w - 4, h - 4, (BYTE)112, (BYTE)82, (BYTE)36);
+
+    H3Font* title_font = GetPanelFont();
+    H3Font* small_font = GetSmallFont();
+    char slot_text[64] = {};
+    _snprintf(slot_text, sizeof(slot_text), "正在设置循环施法第 %d 槽",
+        s_spell_pick_slot + 1);
+    DrawTxt(scr, title_font, "设置快捷施法键",
+        x + 16, y + 14, w - 32, 28,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+    DrawTxt(scr, small_font, slot_text,
+        x + 16, y + 48, w - 32, 20,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+    DrawTxt(scr, small_font, "请直接按数字键 1-9 或 0（支持小键盘）",
+        x + 16, y + 72, w - 32, 20,
+        (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_CENTER);
+    DrawTxt(scr, small_font, "输入后自动保存；按 ESC 或点击取消放弃。",
+        x + 16, y + 94, w - 32, 18,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_CENTER);
+
+    int bx = 0, by = 0, bw = 0, bh = 0;
+    GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
+    Fill(scr, bx, by, bw, bh, 74, 50, 27);
+    scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
+    DrawTxt(scr, small_font, "取消",
+        bx, by, bw, bh, (INT32)eTextColor::WHITE,
+        eTextAlignment::MIDDLE_CENTER);
+}
 
 static void DrawPanelToBuffer_()
 {
@@ -1878,7 +2032,15 @@ static void DrawPanelToBuffer_()
 
     DrawPanelScrollbar_(scr);
 
-    // 第二趟：单独画展开的下拉项，确保覆盖在所有格子和滚动条之上（层级最高）
+    // 网格金框：框住 3 行格子 + 右侧滚动条（仅金色边框，内部青色键透明）。
+    // 必须在展开下拉之前绘制，否则下拉区域会被金框边线盖住。
+    {
+        H3LoadedPcx16* gridFrame = LoadPanelGridFrame_();
+        if (gridFrame)
+            DrawTransparentPcx_(gridFrame, scr, GRID_FRAME_X, GRID_FRAME_Y);
+    }
+
+    // 最后一趟：展开的下拉项，覆盖在格子/滚动条/金框之上（层级最高）。
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
@@ -1894,15 +2056,11 @@ static void DrawPanelToBuffer_()
             max_redraw_bottom = dropRc.bottom;
     }
 
-    // 网格金框：框住 4 行格子 + 右侧滚动条，画在格子/滚动条之上（仅金色边框，
-    // 内部青色键透明，不遮挡内容）。与其它边框资源同款算法。
-    {
-        H3LoadedPcx16* gridFrame = LoadPanelGridFrame_();
-        if (gridFrame)
-            DrawTransparentPcx_(gridFrame, scr, GRID_FRAME_X, GRID_FRAME_Y);
-    }
-
     DrawPanelButtons_(scr);
+
+    // 循环施法快捷键录入模态框：最后绘制，盖住整张设置面板。
+    if (s_spell_pick_cell >= 0)
+        DrawSpellKeyModal_(scr);
 
     // Match H3BattleValueInfo's ranged panel: one composite copy to the real
     // DirectDraw backbuffer, then invalidate only the panel region.
@@ -2047,6 +2205,8 @@ void OpenSettingsPanel_()
     s_melee_pick_stand_hex = -1;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
+    s_spell_pick_cell = -1;
+    s_spell_pick_slot = -1;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -2145,6 +2305,8 @@ void CloseSettingsPanel()
     s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
+    s_spell_pick_cell = -1;
+    s_spell_pick_slot = -1;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -2256,6 +2418,7 @@ static bool HandleExpandedDropdownClick_(int px, int py, int cell_msg)
 // 返回 true 表示重绘了。
 static bool UpdateDropdownHover_(int px, int py)
 {
+    if (s_spell_pick_cell >= 0) return false;
     const int first_item = s_p.scroll_row * COLS;
     int new_hover_cell = -1, new_hover_idx = -1;
     for (int i = 0; i < CELL_COUNT; ++i) {
@@ -2298,6 +2461,17 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     const int py = screen_y - s_p.y;
     const int max_row = PanelMaxScrollRow_();
     const int button_size = PanelScrollButtonSize_();
+
+    // 快捷键录入模态框打开时：吞掉所有底层点击，仅允许点取消。
+    if (s_spell_pick_cell >= 0) {
+        if (raw_command == 16) {
+            int bx = 0, by = 0, bw = 0, bh = 0;
+            GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
+            if (PointInRect_(px, py, bx, by, bw, bh))
+                EndSpellPick_();
+        }
+        return;
+    }
 
     if (raw_command == 4) {
         if (s_p.scroll_dragging && max_row > 0) {
@@ -2388,6 +2562,24 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 i, s_move_pick_wp);
                             ctrl->move_path_pick_request = 0;
                         }
+                        // 循环施法：已有快捷键可覆盖，末尾「＋」追加。
+                        // 弹出模态框，只等按 1-9/0（含小键盘）；不再点选快捷施法栏。
+                        if (ctrl->spell_pick_request != 0) {
+                            // 切换到另一个槽时，清掉旧槽高亮。
+                            if (s_spell_pick_cell >= 0 && s_spell_pick_cell < CELL_COUNT
+                                && s_spell_pick_cell != i)
+                                s_p.cells[s_spell_pick_cell].spell_pick_request = 0;
+                            s_spell_pick_slot = ctrl->spell_pick_request - 1;
+                            s_spell_pick_cell = i;
+                            // 收起所有下拉，避免模态框下方还有展开层。
+                            for (int k = 0; k < CELL_COUNT; ++k) {
+                                s_p.cells[k].expanded = CEX_NONE;
+                                s_p.cells[k].dirty = true;
+                            }
+                            // 保留 spell_pick_request 做槽位高亮；数字键提交后再清。
+                            WriteLog("[Panel] 弹出循环施法快捷键模态框 cell=%d slot=%d",
+                                i, s_spell_pick_slot);
+                        }
                         // 循环近战：已有组合可覆盖重设，末尾「＋」追加。
                         // 单次隐藏面板后连续选站立格、相邻攻击格。
                         if (ctrl->melee_pair_pick_request != 0) {
@@ -2476,6 +2668,7 @@ static void HandlePanelInput_()
     static bool previous_down_down = false;
     static bool previous_page_up_down = false;
     static bool previous_page_down_down = false;
+    static bool previous_digit_down[10] = {};
 
     const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
@@ -2487,8 +2680,35 @@ static void HandlePanelInput_()
         previous_down_down = down_down;
         previous_page_up_down = page_up_down;
         previous_page_down_down = page_down_down;
+        for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;
         return;
     }
+
+    // 循环施法模态框：只支持直接按 1-9/0（含小键盘）；ESC 取消。
+    // 底层滚动键在模态框打开时不处理。
+    if (s_spell_pick_cell >= 0) {
+        for (int d = 0; d <= 9; ++d) {
+            const int vk_main = (d == 0) ? '0' : ('0' + d);
+            const int vk_num = (d == 0) ? VK_NUMPAD0 : (VK_NUMPAD0 + d);
+            const bool down = ((GetAsyncKeyState(vk_main) & 0x8000) != 0)
+                || ((GetAsyncKeyState(vk_num) & 0x8000) != 0);
+            if (down && !previous_digit_down[d]) {
+                if (CommitSpellSlotPick_(d))
+                    break;
+            }
+            previous_digit_down[d] = down;
+        }
+        if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
+            EndSpellPick_();
+        previous_up_down = up_down;
+        previous_down_down = down_down;
+        previous_page_up_down = page_up_down;
+        previous_page_down_down = page_down_down;
+        return;
+    }
+
+    for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;
+
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
     if (down_down && !previous_down_down) SetPanelScrollRow_(s_p.scroll_row + 1);
     if (page_up_down && !previous_page_up_down)

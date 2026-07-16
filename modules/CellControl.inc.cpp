@@ -37,10 +37,13 @@ struct CellData
 // ========================================================================
 
 static const int CC_CELL_W    = 568;
-static const int CC_CELL_H    = 72;
+// 金框 342 内刚好 3 行：CELL_H = (342-16+4)/3 = 110（上下各 8px 内边距）。
+static const int CC_CELL_H    = 110;
 
-static const int CC_ICON_X   = 4;
-static const int CC_ICON_Y   = 4;
+// 图标贴左上角。卡片金边约 2px，再留 3px 空隙 → 内容起点约 5。
+// 金框资源比图标大 2px 且画在 icon-1，最终外缘大约在 4，视觉上有边距。
+static const int CC_ICON_X   = 5;
+static const int CC_ICON_Y   = 5;
 static const int CC_ICON_W   = 58;
 static const int CC_ICON_H   = 64;
 static const int CC_ICON_FRAME_W = 60;
@@ -48,27 +51,33 @@ static const int CC_ICON_FRAME_H = 66;
 
 static const int CC_LABEL_H  = 11;
 
-// 一行一格（宽格 568×72）横排小列布局：
-//   图标(x=4,宽58) | 位置/数量小列(上下叠放) | 行动下拉(上)+允许降级(下) | 选择器/攻击格(上)+阵营/站立格/降级(下)
-// 图标右缘 = 4+58 = 62。位置/数量小列宽 90（约放 10 位数字），下拉列相应左移加宽。
-static const int CC_POS_X    = 68;   // 位置/数量小列
-static const int CC_POS_W    = 74;   // 放得下数量/位置（右缘 142）
-static const int CC_COL2_X   = 148;  // 行动下拉/站立格（避开位置数量列）
-static const int CC_COL_W    = 202;
-static const int CC_COL3_X   = CC_COL2_X + CC_COL_W + 8;  // 366（右缘 560 < 568）
-static const int CC_ROW_H    = 20;
-static const int CC_TOP_Y    = 6;
-static const int CC_BOT_Y    = 32;
+// 一行一格（宽格 568×110）横排布局：
+//   图标列（位置左下/数量右下） | 第二小列（仅够「行动前循环施法:」+ 行动/降级）
+//   | 第三小列（循环施法槽 + 选择器/近战/移动，吃掉剩余宽度）
+// 第二小列左缘贴图标金框右缘，留 4px 间距。
+static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
+static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68
+static const int CC_COL2_W   = 118; // 刚好放下「行动前循环施法:」
+static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈192
+static const int CC_COL3_RIGHT = 560; // 卡片右内边距
+static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈368
+static const int CC_ROW_H    = 22;
+// 顶部循环施法行；原行动/目标两行整体下移，行间距略拉开适配 110 高。
+static const int CC_SPELL_Y  = 6;
+static const int CC_TOP_Y    = 36;  // 中行（行动/选择器/路径槽）
+static const int CC_BOT_Y    = 66;  // 下行（降级/阵营/路径槽）
 static const int CC_CHECKBOX_H = 14;
+// 循环施法：标签占第二小列；槽位从第三小列起，单行最多 5 个。
+static const int CC_SPELL_LABEL_W = CC_COL2_W;
+static const int CC_SPELL_SLOT_GAP = 3;
+static const int CC_SPELL_SLOT_W =
+    (CC_COL3_W - CC_SPELL_SLOT_GAP * (SPELL_SLOT_CAPACITY - 1))
+    / SPELL_SLOT_CAPACITY;
 
-// 位置/数量小列纵向 4 行：快捷施法复选框(顶) / 选择魔法行 / 数量 / 位置(贴下边缘)
-static const int CC_SPELL_CHK_Y = 3;   // 「先快捷施法」复选框行
-static const int CC_SPELL_SEL_Y = 18;  // 「选择魔法」标签+下拉行
-static const int CC_SPELL_SEL_H = 14;  // 魔法下拉行高
-
-// 兼容旧名（行动列 = 小列2）
+// 兼容旧名
 static const int CC_COMBO_X  = CC_COL2_X;
-static const int CC_COMBO_W  = CC_COL_W;
+static const int CC_COMBO_W  = CC_COL2_W; // 行动下拉用第二小列宽
+static const int CC_COL_W    = CC_COL3_W; // 旧“内容列宽”=第三列
 static const int CC_ROW1_Y   = CC_TOP_Y;
 
 static const int CC_DROPDOWN_ITEM_H = 18;
@@ -86,7 +95,7 @@ enum CellExpandKind {
     CEX_SELECTOR,
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
-    CEX_SPELL,    // 快捷施法魔法槽位（1-9,0）
+    CEX_SPELL,    // 保留枚举；循环施法改为数字键录入，不再展开下拉
 };
 
 // ========================================================================
@@ -112,6 +121,9 @@ struct CellControl
     // 循环移动路径点拾取请求：0=无，1..6=要新增/重设的路径点索引+1。
     // 与循环近战一致：每次只进战场点 1 格，返回后覆盖/追加对应槽。
     int              move_path_pick_request;
+    // 循环施法录入请求：0=无，1..SPELL_SLOT_CAPACITY=待按数字键的槽索引+1。
+    // 面板保持打开，仅支持按 1-9/0 写入同一数字（不再点选快捷施法栏）。
+    int              spell_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 };
@@ -210,6 +222,50 @@ static bool CellControl_HexAdjacent(int a, int b)
     for (int i = 0; i < n; ++i)
         if (neighbors[i] == b) return true;
     return false;
+}
+
+// 规范化循环施法序列：压紧有效快捷键、迁移旧单槽、同步兼容镜像。
+static void CellControl_NormalizeSpellSlots(AutoStackRule* rule)
+{
+    if (!rule) return;
+
+    auto is_valid_slot = [](int slot) -> bool {
+        return slot == 0 || (slot >= 1 && slot <= 9);
+    };
+
+    int8_t slots[SPELL_SLOT_CAPACITY];
+    int count = 0;
+    int requested = rule->spellSlotCount;
+    if (requested < 0) requested = 0;
+    if (requested > SPELL_SLOT_CAPACITY) requested = SPELL_SLOT_CAPACITY;
+    for (int i = 0; i < requested; ++i) {
+        const int slot = rule->spellSlots[i];
+        if (!is_valid_slot(slot)) continue;
+        slots[count++] = static_cast<int8_t>(slot);
+    }
+
+    // 旧版只保存单槽 spellSlot + quickCastFirst：迁移为序列第 0 项。
+    if (count == 0 && rule->quickCastFirst && is_valid_slot(rule->spellSlot)) {
+        slots[0] = rule->spellSlot;
+        count = 1;
+    }
+
+    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
+        rule->spellSlots[i] = (i < count) ? slots[i] : static_cast<int8_t>(-1);
+    rule->spellSlotCount = static_cast<int8_t>(count);
+    if (count <= 0) {
+        rule->spellCursor = 0;
+        rule->quickCastFirst = false;
+        // 保持默认镜像，便于旧逻辑读取。
+        if (!is_valid_slot(rule->spellSlot))
+            rule->spellSlot = 1;
+    } else {
+        int cursor = rule->spellCursor;
+        if (cursor < 0 || cursor >= count) cursor = 0;
+        rule->spellCursor = static_cast<int8_t>(cursor);
+        rule->quickCastFirst = true;
+        rule->spellSlot = rule->spellSlots[0];
+    }
 }
 
 // 规范化循环近战序列：压紧有效组合、迁移旧的单组字段、同步兼容镜像。
@@ -414,6 +470,9 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bo
     if (!ok)
         rule->action = (n > 0) ? allowed[0] : AA_MANUAL;
 
+    // 循环施法与行动策略正交：即使当前行动是手动/防御，也要完成旧单槽迁移。
+    CellControl_NormalizeSpellSlots(rule);
+
     if (!CellControl_ActionNeedsTarget(rule->action)) {
         rule->target = CellControl_DefaultTargetForAction(AA_MANUAL);
         rule->allowDefendFallback = false;
@@ -544,6 +603,7 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->hover_item = -1;
     ctrl->melee_pair_pick_request = 0;
     ctrl->move_path_pick_request = 0;
+    ctrl->spell_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -577,6 +637,7 @@ static void CellControl_SetData(CellControl* ctrl, const CellData* data)
     CellControl_EnsureMeleeDefaults(ctrl);
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
+    ctrl->spell_pick_request = 0;
     ctrl->dd_scroll = 0;
     ctrl->dirty = true;
 }
@@ -605,20 +666,21 @@ static int CellControl_GetExpandListLeftX(CellControl* ctrl)
     case CEX_SIDE:     return CC_COL3_X;
     case CEX_SELECTOR: return CC_COL3_X;
     case CEX_ATTACK:   return CC_COL3_X;
-    case CEX_SPELL:    return CC_POS_X;
     default:           return CC_COL2_X;
     }
 }
 
-// 展开列表宽度（魔法下拉用位置/数量小列宽，其余用下拉列宽）
+// 展开列表宽度：行动=第二列，循环施法=槽宽，其余=第三列
 static int CellControl_GetExpandListWidth(CellControl* ctrl)
 {
-    if (ctrl && ctrl->expanded == CEX_SPELL) return CC_POS_W;
-    return CC_COL_W;
+    if (!ctrl) return CC_COL3_W;
+    if (ctrl->expanded == CEX_SPELL) return CC_SPELL_SLOT_W;
+    if (ctrl->expanded == CEX_ACTION) return CC_COL2_W;
+    return CC_COL3_W;
 }
 
 // 当前展开列表的局部 Y（列表顶部，相对格子）= 其所在行下边缘。
-// 行动=上行；选择器/攻击=上行；阵营/站立=下行。
+// 循环施法=顶行；行动/选择器=中行；阵营=下行。
 static int CellControl_GetExpandListTopY(CellControl* ctrl)
 {
     if (!ctrl) return CC_TOP_Y + CC_ROW_H;
@@ -628,7 +690,7 @@ static int CellControl_GetExpandListTopY(CellControl* ctrl)
     case CEX_STAND:    return CC_TOP_Y + CC_ROW_H;
     case CEX_ATTACK:   return CC_BOT_Y + CC_ROW_H;
     case CEX_SIDE:     return CC_BOT_Y + CC_ROW_H;
-    case CEX_SPELL:    return CC_SPELL_SEL_Y + CC_SPELL_SEL_H;
+    case CEX_SPELL:    return CC_SPELL_Y + CC_ROW_H;
     default:           return CC_TOP_Y + CC_ROW_H;
     }
 }
@@ -1000,51 +1062,55 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
         }
         CellControl_DrawText(scr, fntS, "允许降级为防御",
-            cb_x + cb_box + 4, cb_y - 1, CC_COL_W - cb_box - 8, CC_CHECKBOX_H,
+            cb_x + cb_box + 4, cb_y - 1, CC_COL2_W - cb_box - 8, CC_CHECKBOX_H,
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 
-    // ---- 快捷施法：位置/数量小列顶部两行 ----
+    // ---- 顶部：行动前循环施法（标签 + 最多 5 个快捷键槽，末尾「＋」追加）----
     {
-        // 第1行：「先快捷施法」复选框
-        const int cb_x = CC_POS_X;
-        const int cb_y = CC_SPELL_CHK_Y + 1;
-        const int cb_box = 10;
-        Fill(scr, cb_x, cb_y, cb_box, cb_box, 40, 28, 12);
-        scr->DrawFrame(cb_x, cb_y, cb_box, cb_box, (BYTE)184, (BYTE)139, (BYTE)62);
-        if (rule.quickCastFirst) {
-            Fill(scr, cb_x + 2, cb_y + 4, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 3, cb_y + 5, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 4, cb_y + 6, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 5, cb_y + 5, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 6, cb_y + 4, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
-        }
-        CellControl_DrawText(scr, fntS, "先快捷施法",
-            cb_x + cb_box + 3, cb_y - 2, CC_POS_W - cb_box - 4, CC_CHECKBOX_H,
+        CellControl_DrawText(scr, fntS, "行动前循环施法:",
+            CC_COL2_X, CC_SPELL_Y, CC_SPELL_LABEL_W, CC_ROW_H,
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
 
-        // 第2行：「选择魔法」标签 + 槽位下拉
-        char slot_buf[8] = {};
-        _snprintf(slot_buf, sizeof(slot_buf), "%d", (int)rule.spellSlot);
-        const int lbl_w = 44;
-        const int dd_x  = CC_POS_X + lbl_w;
-        const int dd_w  = CC_POS_W - lbl_w;
-        CellControl_DrawText(scr, fntS, "选择魔法",
-            CC_POS_X, CC_SPELL_SEL_Y, lbl_w, CC_SPELL_SEL_H,
-            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-        CellControl_DrawButtonBg(scr, dd_x, CC_SPELL_SEL_Y, dd_w, CC_SPELL_SEL_H,
-            false, false);
-        CellControl_DrawText(scr, fntS, slot_buf,
-            dd_x + 3, CC_SPELL_SEL_Y, dd_w - 14, CC_SPELL_SEL_H,
-            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
-        CellControl_DrawArrow(scr, dd_x + dd_w - 10,
-            CC_SPELL_SEL_Y + CC_SPELL_SEL_H / 2 - 3, ctrl->expanded != CEX_SPELL);
+        const int count = rule.spellSlotCount;
+        for (int index = 0; index < SPELL_SLOT_CAPACITY; ++index) {
+            const bool existing = index < count;
+            const bool add_slot = index == count && count < SPELL_SLOT_CAPACITY;
+            if (!existing && !add_slot) continue;
+
+            const int x = CC_COL3_X
+                + index * (CC_SPELL_SLOT_W + CC_SPELL_SLOT_GAP);
+            const bool requested = ctrl->spell_pick_request == index + 1;
+            CellControl_DrawButtonBg(scr, x, CC_SPELL_Y, CC_SPELL_SLOT_W, CC_ROW_H,
+                requested, false);
+            if (add_slot) {
+                CellControl_DrawPlusButton(scr,
+                    x + (CC_SPELL_SLOT_W - 16) / 2,
+                    CC_SPELL_Y + (CC_ROW_H - 16) / 2,
+                    16, requested);
+            } else {
+                char slot_buf[8] = {};
+                _snprintf(slot_buf, sizeof(slot_buf), "%d",
+                    (int)rule.spellSlots[index]);
+                CellControl_DrawText(scr, fntS, slot_buf,
+                    x + 2, CC_SPELL_Y, CC_SPELL_SLOT_W - 4, CC_ROW_H,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+            }
+        }
     }
 
-    // ---- 位置/数量：独立小列（CC_POS_X）。数量在上(右对齐)，位置靠格子下边缘(左对齐) ----
-    const int pos_y   = CC_CELL_H - CC_LABEL_H - 3;   // 位置：贴格子下边缘（非接触）
-    const int count_y = pos_y - CC_LABEL_H - 2;        // 数量：位置上方
+    // ---- 位置/数量：第一小列左下角向上排（位置在下、数量在上），明确左对齐 ----
+    // 放在图标列下方/旁侧左缘，避免宽列 + TextDraw 看起来像右对齐。
+    const int meta_x = CC_ICON_X;
+    const int meta_w = CC_ICON_W;
+    const int pos_y   = CC_CELL_H - CC_LABEL_H - 4; // 位置：贴格子下边缘
+    const int count_y = pos_y - CC_LABEL_H - 1;     // 数量：位置上方
+
+    char pos_buf[8] = {};
+    CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
+    CellControl_DrawText(scr, fntS, pos_buf,
+        meta_x, pos_y, meta_w, CC_LABEL_H,
+        (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::HLEFT);
 
     char count_buf[16] = {};
     if (ctrl->data.count_alive > 0)
@@ -1052,14 +1118,8 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     else
         strncpy(count_buf, "--", sizeof(count_buf) - 1);
     CellControl_DrawText(scr, fntS, count_buf,
-        CC_POS_X, count_y, CC_POS_W, CC_LABEL_H,
+        meta_x, count_y, meta_w, CC_LABEL_H,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
-
-    char pos_buf[8] = {};
-    CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
-    CellControl_DrawText(scr, fntS, pos_buf,
-        CC_POS_X, pos_y, CC_POS_W, CC_LABEL_H,
-        (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
 
     ctrl->dirty = false;
 }
@@ -1072,11 +1132,11 @@ static void CellControl_DrawDropdownItem(H3LoadedPcx16* scr, H3Font* fnt,
     const char* label, int item_index,
     int cell_panel_x, int cell_panel_y,
     bool is_selected, bool is_hovered, bool cool_theme,
-    int list_top_y, int list_left_x)
+    int list_top_y, int list_left_x, int item_w_override = -1)
 {
     int item_x = cell_panel_x + list_left_x;
     int item_y = cell_panel_y + list_top_y + item_index * CC_DROPDOWN_ITEM_H;
-    int item_w = (list_left_x == CC_POS_X) ? CC_POS_W : CC_COL_W;  // 魔法下拉用窄宽
+    int item_w = (item_w_override > 0) ? item_w_override : CC_COL_W;
     int item_h = CC_DROPDOWN_ITEM_H;
 
     BYTE bg_r, bg_g, bg_b, frame_r, frame_g, frame_b;
@@ -1134,7 +1194,7 @@ static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
         CellControl_DrawDropdownItem(scr, fntS, label, i,
             cell_panel_x, cell_panel_y,
             a == ctrl->data.rule.action, i == hover_idx, false,
-            CC_TOP_Y + CC_ROW_H, CC_COL2_X);
+            CC_TOP_Y + CC_ROW_H, CC_COL2_X, CC_COL2_W);
     }
 }
 
@@ -1230,6 +1290,7 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
 
     const int list_x = cell_panel_x + col_x;
     const int list_top = cell_panel_y + row_y + CC_ROW_H;
+    const int list_w = (col_x == CC_COL2_X) ? CC_COL2_W : CC_COL3_W;
     const int vis = (n < CC_DD_MAX_VISIBLE) ? n : CC_DD_MAX_VISIBLE;
     for (int v = 0; v < vis; ++v) {
         const int i = scroll + v;
@@ -1250,16 +1311,16 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
             else if (is_sel) { bg_r=136;bg_g=88;bg_b=24; fr=232;fg=184;fb=76; tc=(INT32)eTextColor::WHITE; }
             else { bg_r=68;bg_g=42;bg_b=18; fr=166;fg=112;fb=40; tc=(INT32)eTextColor::YELLOW; }
         }
-        Fill(scr, item_x, item_y, CC_COMBO_W, CC_DROPDOWN_ITEM_H, bg_r, bg_g, bg_b);
-        scr->DrawFrame(item_x, item_y, CC_COMBO_W, CC_DROPDOWN_ITEM_H, fr, fg, fb);
+        Fill(scr, item_x, item_y, list_w, CC_DROPDOWN_ITEM_H, bg_r, bg_g, bg_b);
+        scr->DrawFrame(item_x, item_y, list_w, CC_DROPDOWN_ITEM_H, fr, fg, fb);
         CellControl_DrawText(scr, fntS, buf,
-            item_x + 4, item_y, CC_COMBO_W - 20, CC_DROPDOWN_ITEM_H,
+            item_x + 4, item_y, list_w - 20, CC_DROPDOWN_ITEM_H,
             tc, eTextAlignment::MIDDLE_LEFT);
         // 滚动指示：首/末可见项画箭头
         if (v == 0 && scroll > 0)
-            CellControl_DrawArrow(scr, item_x + CC_COMBO_W - 12, item_y + 2, false);
+            CellControl_DrawArrow(scr, item_x + list_w - 12, item_y + 2, false);
         if (v == vis - 1 && scroll < max_scroll)
-            CellControl_DrawArrow(scr, item_x + CC_COMBO_W - 12, item_y + CC_DROPDOWN_ITEM_H - 6, true);
+            CellControl_DrawArrow(scr, item_x + list_w - 12, item_y + CC_DROPDOWN_ITEM_H - 6, true);
     }
 }
 
@@ -1285,19 +1346,32 @@ static int CellControl_IndexToSpellSlot(int idx)
     return 1;
 }
 
-// 展开魔法槽位列表（10 项：1-9,0），从位置/数量小列展开
+// 展开循环施法快捷键列表（10 项：1-9,0），从对应槽位下方展开
 static void CellControl_DrawSpellDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
     int cell_panel_x, int cell_panel_y, int hover_idx)
 {
     if (!ctrl || ctrl->expanded != CEX_SPELL || !scr) return;
     H3Font* fntS = GetSmallFont();
     if (!fntS) return;
-    const int cur = CellControl_SpellSlotToIndex(ctrl->data.rule.spellSlot);
+
+    int slot_index = 0; // 旧下拉路径已废弃
+    if (slot_index < 0) slot_index = 0;
+    if (slot_index >= SPELL_SLOT_CAPACITY) slot_index = SPELL_SLOT_CAPACITY - 1;
+
+    int current_slot = -1;
+    if (slot_index < ctrl->data.rule.spellSlotCount)
+        current_slot = ctrl->data.rule.spellSlots[slot_index];
+    const int cur = (current_slot >= 0)
+        ? CellControl_SpellSlotToIndex(current_slot) : -1;
+
+    const int list_left = CellControl_GetExpandListLeftX(ctrl);
+    const int list_top = CellControl_GetExpandListTopY(ctrl);
+    const int item_w = CellControl_GetExpandListWidth(ctrl);
     for (int i = 0; i < 10; ++i) {
         CellControl_DrawDropdownItem(scr, fntS, CellControl_SpellSlotLabel(i), i,
             cell_panel_x, cell_panel_y,
             i == cur, i == hover_idx, false,
-            CC_SPELL_SEL_Y + CC_SPELL_SEL_H, CC_POS_X);
+            list_top, list_left, item_w);
     }
 }
 
@@ -1385,8 +1459,11 @@ enum CellHitArea
     CELL_HIT_MOVE_WP_3,
     CELL_HIT_MOVE_WP_4,
     CELL_HIT_MOVE_WP_5,
-    CELL_HIT_SPELL_CHK,    // 快捷施法复选框
-    CELL_HIT_SPELL_SLOT,   // 魔法槽位下拉
+    CELL_HIT_SPELL_0,      // 循环施法槽位 0..4（必须连续）
+    CELL_HIT_SPELL_1,
+    CELL_HIT_SPELL_2,
+    CELL_HIT_SPELL_3,
+    CELL_HIT_SPELL_4,
 };
 
 static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y)
@@ -1397,10 +1474,10 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         ctrl->data.creature_type, ctrl->data.rule.action);
     const bool melee = CellControl_ActionUsesTwoHex(ctrl->data.rule.action);
 
-    auto in_box = [&](int x, int y) -> bool {
-        return local_x >= x && local_x < x + CC_COL_W
+    auto in_box = [&](int x, int y, int w) -> bool {
+        return local_x >= x && local_x < x + w
             && local_y >= y && local_y < y + CC_ROW_H;
-    };
+    }; 
 
     // 展开列表优先（按当前展开的小列 X + 行 Y）
     if (ctrl->expanded != CEX_NONE) {
@@ -1418,7 +1495,7 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
     }
 
     // 行动下拉：小列2 上行
-    if (ctrl->expanded != CEX_ACTION && in_box(CC_COL2_X, CC_TOP_Y))
+    if (ctrl->expanded != CEX_ACTION && in_box(CC_COL2_X, CC_TOP_Y, CC_COL2_W))
         return CELL_HIT_ACTION;
 
     if (needs_target) {
@@ -1460,32 +1537,35 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
             }
         } else {
             // 选择器：小列3上行
-            if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y))
+            if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y, CC_COL3_W))
                 return CELL_HIT_SELECTOR;
             // 阵营：小列3下行（仅移动）
             if (CellControl_ShowsSideRow(ctrl->data.rule.action)
-                && ctrl->expanded != CEX_SIDE && in_box(CC_COL3_X, CC_BOT_Y))
+                && ctrl->expanded != CEX_SIDE && in_box(CC_COL3_X, CC_BOT_Y, CC_COL3_W))
                 return CELL_HIT_SIDE;
         }
     }
 
     // 降级复选框：统一在小列2下行（行动下拉正下方）
     if (shows_fallback) {
-        if (local_x >= CC_COL2_X && local_x < CC_COL2_X + CC_COL_W
+        if (local_x >= CC_COL2_X && local_x < CC_COL2_X + CC_COL2_W
             && local_y >= CC_BOT_Y && local_y < CC_BOT_Y + CC_ROW_H)
             return CELL_HIT_CHECKBOX;
     }
 
-    // 快捷施法：复选框（位置/数量小列顶部第1行）+ 魔法槽位下拉（第2行）
+    // 顶部循环施法槽位：已有槽可展开重设，末尾「＋」追加。
     {
-        const int cb_box = 10;
-        if (local_x >= CC_POS_X && local_x < CC_POS_X + CC_POS_W
-            && local_y >= CC_SPELL_CHK_Y && local_y < CC_SPELL_CHK_Y + cb_box + 4)
-            return CELL_HIT_SPELL_CHK;
-        if (ctrl->expanded != CEX_SPELL
-            && local_x >= CC_POS_X && local_x < CC_POS_X + CC_POS_W
-            && local_y >= CC_SPELL_SEL_Y && local_y < CC_SPELL_SEL_Y + CC_SPELL_SEL_H)
-            return CELL_HIT_SPELL_SLOT;
+        const int count = ctrl->data.rule.spellSlotCount;
+        for (int index = 0; index < SPELL_SLOT_CAPACITY; ++index) {
+            const bool existing = index < count;
+            const bool add_slot = index == count && count < SPELL_SLOT_CAPACITY;
+            if (!existing && !add_slot) continue;
+            const int x = CC_COL3_X
+                + index * (CC_SPELL_SLOT_W + CC_SPELL_SLOT_GAP);
+            if (local_x >= x && local_x < x + CC_SPELL_SLOT_W
+                && local_y >= CC_SPELL_Y && local_y < CC_SPELL_Y + CC_ROW_H)
+                return static_cast<CellHitArea>(CELL_HIT_SPELL_0 + index);
+        }
     }
 
     if (local_x >= CC_ICON_X && local_x < CC_ICON_X + CC_ICON_W
@@ -1557,6 +1637,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->expanded = (ctrl->expanded == CEX_ACTION) ? CEX_NONE : CEX_ACTION;
             ctrl->action_pressed = true;
             ctrl->hover_item = -1;
+            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
@@ -1564,6 +1645,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->expanded = (ctrl->expanded == CEX_SIDE) ? CEX_NONE : CEX_SIDE;
             ctrl->side_pressed = true;
             ctrl->hover_item = -1;
+            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
@@ -1571,31 +1653,30 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->expanded = (ctrl->expanded == CEX_SELECTOR) ? CEX_NONE : CEX_SELECTOR;
             ctrl->selector_pressed = true;
             ctrl->hover_item = -1;
+            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
         if (hit == CELL_HIT_CHECKBOX) {
             ctrl->data.rule.allowDefendFallback = !ctrl->data.rule.allowDefendFallback;
             ctrl->expanded = CEX_NONE;
+            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
         if (hit >= CELL_HIT_MELEE_PAIR_0 && hit <= CELL_HIT_MELEE_PAIR_5) {
             // 组合设置始终连续拾取：先站立格，再相邻攻击格。
             ctrl->expanded = CEX_NONE;
+            ctrl->spell_pick_request = 0;
             ctrl->melee_pair_pick_request =
                 static_cast<int>(hit - CELL_HIT_MELEE_PAIR_0) + 1;
             ctrl->dirty = true;
             return true;
         }
-        if (hit == CELL_HIT_SPELL_CHK) {
-            ctrl->data.rule.quickCastFirst = !ctrl->data.rule.quickCastFirst;
+        if (hit >= CELL_HIT_SPELL_0 && hit <= CELL_HIT_SPELL_4) {
+            // 面板保持打开，等待直接按 1-9/0 写入该槽。
             ctrl->expanded = CEX_NONE;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit == CELL_HIT_SPELL_SLOT) {
-            ctrl->expanded = (ctrl->expanded == CEX_SPELL) ? CEX_NONE : CEX_SPELL;
+            ctrl->spell_pick_request = (hit - CELL_HIT_SPELL_0) + 1; // 1..5
             ctrl->hover_item = -1;
             ctrl->dirty = true;
             return true;
@@ -1603,6 +1684,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         if (hit >= CELL_HIT_MOVE_WP_0 && hit <= CELL_HIT_MOVE_WP_5) {
             // 路径点设置：隐藏面板后进战场点 1 格；可覆盖已有或末尾追加。
             ctrl->expanded = CEX_NONE;
+            ctrl->spell_pick_request = 0;
             ctrl->move_path_pick_request =
                 (hit - CELL_HIT_MOVE_WP_0) + 1; // 1..6
             ctrl->dirty = true;
@@ -1613,6 +1695,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
 
         if (ctrl->expanded != CEX_NONE) {
             ctrl->expanded = CEX_NONE;
+            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
         }
     }
@@ -1645,10 +1728,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                         ctrl->data.rule.target.kind, allowed);
                     if (idx < n)
                         ctrl->data.rule.target.selector = allowed[idx];
-                } else if (ctrl->expanded == CEX_SPELL) {
-                    // 槽位下拉：idx 0-8 → 槽位 1-9，idx 9 → 槽位 0
-                    if (idx >= 0 && idx < 10)
-                        ctrl->data.rule.spellSlot = (int8_t)((idx < 9) ? (idx + 1) : 0);
                 } else if (ctrl->expanded == CEX_STAND || ctrl->expanded == CEX_ATTACK) {
                     int hexes[165];
                     const int n = CellControl_BuildMeleeHexList(ctrl, hexes);

@@ -42,6 +42,8 @@ enum AutoTargetSelector : uint8_t {
 };
 
 static const int MELEE_PAIR_CAPACITY = 6;
+// 一行内可稳定放下 5 个快捷施法槽位（1-9/0），不做 10 槽。
+static const int SPELL_SLOT_CAPACITY = 5;
 
 struct AutoTargetRule {
     AutoTargetKind kind;
@@ -76,8 +78,12 @@ struct AutoStackRule {
     AutoActionKind action;
     AutoTargetRule target;
     bool allowDefendFallback;  // 允许降级为防御（仅普通部队）
-    bool quickCastFirst;       // 先快捷施法（本回合行动前先施一个法术）
-    int8_t spellSlot;          // 快捷施法槽位：1-9,0；默认 1
+    bool quickCastFirst;       // 兼容字段：spellSlotCount>0 时为 true
+    int8_t spellSlot;          // 兼容镜像：等于 spellSlots[0]（1-9/0）
+    // 行动前循环施法：按顺序轮换快捷键 1-9/0，最多 5 槽（单行布局）。
+    int8_t spellSlots[SPELL_SLOT_CAPACITY];
+    int8_t spellSlotCount;     // 有效槽位数 0..5
+    int8_t spellCursor;        // 运行时游标：下一槽索引
 };
 
 static AutoStackRule MakeDefaultRule_()
@@ -105,6 +111,10 @@ static AutoStackRule MakeDefaultRule_()
     r.allowDefendFallback = false;
     r.quickCastFirst = false;
     r.spellSlot = 1;
+    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
+        r.spellSlots[i] = -1;
+    r.spellSlotCount = 0;
+    r.spellCursor = 0;
     return r;
 }
 
