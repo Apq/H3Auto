@@ -118,7 +118,8 @@ static struct Panel {
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS];
     int selected_profile;
     int pressed_profile;
-    int count;
+    int count;                 // 可配置部队总数（可大于可见行）
+    CellData items[MAX_STACKS]; // 全部部队快照；可见行从这里按 scroll_row 绑定
     int scroll_row;
     bool scroll_dragging;
     int scroll_drag_offset;
@@ -129,7 +130,7 @@ static struct Panel {
     int pressed_button;
     int hover_cell;   // 下拉展开时鼠标悬停的格子索引，-1=无
     int hover_idx;    // 下拉展开时鼠标悬停的项索引，-1=无
-    CellControl cells[CELL_COUNT];
+    CellControl cells[CELL_COUNT]; // 仅保存当前可见的最多 3 行控件
 } s_p = {};
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
@@ -451,7 +452,12 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
                 DrawPanelToBuffer_();
         }
     }
-    if (panel_was_active && (raw_command == 4 || raw_command == 8 || raw_command == 16)) {
+    // 右键松开：用于循环施法/移动/近战已有槽位删除。
+    // 预翻译包里 RBUTTON_UP 的原始 command 通常为 64。
+    if (panel_was_active
+        && (raw_command == 4 || raw_command == 8 || raw_command == 16
+            || raw_command == 64
+            || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP))) {
         // Item vProcessMsg receives the pre-translation mouse packet:
         // command is WM-derived and coordinates are stored at +4/+8.
         HandlePanelMouseMessage_(raw_command,
@@ -570,12 +576,20 @@ static int PanelScrollThumbY_()
         + (max_row > 0 ? free_size * s_p.scroll_row / max_row : 0);
 }
 
+static void SaveCurrentCellsToDraft_();
+static void RebindVisibleCells_();
+
 static void SetPanelScrollRow_(int row)
 {
     const int max_row = PanelMaxScrollRow_();
     if (row < 0) row = 0;
     if (row > max_row) row = max_row;
+    if (row == s_p.scroll_row) return;
+
+    // 滚动前保存当前可见 3 行的草稿；滚动后按新 first_item 重新绑定。
+    SaveCurrentCellsToDraft_();
     s_p.scroll_row = row;
+    RebindVisibleCells_();
 }
 
 static void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b)
@@ -2152,31 +2166,57 @@ static void SaveCurrentCellsToDraft_()
         const int slot = ctrl->data.army_slot_ix;
         if (slot < 0 || slot >= MAX_STACKS) continue;
         s_p.draft_rules[profile][slot] = ctrl->data.rule;
+        // 同步全量快照，避免再次滚回时短暂显示旧规则。
+        const int item_index = s_p.scroll_row * COLS + i;
+        if (item_index >= 0 && item_index < s_p.count)
+            s_p.items[item_index].rule = ctrl->data.rule;
     }
+}
+
+// 根据 scroll_row 把全量部队快照重新绑定到可见 3 行。
+static void RebindVisibleCells_()
+{
+    const int profile = s_p.selected_profile;
+    const int first_item = s_p.scroll_row * COLS;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        CellControl* ctrl = &s_p.cells[i];
+        const int item_index = first_item + i;
+        if (item_index >= 0 && item_index < s_p.count) {
+            CellData cd = s_p.items[item_index];
+            const int slot = cd.army_slot_ix;
+            if (profile >= 0 && profile < PROFILE_COUNT
+                && slot >= 0 && slot < MAX_STACKS)
+                cd.rule = s_p.draft_rules[profile][slot];
+            CellControl_SetData(ctrl, &cd);
+        } else {
+            // 保留控件缓冲对象，只清数据并标脏。
+            ctrl->has_data = false;
+            ctrl->data.army_slot_ix = -1;
+            ctrl->expanded = CEX_NONE;
+            ctrl->hover_item = -1;
+            ctrl->melee_pair_pick_request = 0;
+            ctrl->move_path_pick_request = 0;
+            ctrl->spell_pick_request = 0;
+            ctrl->dirty = true;
+        }
+    }
+    s_p.hover_cell = -1;
+    s_p.hover_idx = -1;
 }
 
 static void LoadSelectedProfileIntoCells_()
 {
     const int profile = s_p.selected_profile;
     if (profile < 0 || profile >= PROFILE_COUNT) return;
-    for (int i = 0; i < CELL_COUNT; ++i) {
-        CellControl* ctrl = &s_p.cells[i];
-        if (!ctrl->has_data) continue;
-        const int slot = ctrl->data.army_slot_ix;
+    // 方案切换后，全量快照与可见行都按新方案草稿重绑。
+    for (int i = 0; i < s_p.count; ++i) {
+        const int slot = s_p.items[i].army_slot_ix;
         if (slot < 0 || slot >= MAX_STACKS) continue;
-        ctrl->data.rule = s_p.draft_rules[profile][slot];
-        // is_ranged 已在面板打开时按 stack.info.shooter 精确存入 ctrl->data，
-        // 切换方案时直接复用，避免用 creature_type 粗判丢掉射手（如大法师）的远程选项。
-        CellControl_NormalizeRule(&ctrl->data.rule, ctrl->data.creature_type,
-            ctrl->data.is_ranged);
-        ctrl->expanded = CEX_NONE;
-        ctrl->action_pressed = false;
-        ctrl->side_pressed = false;
-        ctrl->selector_pressed = false;
-        ctrl->dirty = true;
+        s_p.items[i].rule = s_p.draft_rules[profile][slot];
+        CellControl_NormalizeRule(&s_p.items[i].rule, s_p.items[i].creature_type,
+            s_p.items[i].is_ranged);
     }
-    s_p.hover_cell = -1;
-    s_p.hover_idx = -1;
+    RebindVisibleCells_();
 }
 
 static void SelectProfile_(int profile)
@@ -2214,6 +2254,7 @@ void OpenSettingsPanel_()
     }
     s_p.active = true;
     s_p.count  = 0;
+    memset(s_p.items, 0, sizeof(s_p.items));
     s_p.scroll_row = 0;
     s_p.scroll_dragging = false;
     s_p.scroll_drag_offset = 0;
@@ -2257,12 +2298,12 @@ void OpenSettingsPanel_()
                 const bool is_ranged = StackIsRanged_(stack);
                 cd.is_ranged = is_ranged;
                 CellControl_NormalizeRule(&cd.rule, cd.creature_type, is_ranged);
-                if (s_p.count < CELL_COUNT)
-                    CellControl_SetData(&s_p.cells[s_p.count], &cd);
+                s_p.items[s_p.count] = cd;
                 ++s_p.count;
             }
         }
     }
+    RebindVisibleCells_();
     InstallBattleInputBlocker_();
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
@@ -2469,6 +2510,26 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
             if (PointInRect_(px, py, bx, by, bw, bh))
                 EndSpellPick_();
+        }
+        return;
+    }
+
+    // 右键松开：循环施法 / 循环移动 / 循环近战 已有槽位直接删除。
+    if (raw_command == 64
+        || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP)) {
+        const int first_item = s_p.scroll_row * COLS;
+        for (int i = 0; i < CELL_COUNT; ++i) {
+            const int item_index = first_item + i;
+            if (item_index >= s_p.count) break;
+            RECT cRc = CellRect(i);
+            if (!PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H))
+                continue;
+            CellControl* ctrl = &s_p.cells[i];
+            if (CellControl_OnMouse(ctrl, 5,
+                    px - cRc.left, py - cRc.top, false)) {
+                DrawPanelToBuffer_();
+            }
+            return;
         }
         return;
     }
@@ -2709,12 +2770,15 @@ static void HandlePanelInput_()
 
     for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;
 
+    const int old_row = s_p.scroll_row;
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);
     if (down_down && !previous_down_down) SetPanelScrollRow_(s_p.scroll_row + 1);
     if (page_up_down && !previous_page_up_down)
         SetPanelScrollRow_(s_p.scroll_row - CELL_COUNT / COLS);
     if (page_down_down && !previous_page_down_down)
         SetPanelScrollRow_(s_p.scroll_row + CELL_COUNT / COLS);
+    if (s_p.scroll_row != old_row)
+        DrawPanelToBuffer_();
 
     previous_up_down = up_down;
     previous_down_down = down_down;

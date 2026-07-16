@@ -131,8 +131,6 @@ AutoStackRule g_active_rules[21] = {};
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
-    int  start_hotkey;         // 启动自动化热键（默认 0x78 = F7）
-    int  stop_hotkey;          // 停止自动化热键（默认 0x79 = F8）
 } cfg;
 
 static char g_ini_path[MAX_PATH];
@@ -314,15 +312,10 @@ static void ReadConfig()
 {
     const char* f = g_ini_path;
     cfg.disable_on_start = GetPrivateProfileIntA("General", "DisableOnStart", 0, f);
-    cfg.start_hotkey    = GetPrivateProfileIntA("Hotkey", "StartAutomation", 0x78, f);
-    cfg.stop_hotkey     = GetPrivateProfileIntA("Hotkey", "StopAutomation",  0x79, f);
 
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
-    cfg.start_hotkey    = ClampInt(cfg.start_hotkey,    0, 255);
-    cfg.stop_hotkey     = ClampInt(cfg.stop_hotkey,     0, 255);
 
-    WriteLog("配置加载：DisableOnStart=%d, StartHotkey=0x%02X, StopHotkey=0x%02X",
-        cfg.disable_on_start, cfg.start_hotkey, cfg.stop_hotkey);
+    WriteLog("配置加载：DisableOnStart=%d", cfg.disable_on_start);
 }
 
 // ========== 日志输出 ==========

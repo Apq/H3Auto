@@ -322,6 +322,46 @@ static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
     }
 }
 
+// 删除循环施法序列中的第 index 项并压紧。
+static bool CellControl_RemoveSpellSlot(AutoStackRule* rule, int index)
+{
+    if (!rule || index < 0 || index >= rule->spellSlotCount) return false;
+    for (int i = index; i + 1 < rule->spellSlotCount; ++i)
+        rule->spellSlots[i] = rule->spellSlots[i + 1];
+    rule->spellSlots[rule->spellSlotCount - 1] = -1;
+    --rule->spellSlotCount;
+    CellControl_NormalizeSpellSlots(rule);
+    return true;
+}
+
+// 删除循环移动路径点中的第 index 项并压紧。
+static bool CellControl_RemoveMoveWaypoint(AutoTargetRule* target, int index)
+{
+    if (!target || index < 0 || index >= target->moveWaypointCount) return false;
+    for (int i = index; i + 1 < target->moveWaypointCount; ++i)
+        target->moveWaypoints[i] = target->moveWaypoints[i + 1];
+    target->moveWaypoints[target->moveWaypointCount - 1] = -1;
+    --target->moveWaypointCount;
+    if (target->moveWaypointCursor >= target->moveWaypointCount)
+        target->moveWaypointCursor = 0;
+    return true;
+}
+
+// 删除循环近战组合中的第 index 项并压紧。
+static bool CellControl_RemoveMeleePair(AutoTargetRule* target, int index)
+{
+    if (!target || index < 0 || index >= target->meleePairCount) return false;
+    for (int i = index; i + 1 < target->meleePairCount; ++i) {
+        target->meleeStandHexes[i] = target->meleeStandHexes[i + 1];
+        target->meleeAttackHexes[i] = target->meleeAttackHexes[i + 1];
+    }
+    target->meleeStandHexes[target->meleePairCount - 1] = -1;
+    target->meleeAttackHexes[target->meleePairCount - 1] = -1;
+    --target->meleePairCount;
+    CellControl_NormalizeMeleePairs(target);
+    return true;
+}
+
 // 全战场有效坐标枚举（行优先，A01..K15），返回数量（<=165）。
 static int CellControl_AllHexes(int out[165])
 {
@@ -1705,6 +1745,47 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
         }
+    }
+
+    // 右键删除：仅对“已有项”生效；「＋」追加槽右键无效。
+    // msg_type 5 = 面板层转发的右键松开。
+    if (msg_type == 5) {
+        ctrl->expanded = CEX_NONE;
+        ctrl->spell_pick_request = 0;
+        ctrl->move_path_pick_request = 0;
+        ctrl->melee_pair_pick_request = 0;
+
+        if (hit >= CELL_HIT_SPELL_BASE
+            && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {
+            const int index = hit - CELL_HIT_SPELL_BASE;
+            if (index < ctrl->data.rule.spellSlotCount
+                && CellControl_RemoveSpellSlot(&ctrl->data.rule, index)) {
+                ctrl->dirty = true;
+                return true;
+            }
+            return true; // 右键在「＋」上也消费，避免穿透
+        }
+        if (hit >= CELL_HIT_MOVE_WP_BASE
+            && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY) {
+            const int index = hit - CELL_HIT_MOVE_WP_BASE;
+            if (index < ctrl->data.rule.target.moveWaypointCount
+                && CellControl_RemoveMoveWaypoint(&ctrl->data.rule.target, index)) {
+                ctrl->dirty = true;
+                return true;
+            }
+            return true;
+        }
+        if (hit >= CELL_HIT_MELEE_PAIR_BASE
+            && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY) {
+            const int index = hit - CELL_HIT_MELEE_PAIR_BASE;
+            if (index < ctrl->data.rule.target.meleePairCount
+                && CellControl_RemoveMeleePair(&ctrl->data.rule.target, index)) {
+                ctrl->dirty = true;
+                return true;
+            }
+            return true;
+        }
+        return false;
     }
 
     if (msg_type == 8) { // LButtonUp
