@@ -10,7 +10,7 @@ extern void LoadLabels_(const char* ini_path);
 // ---- Plugin start ----
 static void StartPlugin()
 {
-    WriteLog("H3Auto: registering hooks.");
+    WriteLog("打铁助手: registering hooks.");
 
     // LoHook: 每帧检测自动战斗对话框 + 画面板
     _PI->WriteLoHook(0x600430, Hook_BltComplete);
@@ -27,7 +27,7 @@ static void StartPlugin()
     WriteLog("HiHook 0x4744D0 registered.");
 
     ResetAutoState();
-    WriteLog("H3Auto: plugin enabled.");
+    WriteLog("打铁助手: plugin enabled.");
 }
 
 // ========== DllMain ==========
@@ -45,11 +45,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         MultiByteToWideChar(CP_ACP, 0, g_ini_path, -1, ini_path_w, MAX_PATH);
         g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);
         SetupDatedLogPathAndCleanup(hModule);
-        WriteLog("H3Auto loading.");
+        WriteLog("打铁助手 loading.");
         _P = GetPatcher();
         if (!_P) { WriteLog("GetPatcher failed."); return TRUE; }
         WriteLog("GetPatcher ok.");
-        _PI = _P->CreateInstance("HD.Plugin.ZhanChangZiDongHua");
+        _PI = _P->CreateInstance("HD.Plugin.H3Auto");
         if (!_PI) { WriteLog("CreateInstance failed."); return TRUE; }
         WriteLog("CreateInstance ok.");
         ReadConfig();

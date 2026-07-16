@@ -1,5 +1,5 @@
 // ========== SettingsDlg.inc.cpp ==========
-// 战场自动化 - 设置面板
+// 打铁助手 - 设置面板
 // 渲染：LoHook 0x600430 画面板到 screenPcx16
 // 输入捕获：检测"自动战斗"对话框的关闭事件
 
@@ -102,7 +102,7 @@ static void LoadLabels_(const char* ini_path)
     LoadLabelArray_("Selectors", DEFAULT_SELECTOR_LABELS, g_selector_labels,
         storage_selector, SEL_COUNT, ini_path);
     WriteLog("[Panel] 标签已从 %s 加载。", ini_path);
-    GetPrivateProfileStringA("Panel", "Title", "部队自动行动设置",
+    GetPrivateProfileStringA("Panel", "Title", "打铁设置",
         g_panel_title, sizeof(g_panel_title), ini_path);
 }
 
@@ -2019,7 +2019,7 @@ static void DrawPanelToBuffer_()
         Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
-    DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "部队自动行动设置",
+    DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "打铁设置",
         px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
     DrawProfileButtons_(scr);

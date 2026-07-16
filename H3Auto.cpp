@@ -1,5 +1,5 @@
 // H3Auto.cpp
-// 英雄无敌3 SoD 插件：战场自动化。
+// 英雄无敌3 SoD 插件：打铁助手。
 // 目标版本：Shadow of Death（SOD = 0xFFFFE403），仅 x86。
 
 #define _H3API_PATCHER_X86_

@@ -31,14 +31,14 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "Comments", "\xb3\xc9\xb2" "\xc1" "\xbf" "\xda" "\xd7" "\xb4" "\xb6" "\xaf" "\xb6" "\xaf" "\xbb" "\xf9" "\xbc" "\xc6"
+            VALUE "Comments", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
             VALUE "CompanyName", "Apq"
-            VALUE "FileDescription", "H3 Auto Battle Plugin"
+            VALUE "FileDescription", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
             VALUE "FileVersion", "0.1.2026.710"
             VALUE "InternalName", "H3Auto"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "H3Auto.dll"
-            VALUE "ProductName", "H3Auto"
+            VALUE "ProductName", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
             VALUE "ProductVersion", "0.1.2026.710"
         END
     END
