@@ -186,11 +186,13 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 static HHOOK s_mouse_hook = nullptr;
 static bool UpdateDropdownHover_(int px, int py);  // 前向声明（钩子先用到）
 
-// 循环近战连续拾取：phase=1 选攻击目标格，phase=2 选相邻站立格。
+// 循环近战连续拾取：phase=1 选站立格，phase=2 选相邻攻击格。
 static int s_melee_pick_cell = -1;
 static int s_melee_pick_pair = -1;
 static int s_melee_pick_phase = 0;
-static int s_melee_pick_attack_hex = -1;
+static int s_melee_pick_stand_hex = -1;
+// 点「＋」/编辑路径是在左键按下时进入拾取；同一次点击的松开不得当作战场第一击。
+static bool s_pick_wait_button_release = false;
 
 // 循环移动路径拾取：选点期间面板挂起，每次点战场空格追加一个路径点。
 // s_move_pick_cell 为格子控件索引，-1=未激活。
@@ -201,7 +203,7 @@ static void DoPickCapture_(int hex, bool right_click);
 static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
     // 战场拾取的点击捕获已移回 BattleUI 输入屏障处理器
-    // BlockBattleItemMessage_（读战斗管理器 mouseCoord），此处只保留
+    // BlockBattleItemMessage_（消息坐标转战场 hex），此处只保留
     // 下拉展开时的悬停高亮刷新。
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
         && wParam == WM_MOUSEMOVE)
@@ -273,6 +275,43 @@ static void CancelPanelTransientInput_();
 static void DoPickCapture_(int hex, bool right_click);
 static void HidePanelForPick_();
 static H3CombatManager* GetCombatMgr();
+// 原版/HD 调用 0x464380 前都会减掉战斗窗口 dlg->x/dlg->y。
+// 传入绝对屏幕坐标会把 02/03 之类的点错映射到 13/14。
+static int ResolvePickHexAtScreen_(H3CombatManager* mgr, int abs_x, int abs_y, int* out_rel_x, int* out_rel_y)
+{
+    if (!mgr) return -1;
+    int rel_x = abs_x;
+    int rel_y = abs_y;
+    int dlg_x = 0;
+    int dlg_y = 0;
+    __try {
+        H3CombatDlg* dlg = mgr->dlg;
+        if (dlg) {
+            dlg_x = dlg->GetX();
+            dlg_y = dlg->GetY();
+            rel_x = abs_x - dlg_x;
+            rel_y = abs_y - dlg_y;
+        } else {
+            // 回退：结构偏移 +0x132FC -> dlg，再读 +0x18/+0x1C（xDlg/yDlg）。
+            BYTE* base = reinterpret_cast<BYTE*>(mgr);
+            BYTE* raw_dlg = *reinterpret_cast<BYTE**>(base + 0x132FC);
+            if (raw_dlg) {
+                dlg_x = *reinterpret_cast<INT32*>(raw_dlg + 0x18);
+                dlg_y = *reinterpret_cast<INT32*>(raw_dlg + 0x1C);
+                rel_x = abs_x - dlg_x;
+                rel_y = abs_y - dlg_y;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (out_rel_x) *out_rel_x = rel_x;
+    if (out_rel_y) *out_rel_y = rel_y;
+    int hex = -1;
+    __try {
+        hex = THISCALL_3(int, 0x464380, mgr, rel_x, rel_y);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { hex = -1; }
+    if (!CellControl_HexValid(hex)) hex = -1;
+    return hex;
+}
 
 struct BattleInputBlocker
 {
@@ -293,22 +332,49 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     // 们自己的蓝色格子标示。左键松开=确认，右键=取消。
     if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0)) {
         const int raw = static_cast<int>(msg.command);
-        if (raw == static_cast<int>(eMsgCommand::RBUTTON_UP)
-            || raw == static_cast<int>(eMsgCommand::RCLICK_OUTSIDE)) {
+        // 只用松开确认；LCLICK_OUTSIDE/RCLICK_OUTSIDE 与 UP 会在同一次点击里连发，
+        // 只处理 UP 即可，无需按时间或格号去重。
+        if (raw == static_cast<int>(eMsgCommand::RBUTTON_UP)) {
+            s_pick_wait_button_release = false;
             DoPickCapture_(-1, true);
-        } else if (raw == static_cast<int>(eMsgCommand::LBUTTON_UP)
-            || raw == static_cast<int>(eMsgCommand::LCLICK_OUTSIDE)) {
+        } else if (raw == static_cast<int>(eMsgCommand::LBUTTON_UP)) {
+            if (s_pick_wait_button_release) {
+                // 吞掉进入拾取那一击的松开，不作战场选点。
+                s_pick_wait_button_release = false;
+                WriteLog("[Panel] 拾取已就绪，忽略引发点击的松开");
+                return msg.StopProcessing();
+            }
+            // 原版/HD 都是：绝对光标坐标 - 战斗窗口 dlg->x/y，再喂给 0x464380。
+            // 直接传绝对坐标会整体偏移，把 02/03 记成 13/14 一类远处格子。
+            const H3POINT cursor = H3POINT::GetCursorPosition();
+            int abs_x = cursor.x;
+            int abs_y = cursor.y;
+            int rel_x = abs_x;
+            int rel_y = abs_y;
             int hex = -1;
             H3CombatManager* mgr = GetCombatMgr();
             if (mgr) {
-                const int sx = msg.position.x;
-                const int sy = msg.position.y;
-                __try {
-                    hex = THISCALL_3(int, 0x464380, mgr, sx, sy);
-                } __except (EXCEPTION_EXECUTE_HANDLER) { hex = -1; }
+                hex = ResolvePickHexAtScreen_(mgr, abs_x, abs_y, &rel_x, &rel_y);
+                // 光标失败时再试消息包坐标（同样先减 dlg 原点）。
+                if (!CellControl_HexValid(hex)) {
+                    const int mx = static_cast<int>(msg.subtype);
+                    const int my = msg.itemId;
+                    if (mx >= 0 && my >= 0 && mx <= 4096 && my <= 4096) {
+                        int rx2 = mx, ry2 = my;
+                        const int h2 = ResolvePickHexAtScreen_(mgr, mx, my, &rx2, &ry2);
+                        if (CellControl_HexValid(h2)) {
+                            abs_x = mx; abs_y = my;
+                            rel_x = rx2; rel_y = ry2;
+                            hex = h2;
+                        }
+                    }
+                }
             }
+            WriteLog("[Panel] pick click abs=(%d,%d) rel=(%d,%d) hex=%d",
+                abs_x, abs_y, rel_x, rel_y, hex);
             DoPickCapture_(hex, false);
         }
+        // 其他鼠标消息（包括 LCLICK_OUTSIDE）统统吞掉，不传透。
         return msg.StopProcessing();
     }
 
@@ -1162,32 +1228,165 @@ static void RestoreBattleHover_()
     WriteLog("[Panel] 战场悬停处理已恢复。");
 }
 
-// 第一格（攻击目标格）的临时标示。直接使用原版 CCellShd 蓝色格子资源，
-// 每帧画到战场 drawBuffer；不修改 square/部队/行动状态，退出拾取后只需
-// 请求一次原版战场重绘即可彻底撤销。
+// 第一格（站立格）的临时标示。使用原版 CCellShd 蓝色格子资源。
+// HD 最终显示走 DirectDraw 后缓冲：只写 drawBuffer/screenPcx16 不够，
+// 必须把 45x52 小图直接 blit 到后缓冲；退出拾取时用战场重绘撤销。
+static bool BlitPcx16ToBackBuffer_(H3LoadedPcx16* source, int dst_x, int dst_y)
+{
+    if (!source || !source->buffer || !o_DDSurfaceBackBuffer)
+        return false;
+    __try {
+        DDSURFACEDESC desc = {};
+        desc.dwSize = sizeof(desc);
+        const HRESULT lock_result = o_DDSurfaceBackBuffer->Lock(
+            nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr);
+        if (FAILED(lock_result) || !desc.lpSurface)
+            return false;
+
+        const int dst_bpp = GetPanelBackBufferBpp_();
+        int dst_w = static_cast<int>(desc.dwWidth);
+        int dst_h = static_cast<int>(desc.dwHeight);
+        if (dst_w <= 0 && o_WndMgr && o_WndMgr->screenPcx16)
+            dst_w = o_WndMgr->screenPcx16->width;
+        if (dst_h <= 0 && o_WndMgr && o_WndMgr->screenPcx16)
+            dst_h = o_WndMgr->screenPcx16->height;
+
+        int src_x = 0;
+        int src_y = 0;
+        int copy_w = source->width;
+        int copy_h = source->height;
+        if (dst_x < 0) { src_x = -dst_x; copy_w += dst_x; dst_x = 0; }
+        if (dst_y < 0) { src_y = -dst_y; copy_h += dst_y; dst_y = 0; }
+        if (dst_x + copy_w > dst_w) copy_w = dst_w - dst_x;
+        if (dst_y + copy_h > dst_h) copy_h = dst_h - dst_y;
+
+        const bool source_is_32_bit = H3BitMode::Get() == 4;
+        if (copy_w > 0 && copy_h > 0) {
+            for (int y = 0; y < copy_h; ++y) {
+                BYTE* src_row = source->buffer + (src_y + y) * source->scanlineSize;
+                BYTE* dst_row = static_cast<BYTE*>(desc.lpSurface)
+                    + (dst_y + y) * desc.lPitch;
+                if (dst_bpp == 32) {
+                    BYTE* dst = dst_row + dst_x * 4;
+                    if (source_is_32_bit) {
+                        const DWORD* src = reinterpret_cast<const DWORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            const DWORD color = src[x];
+                            // 透明键：纯青/近似青跳过，保留蓝色标示。
+                            if ((color & 0x00FFFFFFu) == 0x0000FFFFu) continue;
+                            dst[x * 4 + 0] = static_cast<BYTE>(color);
+                            dst[x * 4 + 1] = static_cast<BYTE>(color >> 8);
+                            dst[x * 4 + 2] = static_cast<BYTE>(color >> 16);
+                        }
+                    } else {
+                        const WORD* src = reinterpret_cast<const WORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            const WORD c16 = src[x];
+                            if (c16 == 0x7FDF) continue;
+                            const DWORD color = PanelRGB565To8888_(c16);
+                            dst[x * 4 + 0] = static_cast<BYTE>(color);
+                            dst[x * 4 + 1] = static_cast<BYTE>(color >> 8);
+                            dst[x * 4 + 2] = static_cast<BYTE>(color >> 16);
+                        }
+                    }
+                } else {
+                    WORD* dst = reinterpret_cast<WORD*>(dst_row) + dst_x;
+                    if (source_is_32_bit) {
+                        const DWORD* src = reinterpret_cast<const DWORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            const DWORD color = src[x];
+                            if ((color & 0x00FFFFFFu) == 0x0000FFFFu) continue;
+                            dst[x] = PanelRGB8888To565_(color);
+                        }
+                    } else {
+                        const WORD* src = reinterpret_cast<const WORD*>(src_row) + src_x;
+                        for (int x = 0; x < copy_w; ++x) {
+                            if (src[x] == 0x7FDF) continue;
+                            dst[x] = src[x];
+                        }
+                    }
+                }
+            }
+        }
+        o_DDSurfaceBackBuffer->Unlock(nullptr);
+        return copy_w > 0 && copy_h > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static void DrawMeleePickMarker_()
 {
     if (!s_panel_hidden_for_pick || s_melee_pick_phase != 2
-        || !CellControl_HexValid(s_melee_pick_attack_hex))
+        || !CellControl_HexValid(s_melee_pick_stand_hex))
         return;
 
     H3CombatManager* mgr = GetCombatMgr();
-    if (!mgr || !mgr->drawBuffer || !mgr->CCellShdPcx) return;
+    if (!mgr || !mgr->CCellShdPcx) return;
     __try {
-        mgr->ShadeSquare(s_melee_pick_attack_hex);
-        H3CombatSquare& sq = mgr->squares[s_melee_pick_attack_hex];
-        // Hook_BltComplete 位于最终 blit 前：同步写 drawBuffer 和可见屏幕缓冲，
-        // 既能随重绘保持，也不会依赖真实 hover/敌人是否存在。
-        if (o_WndMgr && o_WndMgr->screenPcx16) {
-            mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
-                o_WndMgr->screenPcx16, sq.left, sq.top, TRUE);
-            if (!s_panel_redraw_in_progress) {
-                s_panel_redraw_in_progress = true;
-                o_WndMgr->H3Redraw(sq.left, sq.top, 0x2D, 0x34);
-                s_panel_redraw_in_progress = false;
+        // drawBuffer 使用相对战斗窗口的 square 坐标（原版 ShadeSquare 路径）。
+        if (mgr->drawBuffer)
+            mgr->ShadeSquare(s_melee_pick_stand_hex);
+
+        H3CombatSquare& sq = mgr->squares[s_melee_pick_stand_hex];
+        // square.left/top 是相对战斗窗口；screenPcx16 / DirectDraw 后缓冲要绝对坐标。
+        int dlg_x = 0;
+        int dlg_y = 0;
+        if (mgr->dlg) {
+            dlg_x = mgr->dlg->GetX();
+            dlg_y = mgr->dlg->GetY();
+        } else {
+            BYTE* base = reinterpret_cast<BYTE*>(mgr);
+            BYTE* raw_dlg = *reinterpret_cast<BYTE**>(base + 0x132FC);
+            if (raw_dlg) {
+                dlg_x = *reinterpret_cast<INT32*>(raw_dlg + 0x18);
+                dlg_y = *reinterpret_cast<INT32*>(raw_dlg + 0x1C);
             }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        const int abs_x = dlg_x + static_cast<int>(sq.left);
+        const int abs_y = dlg_y + static_cast<int>(sq.top);
+
+        // 离屏合成一份 45x52 标示，再写到绝对屏幕坐标。
+        static H3LoadedPcx16* s_marker_tile = nullptr;
+        if (!s_marker_tile)
+            s_marker_tile = H3LoadedPcx16::Create(0x2D, 0x34);
+        if (s_marker_tile && s_marker_tile->buffer) {
+            const bool mode32 = H3BitMode::Get() == 4;
+            for (int y = 0; y < s_marker_tile->height; ++y) {
+                BYTE* row = s_marker_tile->buffer + y * s_marker_tile->scanlineSize;
+                if (mode32) {
+                    DWORD* px = reinterpret_cast<DWORD*>(row);
+                    for (int x = 0; x < s_marker_tile->width; ++x)
+                        px[x] = 0xFF00FFFFu;
+                } else {
+                    WORD* px = reinterpret_cast<WORD*>(row);
+                    for (int x = 0; x < s_marker_tile->width; ++x)
+                        px[x] = 0x7FDF;
+                }
+            }
+            mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
+                s_marker_tile, 0, 0, TRUE);
+            const bool blitted = BlitPcx16ToBackBuffer_(s_marker_tile, abs_x, abs_y);
+            if (o_WndMgr && o_WndMgr->screenPcx16) {
+                mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
+                    o_WndMgr->screenPcx16, abs_x, abs_y, TRUE);
+                if (!s_panel_redraw_in_progress) {
+                    s_panel_redraw_in_progress = true;
+                    o_WndMgr->H3Redraw(abs_x, abs_y, 0x2D, 0x34);
+                    s_panel_redraw_in_progress = false;
+                }
+            }
+            static int s_marker_log_hex = -1;
+            if (s_marker_log_hex != s_melee_pick_stand_hex) {
+                s_marker_log_hex = s_melee_pick_stand_hex;
+                WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) blt=%d",
+                    s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
+                    abs_x, abs_y, dlg_x, dlg_y, blitted ? 1 : 0);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
+    }
 }
 
 static void RefreshBattleAfterPick_()
@@ -1289,6 +1488,7 @@ static void EndMovePathPick_()
     WriteLog("[Panel] 结束循环移动路径拾取 cell=%d", s_move_pick_cell);
     s_move_pick_cell = -1;
     s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
     // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
@@ -1302,8 +1502,9 @@ static void EndMeleePick_()
     s_melee_pick_phase = 0;
     s_melee_pick_cell = -1;
     s_melee_pick_pair = -1;
-    s_melee_pick_attack_hex = -1;
+    s_melee_pick_stand_hex = -1;
     s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
     RefreshBattleAfterPick_();
     // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
@@ -1341,8 +1542,9 @@ static void DoPickCapture_(int hex, bool right_click)
         return;
     }
 
-    // 循环近战连续拾取：第一击保存攻击目标并保持面板隐藏；第二击必须相邻，
-    // 成功后一次性覆盖/追加组合并恢复面板。右键任一阶段均取消且不改原记录。
+    // 循环近战连续拾取：第一击保存站立格并保持面板隐藏；第二击选择攻击格。
+    // 两格必须不同且相邻；成功后一次性覆盖/追加组合并恢复面板。
+    // 右键任一阶段均取消且不改原记录。
     if (s_melee_pick_phase != 0 && s_melee_pick_cell >= 0
         && s_melee_pick_cell < CELL_COUNT) {
         if (right_click) {
@@ -1355,24 +1557,26 @@ static void DoPickCapture_(int hex, bool right_click)
             && s_melee_pick_pair < MELEE_PAIR_CAPACITY) {
             AutoTargetRule& target = ctrl->data.rule.target;
             if (s_melee_pick_phase == 1) {
-                s_melee_pick_attack_hex = hex;
+                s_melee_pick_stand_hex = hex;
                 s_melee_pick_phase = 2;
-                WriteLog("[Panel] melee pair target hex=%d cell=%d pair=%d; wait stand",
+                WriteLog("[Panel] melee pair stand hex=%d cell=%d pair=%d; wait attack",
                     hex, s_melee_pick_cell, s_melee_pick_pair);
-                // 下一帧 DrawMeleePickMarker_ 会显示蓝色临时标示，面板保持隐藏。
+                // 立即画一次，不等下一帧 BltComplete。
+                DrawMeleePickMarker_();
             } else if (s_melee_pick_phase == 2) {
-                if (!CellControl_HexAdjacent(s_melee_pick_attack_hex, hex)) {
-                    WriteLog("[Panel] melee pair stand 非相邻 hex=%d target=%d 忽略",
-                        hex, s_melee_pick_attack_hex);
+                if (hex == s_melee_pick_stand_hex
+                    || !CellControl_HexAdjacent(s_melee_pick_stand_hex, hex)) {
+                    WriteLog("[Panel] melee pair attack 非相邻或相同 hex=%d stand=%d 忽略",
+                        hex, s_melee_pick_stand_hex);
                     return;
                 }
 
                 const int pair = s_melee_pick_pair;
                 const bool append = pair == target.meleePairCount;
                 if (pair < target.meleePairCount || append) {
-                    target.meleeAttackHexes[pair] =
-                        static_cast<int16_t>(s_melee_pick_attack_hex);
-                    target.meleeStandHexes[pair] = static_cast<int16_t>(hex);
+                    target.meleeStandHexes[pair] =
+                        static_cast<int16_t>(s_melee_pick_stand_hex);
+                    target.meleeAttackHexes[pair] = static_cast<int16_t>(hex);
                     if (append && target.meleePairCount < MELEE_PAIR_CAPACITY)
                         ++target.meleePairCount;
                     // 同步旧版单组兼容镜像。
@@ -1382,7 +1586,7 @@ static void DoPickCapture_(int hex, bool right_click)
                     }
                     ctrl->dirty = true;
                     WriteLog("[Panel] melee pair saved cell=%d pair=%d stand=%d attack=%d count=%d",
-                        s_melee_pick_cell, pair, hex, s_melee_pick_attack_hex,
+                        s_melee_pick_cell, pair, s_melee_pick_stand_hex, hex,
                         (int)target.meleePairCount);
                     EndMeleePick_();
                 }
@@ -1693,11 +1897,26 @@ static void DrawPanelToBuffer_()
     }
 }
 
-// 拾取模式：隐藏面板，让战场重绘覆盖面板区域（只隐藏，不关闭）。
-// 拾取期间 s_panel_modal_suspended=true，Hook_BltComplete 不再重绘面板，
-// 因此这次战场重绘后面板保持隐藏，直到拾取结束再 DrawPanelToBuffer_ 恢复。
+// 拾取模式：隐藏面板，并让原版战场重绘覆盖面板储留像素（只隐藏，不关闭）。
+// 仅 H3Redraw 区域失效不够：不会把已经 blit 到屏幕的面板储留清掉。
+// 必须请求 CombatManager::Refresh 重画战场；此时 s_panel_hidden_for_pick
+// 已为 true，Hook_BltComplete 不会把面板再画回去。
 static void HidePanelForPick_()
 {
+    if (H3CombatManager* mgr = GetCombatMgr()) {
+        __try {
+            s_panel_redraw_in_progress = true;
+            // 与 H3CombatManager::Refresh(TRUE, 0, TRUE) 同参：
+            // redrawScreen / timeDelay / redrawBackground。
+            // 把战场重画到屏幕，覆盖面板储留像素。
+            THISCALL_7(void, 0x493FC0, mgr, TRUE, FALSE, FALSE, 0, TRUE, FALSE);
+            s_panel_redraw_in_progress = false;
+            WriteLog("[Panel] 拾取隐藏：已请求战场重绘覆盖面板");
+            return;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            s_panel_redraw_in_progress = false;
+        }
+    }
     if (!o_WndMgr) return;
     __try {
         s_panel_redraw_in_progress = true;
@@ -1797,10 +2016,11 @@ void OpenSettingsPanel_()
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
     s_panel_modal_suspended = false;
     s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
     s_melee_pick_cell = -1;
     s_melee_pick_pair = -1;
     s_melee_pick_phase = 0;
-    s_melee_pick_attack_hex = -1;
+    s_melee_pick_stand_hex = -1;
     s_move_pick_cell = -1;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
@@ -1895,8 +2115,9 @@ void CloseSettingsPanel()
     s_melee_pick_phase = 0;
     s_melee_pick_cell = -1;
     s_melee_pick_pair = -1;
-    s_melee_pick_attack_hex = -1;
+    s_melee_pick_stand_hex = -1;
     s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
@@ -2133,6 +2354,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 // hover 补丁保持不撤销，游戏不显示待行动兵种高亮。
                                 s_move_pick_cell = i;
                                 s_panel_hidden_for_pick = true;
+                                s_pick_wait_button_release = true;
                                 HidePanelForPick_();
                                 WriteLog("[Panel] 进入循环移动路径拾取 cell=%d", i);
                             } else {
@@ -2142,13 +2364,14 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             ctrl->move_path_pick_request = 0;
                         }
                         // 循环近战：已有组合可覆盖重设，末尾「＋」追加。
-                        // 单次隐藏面板后连续选攻击目标格、相邻站立格。
+                        // 单次隐藏面板后连续选站立格、相邻攻击格。
                         if (ctrl->melee_pair_pick_request != 0) {
                             s_melee_pick_pair = ctrl->melee_pair_pick_request - 1;
                             s_melee_pick_cell = i;
                             s_melee_pick_phase = 1;
-                            s_melee_pick_attack_hex = -1;
+                            s_melee_pick_stand_hex = -1;
                             s_panel_hidden_for_pick = true;
+                            s_pick_wait_button_release = true;
                             HidePanelForPick_();
                             WriteLog("[Panel] 进入循环近战拾取 cell=%d pair=%d",
                                 i, s_melee_pick_pair);

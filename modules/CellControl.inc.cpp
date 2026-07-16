@@ -1542,7 +1542,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             return true;
         }
         if (hit >= CELL_HIT_MELEE_PAIR_0 && hit <= CELL_HIT_MELEE_PAIR_5) {
-            // 组合设置始终连续拾取：先攻击目标格，再相邻站立格。
+            // 组合设置始终连续拾取：先站立格，再相邻攻击格。
             ctrl->expanded = CEX_NONE;
             ctrl->melee_pair_pick_request =
                 static_cast<int>(hit - CELL_HIT_MELEE_PAIR_0) + 1;
