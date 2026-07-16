@@ -41,9 +41,13 @@ enum AutoTargetSelector : uint8_t {
     SEL_COUNT
 };
 
-static const int MELEE_PAIR_CAPACITY = 6;
-// 一行内可稳定放下 5 个快捷施法槽位（1-9/0），不做 10 槽。
-static const int SPELL_SLOT_CAPACITY = 5;
+// 容量按第三小列宽度（≈368）与槽位文本宽度反算：
+//  循环施法单数字 → 槽宽约 34，一行 10 个；
+//  循环移动 A01 → 槽宽约 43，每行 8 个，两行 16 个；
+//  循环近战 A01→B02 → 槽宽约 71，每行 5 组，两行 10 组。
+static const int MELEE_PAIR_CAPACITY = 10;
+static const int MOVE_WAYPOINT_CAPACITY = 16;
+static const int SPELL_SLOT_CAPACITY = 10;
 
 struct AutoTargetRule {
     AutoTargetKind kind;
@@ -61,16 +65,16 @@ struct AutoTargetRule {
 
     // 循环移动专用：有序路径点列表，逐点巡逻循环（末点回首点）。
     // 从战场直接点选追加；-1=空槽。
-    int16_t moveWaypoints[6];  // 路径点，原版 hex 1..185，-1=空
-    int8_t  moveWaypointCount; // 有效点数 0..6
+    int16_t moveWaypoints[MOVE_WAYPOINT_CAPACITY]; // 路径点，原版 hex 1..185，-1=空
+    int8_t  moveWaypointCount; // 有效点数 0..MOVE_WAYPOINT_CAPACITY
     int8_t  moveWaypointCursor;// 运行时游标：下一个要走向的点索引
 
-    // 循环近战专用：最多 6 组“站立位 + 攻击位”。
+    // 循环近战专用：最多 MELEE_PAIR_CAPACITY 组“站立位 + 攻击位”。
     // 保留上面的 meleeStandHex/meleeAttackHex 作为旧规则兼容镜像；
     // 新 UI 和执行端均以本序列为准。
     int16_t meleeStandHexes[MELEE_PAIR_CAPACITY];
     int16_t meleeAttackHexes[MELEE_PAIR_CAPACITY];
-    int8_t  meleePairCount;    // 有效组合数 0..6
+    int8_t  meleePairCount;    // 有效组合数 0..MELEE_PAIR_CAPACITY
     int8_t  meleePairCursor;   // 运行时游标：下一组组合索引
 };
 
@@ -80,9 +84,9 @@ struct AutoStackRule {
     bool allowDefendFallback;  // 允许降级为防御（仅普通部队）
     bool quickCastFirst;       // 兼容字段：spellSlotCount>0 时为 true
     int8_t spellSlot;          // 兼容镜像：等于 spellSlots[0]（1-9/0）
-    // 行动前循环施法：按顺序轮换快捷键 1-9/0，最多 5 槽（单行布局）。
+    // 行动前循环施法：按顺序轮换快捷键 1-9/0，单行最多 SPELL_SLOT_CAPACITY 槽。
     int8_t spellSlots[SPELL_SLOT_CAPACITY];
-    int8_t spellSlotCount;     // 有效槽位数 0..5
+    int8_t spellSlotCount;     // 有效槽位数 0..SPELL_SLOT_CAPACITY
     int8_t spellCursor;        // 运行时游标：下一槽索引
 };
 
@@ -99,7 +103,7 @@ static AutoStackRule MakeDefaultRule_()
     r.target.fixedHex = -1;
     r.target.meleeStandHex = -1;
     r.target.meleeAttackHex = -1;
-    for (int i = 0; i < 6; ++i) r.target.moveWaypoints[i] = -1;
+    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) r.target.moveWaypoints[i] = -1;
     r.target.moveWaypointCount = 0;
     r.target.moveWaypointCursor = 0;
     for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {

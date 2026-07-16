@@ -307,9 +307,9 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self, AutoStackRule& ru
     if (!mgr || !self) return false;
 
     // 收集有效路径点（1..185，跳过空槽与当前所在格）。
-    int wps[6];
+    int wps[MOVE_WAYPOINT_CAPACITY];
     int n = 0;
-    for (int i = 0; i < 6 && i < 6; ++i) {
+    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) {
         int h = rule.target.moveWaypoints[i];
         if (h >= 1 && h <= 185) wps[n++] = h;
     }

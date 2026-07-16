@@ -1615,13 +1615,13 @@ static void DoPickCapture_(int hex, bool right_click)
         }
         CellControl* ctrl = &s_p.cells[s_move_pick_cell];
         if (ctrl->has_data && CellControl_HexValid(hex)
-            && s_move_pick_wp >= 0 && s_move_pick_wp < 6) {
+            && s_move_pick_wp >= 0 && s_move_pick_wp < MOVE_WAYPOINT_CAPACITY) {
             AutoTargetRule& t = ctrl->data.rule.target;
             const int wp = s_move_pick_wp;
             const bool append = wp == t.moveWaypointCount;
             if (wp < t.moveWaypointCount || append) {
                 t.moveWaypoints[wp] = static_cast<int16_t>(hex);
-                if (append && t.moveWaypointCount < 6)
+                if (append && t.moveWaypointCount < MOVE_WAYPOINT_CAPACITY)
                     ++t.moveWaypointCount;
                 if (t.moveWaypointCursor >= t.moveWaypointCount)
                     t.moveWaypointCursor = 0;

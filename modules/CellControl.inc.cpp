@@ -67,12 +67,19 @@ static const int CC_SPELL_Y  = 6;
 static const int CC_TOP_Y    = 36;  // 中行（行动/选择器/路径槽）
 static const int CC_BOT_Y    = 66;  // 下行（降级/阵营/路径槽）
 static const int CC_CHECKBOX_H = 14;
-// 循环施法：标签占第二小列；槽位从第三小列起，单行最多 5 个。
+// 循环施法：标签占第二小列；槽位从第三小列起。
+// 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
 static const int CC_SPELL_SLOT_GAP = 3;
-static const int CC_SPELL_SLOT_W =
-    (CC_COL3_W - CC_SPELL_SLOT_GAP * (SPELL_SLOT_CAPACITY - 1))
-    / SPELL_SLOT_CAPACITY;
+static const int CC_SPELL_SLOT_W = 34; // 刚好显示一位数字
+// 循环移动/近战槽：按文本宽度定槽宽，再反算每行/总容量（两行）。
+static const int CC_PATH_SLOT_GAP = 3;
+static const int CC_MOVE_SLOT_W = 43;  // A01
+static const int CC_MELEE_SLOT_W = 71; // A01→B02
+static const int CC_MOVE_SLOTS_PER_ROW =
+    (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MOVE_SLOT_W + CC_PATH_SLOT_GAP); // 8
+static const int CC_MELEE_SLOTS_PER_ROW =
+    (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MELEE_SLOT_W + CC_PATH_SLOT_GAP); // 5
 
 // 兼容旧名
 static const int CC_COMBO_X  = CC_COL2_X;
@@ -116,9 +123,9 @@ struct CellControl
     bool             has_data;
     H3LoadedDef*     def_cache;
 
-    // 循环近战组合拾取请求：0=无，1..6=要新增/重设的组合索引+1。
+    // 循环近战组合拾取请求：0=无，1..MELEE_PAIR_CAPACITY=要新增/重设的组合索引+1。
     int              melee_pair_pick_request;
-    // 循环移动路径点拾取请求：0=无，1..6=要新增/重设的路径点索引+1。
+    // 循环移动路径点拾取请求：0=无，1..MOVE_WAYPOINT_CAPACITY=要新增/重设的路径点索引+1。
     // 与循环近战一致：每次只进战场点 1 格，返回后覆盖/追加对应槽。
     int              move_path_pick_request;
     // 循环施法录入请求：0=无，1..SPELL_SLOT_CAPACITY=待按数字键的槽索引+1。
@@ -405,7 +412,7 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
     t.fixedHex = -1;
     t.meleeStandHex = -1;
     t.meleeAttackHex = -1;
-    for (int i = 0; i < 6; ++i) t.moveWaypoints[i] = -1;
+    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) t.moveWaypoints[i] = -1;
     for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
         t.meleeStandHexes[i] = -1;
         t.meleeAttackHexes[i] = -1;
@@ -421,7 +428,7 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
         t.meleeAttackHex = -1;
         break;
     case AA_MELEE_ATTACK:
-        // 循环近战：最多 6 组站立格 + 攻击格（模拟点击）
+        // 循环近战：最多 MELEE_PAIR_CAPACITY 组站立格 + 攻击格（模拟点击）
         t.kind = AT_POSITION;
         t.side = ATS_ENEMY;
         t.selector = SEL_FIXED;
@@ -747,7 +754,8 @@ static void CellControl_FormatWaypoint(char* buf, int bufsize,
 {
     if (!buf || bufsize <= 0) return;
     buf[0] = 0;
-    if (index < 0 || index >= target.moveWaypointCount || index >= 6) {
+    if (index < 0 || index >= target.moveWaypointCount
+        || index >= MOVE_WAYPOINT_CAPACITY) {
         strncpy(buf, "+", bufsize - 1);
         buf[bufsize - 1] = 0;
         return;
@@ -944,18 +952,20 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     // 小列3 上行 = 选择器 / 近战攻击格；下行 = 阵营 / 固定说明。
     if (needs_target) {
         if (rule.action == AA_MOVE) {
-            // 循环移动：与循环近战同款 2×3 槽位，每槽一个路径点。
-            // 已有槽显示坐标（可点重设）；末尾「＋」追加；最多 6 点。
-            const int gap = 3;
-            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            // 循环移动：两行槽位，每槽一个路径点；槽宽按 A01 文本定，
+            // 一行能摆几个就几个（当前 8×2=16）。
+            const int gap = CC_PATH_SLOT_GAP;
+            const int slot_w = CC_MOVE_SLOT_W;
+            const int per_row = CC_MOVE_SLOTS_PER_ROW;
             const int count = rule.target.moveWaypointCount;
-            for (int index = 0; index < 6; ++index) {
-                const int row = index / 3;
-                const int col = index % 3;
+            for (int index = 0; index < MOVE_WAYPOINT_CAPACITY; ++index) {
+                const int row = index / per_row;
+                const int col = index % per_row;
+                if (row > 1) break;
                 const int x = CC_COL3_X + col * (slot_w + gap);
                 const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 const bool existing = index < count;
-                const bool add_slot = index == count && count < 6;
+                const bool add_slot = index == count && count < MOVE_WAYPOINT_CAPACITY;
                 if (!existing && !add_slot) continue;
 
                 const bool requested = ctrl->move_path_pick_request == index + 1;
@@ -970,19 +980,21 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                     CellControl_FormatWaypoint(wp_buf, sizeof(wp_buf),
                         rule.target, index);
                     CellControl_DrawText(scr, fntS, wp_buf,
-                        x + 2, y, slot_w - 4, CC_ROW_H,
+                        x + 1, y, slot_w - 2, CC_ROW_H,
                         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
                 }
             }
         } else if (CellControl_ActionUsesTwoHex(rule.action)) {
-            // 循环近战：两行各 3 个组合槽位。已有槽位显示“站立位→攻击位”，
-            // 点击可覆盖重设；有效序列末尾显示「＋」用于追加，最多 6 组。
-            const int gap = 3;
-            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            // 循环近战：两行槽位，显示“站立位→攻击位”；槽宽按文本定，
+            // 一行能摆几个就几个（当前 5×2=10）。
+            const int gap = CC_PATH_SLOT_GAP;
+            const int slot_w = CC_MELEE_SLOT_W;
+            const int per_row = CC_MELEE_SLOTS_PER_ROW;
             const int count = rule.target.meleePairCount;
             for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
-                const int row = index / 3;
-                const int col = index % 3;
+                const int row = index / per_row;
+                const int col = index % per_row;
+                if (row > 1) break;
                 const int x = CC_COL3_X + col * (slot_w + gap);
                 const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 const bool existing = index < count;
@@ -1002,7 +1014,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                     CellControl_FormatMeleePair(pair_buf, sizeof(pair_buf),
                         rule.target, index);
                     CellControl_DrawText(scr, fntS, pair_buf,
-                        x + 2, y, slot_w - 4, CC_ROW_H,
+                        x + 1, y, slot_w - 2, CC_ROW_H,
                         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
                 }
             }
@@ -1066,7 +1078,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 
-    // ---- 顶部：行动前循环施法（标签 + 最多 5 个快捷键槽，末尾「＋」追加）----
+    // ---- 顶部：行动前循环施法（标签 + 单行最多 SPELL_SLOT_CAPACITY 个快捷键槽）----
     {
         CellControl_DrawText(scr, fntS, "行动前循环施法:",
             CC_COL2_X, CC_SPELL_Y, CC_SPELL_LABEL_W, CC_ROW_H,
@@ -1447,23 +1459,10 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
-    CELL_HIT_MELEE_PAIR_0, // 循环近战组合槽位 0..5（必须连续）
-    CELL_HIT_MELEE_PAIR_1,
-    CELL_HIT_MELEE_PAIR_2,
-    CELL_HIT_MELEE_PAIR_3,
-    CELL_HIT_MELEE_PAIR_4,
-    CELL_HIT_MELEE_PAIR_5,
-    CELL_HIT_MOVE_WP_0,    // 循环移动路径点槽位 0..5（必须连续）
-    CELL_HIT_MOVE_WP_1,
-    CELL_HIT_MOVE_WP_2,
-    CELL_HIT_MOVE_WP_3,
-    CELL_HIT_MOVE_WP_4,
-    CELL_HIT_MOVE_WP_5,
-    CELL_HIT_SPELL_0,      // 循环施法槽位 0..4（必须连续）
-    CELL_HIT_SPELL_1,
-    CELL_HIT_SPELL_2,
-    CELL_HIT_SPELL_3,
-    CELL_HIT_SPELL_4,
+    // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
+    CELL_HIT_MELEE_PAIR_BASE = 100,
+    CELL_HIT_MOVE_WP_BASE    = 200,
+    CELL_HIT_SPELL_BASE      = 300,
 };
 
 static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y)
@@ -1500,30 +1499,34 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
 
     if (needs_target) {
         if (ctrl->data.rule.action == AA_MOVE) {
-            // 循环移动：命中 2×3 路径点槽位；只暴露已有项和末尾追加项。
-            const int gap = 3;
-            const int slot_w = (CC_COL_W - gap * 2) / 3;
-            for (int index = 0; index < 6; ++index) {
-                const int row = index / 3;
-                const int col = index % 3;
+            // 循环移动：按布局反算的槽宽命中；只暴露已有项和末尾追加项。
+            const int gap = CC_PATH_SLOT_GAP;
+            const int slot_w = CC_MOVE_SLOT_W;
+            const int per_row = CC_MOVE_SLOTS_PER_ROW;
+            for (int index = 0; index < MOVE_WAYPOINT_CAPACITY; ++index) {
+                const int row = index / per_row;
+                const int col = index % per_row;
+                if (row > 1) break;
                 const int x = CC_COL3_X + col * (slot_w + gap);
                 const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 if (local_x >= x && local_x < x + slot_w
                     && local_y >= y && local_y < y + CC_ROW_H
                     && (index < ctrl->data.rule.target.moveWaypointCount
                         || (index == ctrl->data.rule.target.moveWaypointCount
-                            && index < 6)))
+                            && index < MOVE_WAYPOINT_CAPACITY)))
                 {
-                    return static_cast<CellHitArea>(CELL_HIT_MOVE_WP_0 + index);
+                    return static_cast<CellHitArea>(CELL_HIT_MOVE_WP_BASE + index);
                 }
             }
         } else if (melee) {
-            // 循环近战：命中 2×3 组合槽位；只暴露已有项和末尾追加项。
-            const int gap = 3;
-            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            // 循环近战：按布局反算的槽宽命中；只暴露已有项和末尾追加项。
+            const int gap = CC_PATH_SLOT_GAP;
+            const int slot_w = CC_MELEE_SLOT_W;
+            const int per_row = CC_MELEE_SLOTS_PER_ROW;
             for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
-                const int row = index / 3;
-                const int col = index % 3;
+                const int row = index / per_row;
+                const int col = index % per_row;
+                if (row > 1) break;
                 const int x = CC_COL3_X + col * (slot_w + gap);
                 const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 if (local_x >= x && local_x < x + slot_w
@@ -1532,7 +1535,7 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                         || (index == ctrl->data.rule.target.meleePairCount
                             && index < MELEE_PAIR_CAPACITY)))
                 {
-                    return static_cast<CellHitArea>(CELL_HIT_MELEE_PAIR_0 + index);
+                    return static_cast<CellHitArea>(CELL_HIT_MELEE_PAIR_BASE + index);
                 }
             }
         } else {
@@ -1564,7 +1567,7 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                 + index * (CC_SPELL_SLOT_W + CC_SPELL_SLOT_GAP);
             if (local_x >= x && local_x < x + CC_SPELL_SLOT_W
                 && local_y >= CC_SPELL_Y && local_y < CC_SPELL_Y + CC_ROW_H)
-                return static_cast<CellHitArea>(CELL_HIT_SPELL_0 + index);
+                return static_cast<CellHitArea>(CELL_HIT_SPELL_BASE + index);
         }
     }
 
@@ -1664,29 +1667,33 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
-        if (hit >= CELL_HIT_MELEE_PAIR_0 && hit <= CELL_HIT_MELEE_PAIR_5) {
+        if (hit >= CELL_HIT_MELEE_PAIR_BASE
+            && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY) {
             // 组合设置始终连续拾取：先站立格，再相邻攻击格。
             ctrl->expanded = CEX_NONE;
             ctrl->spell_pick_request = 0;
             ctrl->melee_pair_pick_request =
-                static_cast<int>(hit - CELL_HIT_MELEE_PAIR_0) + 1;
+                static_cast<int>(hit - CELL_HIT_MELEE_PAIR_BASE) + 1;
             ctrl->dirty = true;
             return true;
         }
-        if (hit >= CELL_HIT_SPELL_0 && hit <= CELL_HIT_SPELL_4) {
+        if (hit >= CELL_HIT_SPELL_BASE
+            && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {
             // 面板保持打开，等待直接按 1-9/0 写入该槽。
             ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = (hit - CELL_HIT_SPELL_0) + 1; // 1..5
+            ctrl->spell_pick_request =
+                (hit - CELL_HIT_SPELL_BASE) + 1; // 1..SPELL_SLOT_CAPACITY
             ctrl->hover_item = -1;
             ctrl->dirty = true;
             return true;
         }
-        if (hit >= CELL_HIT_MOVE_WP_0 && hit <= CELL_HIT_MOVE_WP_5) {
+        if (hit >= CELL_HIT_MOVE_WP_BASE
+            && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY) {
             // 路径点设置：隐藏面板后进战场点 1 格；可覆盖已有或末尾追加。
             ctrl->expanded = CEX_NONE;
             ctrl->spell_pick_request = 0;
             ctrl->move_path_pick_request =
-                (hit - CELL_HIT_MOVE_WP_0) + 1; // 1..6
+                (hit - CELL_HIT_MOVE_WP_BASE) + 1; // 1..MOVE_WAYPOINT_CAPACITY
             ctrl->dirty = true;
             return true;
         }
