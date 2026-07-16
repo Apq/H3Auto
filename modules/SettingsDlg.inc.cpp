@@ -1637,8 +1637,6 @@ static void DoPickCapture_(int hex, bool right_click)
                 t.moveWaypoints[wp] = static_cast<int16_t>(hex);
                 if (append && t.moveWaypointCount < MOVE_WAYPOINT_CAPACITY)
                     ++t.moveWaypointCount;
-                if (t.moveWaypointCursor >= t.moveWaypointCount)
-                    t.moveWaypointCursor = 0;
                 ctrl->dirty = true;
                 WriteLog("[Panel] move waypoint saved cell=%d wp=%d hex=%d count=%d",
                     s_move_pick_cell, wp, hex, (int)t.moveWaypointCount);
@@ -1870,6 +1868,8 @@ static void CheckAutoFightDialogClosed()
 // 第五部分：LoHook
 // ========================================================================
 
+extern bool TryAutoExecuteActiveStack();
+
 INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 {
     (void)h; (void)c;
@@ -1888,6 +1888,12 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
         }
         if (s_p.active && s_panel_hidden_for_pick)
             DrawMeleePickMarker_();
+    } else {
+        // 循环施法是两阶段状态机：必须每帧观察 heroCasted/法力变化，
+        // 再决定推进游标并提交部队主动作，不能只依赖偶发战斗消息。
+        __try {
+            TryAutoExecuteActiveStack();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return EXEC_DEFAULT;
 }
@@ -1897,7 +1903,6 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 // 1) 面板打开时：把鼠标移动坐标改成离屏，清掉 hover 高亮。
 // 2) 面板关闭时：若当前活动单位应由 H3Auto 主动执行，则在此提交 action 字段，
 //    让原版主循环自然进入 FUN_004786b0 执行动画/伤害/回合推进。
-extern bool TryAutoExecuteActiveStack();
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
     (void)h;

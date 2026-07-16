@@ -261,15 +261,11 @@ static void CellControl_NormalizeSpellSlots(AutoStackRule* rule)
         rule->spellSlots[i] = (i < count) ? slots[i] : static_cast<int8_t>(-1);
     rule->spellSlotCount = static_cast<int8_t>(count);
     if (count <= 0) {
-        rule->spellCursor = 0;
         rule->quickCastFirst = false;
         // 保持默认镜像，便于旧逻辑读取。
         if (!is_valid_slot(rule->spellSlot))
             rule->spellSlot = 1;
     } else {
-        int cursor = rule->spellCursor;
-        if (cursor < 0 || cursor >= count) cursor = 0;
-        rule->spellCursor = static_cast<int8_t>(cursor);
         rule->quickCastFirst = true;
         rule->spellSlot = rule->spellSlots[0];
     }
@@ -310,13 +306,9 @@ static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
     }
     target->meleePairCount = static_cast<int8_t>(count);
     if (count == 0) {
-        target->meleePairCursor = 0;
         target->meleeStandHex = -1;
         target->meleeAttackHex = -1;
     } else {
-        int cursor = target->meleePairCursor;
-        if (cursor < 0 || cursor >= count) cursor = 0;
-        target->meleePairCursor = static_cast<int8_t>(cursor);
         target->meleeStandHex = target->meleeStandHexes[0];
         target->meleeAttackHex = target->meleeAttackHexes[0];
     }
@@ -342,8 +334,6 @@ static bool CellControl_RemoveMoveWaypoint(AutoTargetRule* target, int index)
         target->moveWaypoints[i] = target->moveWaypoints[i + 1];
     target->moveWaypoints[target->moveWaypointCount - 1] = -1;
     --target->moveWaypointCount;
-    if (target->moveWaypointCursor >= target->moveWaypointCount)
-        target->moveWaypointCursor = 0;
     return true;
 }
 
