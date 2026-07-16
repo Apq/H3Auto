@@ -154,17 +154,38 @@ static bool CellControl_HexValid(int hex)
 }
 
 // 填充某 hex 的相邻格（最多 6 个有效格），返回数量。
+// 优先使用原版战斗管理器已构建的 adjacentSquares：它就是游戏实际认可的
+// 六方向相邻表，避免手写奇偶行偏移方向与 H3 棋盘布局相反。
 static int CellControl_HexNeighbors(int hex, int out[6])
 {
     int n = 0;
-    if (!CellControl_HexValid(hex)) return 0;
+    if (!CellControl_HexValid(hex) || !out) return 0;
+
+    H3CombatManager* mgr = H3CombatManager::Get();
+    if (mgr) {
+        __try {
+            const H3AdjacentSquares& adjacent = mgr->adjacentSquares[hex];
+            const int16_t* original = &adjacent.topRight;
+            for (int i = 0; i < 6; ++i) {
+                const int candidate = original[i];
+                if (!CellControl_HexValid(candidate)) continue;
+                bool duplicate = false;
+                for (int k = 0; k < n; ++k)
+                    if (out[k] == candidate) { duplicate = true; break; }
+                if (!duplicate) out[n++] = candidate;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = 0;
+        }
+        if (n > 0) return n;
+    }
+
+    // 无战斗管理器时的保底公式。H3 的可见第一行按“右移行”处理，
+    // 因而与此前实现的奇偶方向相反（例如 61 的左下邻格应含 77）。
     const int row = hex / 17;
     const bool odd = (row & 1) != 0;
-    int cand[6];
-    // 同行左右
-    cand[0] = hex - 1;
-    cand[1] = hex + 1;
-    if (!odd) {
+    int cand[6] = { hex - 1, hex + 1, 0, 0, 0, 0 };
+    if (odd) {
         cand[2] = hex - 18; // 上左
         cand[3] = hex - 17; // 上右
         cand[4] = hex + 16; // 下左
@@ -175,10 +196,8 @@ static int CellControl_HexNeighbors(int hex, int out[6])
         cand[4] = hex + 17; // 下左
         cand[5] = hex + 18; // 下右
     }
-    for (int i = 0; i < 6; ++i) {
-        if (CellControl_HexValid(cand[i]))
-            out[n++] = cand[i];
-    }
+    for (int i = 0; i < 6; ++i)
+        if (CellControl_HexValid(cand[i])) out[n++] = cand[i];
     return n;
 }
 

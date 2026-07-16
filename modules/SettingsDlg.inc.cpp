@@ -1566,8 +1566,17 @@ static void DoPickCapture_(int hex, bool right_click)
             } else if (s_melee_pick_phase == 2) {
                 if (hex == s_melee_pick_stand_hex
                     || !CellControl_HexAdjacent(s_melee_pick_stand_hex, hex)) {
-                    WriteLog("[Panel] melee pair attack 非相邻或相同 hex=%d stand=%d 忽略",
-                        hex, s_melee_pick_stand_hex);
+                    int neighbors[6] = {};
+                    const int nn = CellControl_HexNeighbors(s_melee_pick_stand_hex, neighbors);
+                    WriteLog("[Panel] melee pair attack 非相邻或相同 hex=%d stand=%d nb=[%d,%d,%d,%d,%d,%d] n=%d 忽略",
+                        hex, s_melee_pick_stand_hex,
+                        nn > 0 ? neighbors[0] : -1,
+                        nn > 1 ? neighbors[1] : -1,
+                        nn > 2 ? neighbors[2] : -1,
+                        nn > 3 ? neighbors[3] : -1,
+                        nn > 4 ? neighbors[4] : -1,
+                        nn > 5 ? neighbors[5] : -1,
+                        nn);
                     return;
                 }
 
