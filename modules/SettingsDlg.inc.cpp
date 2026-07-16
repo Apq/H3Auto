@@ -194,9 +194,10 @@ static int s_melee_pick_stand_hex = -1;
 // 点「＋」/编辑路径是在左键按下时进入拾取；同一次点击的松开不得当作战场第一击。
 static bool s_pick_wait_button_release = false;
 
-// 循环移动路径拾取：选点期间面板挂起，每次点战场空格追加一个路径点。
-// s_move_pick_cell 为格子控件索引，-1=未激活。
+// 循环移动路径点拾取：与循环近战同交互，但每次只点 1 格。
+// s_move_pick_cell 为卡片索引，s_move_pick_wp 为路径点槽 0..5。
 static int s_move_pick_cell = -1;
+static int s_move_pick_wp = -1;
 static void EndMovePathPick_();
 static void DoPickCapture_(int hex, bool right_click);
 
@@ -1492,13 +1493,17 @@ static void ForcePanelModalDepth_(bool on)
 static void EndMovePathPick_()
 {
     if (s_move_pick_cell < 0) return;
-    WriteLog("[Panel] 结束循环移动路径拾取 cell=%d", s_move_pick_cell);
+    const int old_cell = s_move_pick_cell;
+    const int old_wp = s_move_pick_wp;
     s_move_pick_cell = -1;
+    s_move_pick_wp = -1;
     s_panel_hidden_for_pick = false;
     s_pick_wait_button_release = false;
+    RefreshBattleAfterPick_();
     // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
+    WriteLog("[Panel] 结束循环移动拾取 cell=%d wp=%d", old_cell, old_wp);
 }
 
 // 结束近战选格：恢复面板输入/绘制（屏障始终保留，无需重装）。
@@ -1525,25 +1530,28 @@ static void EndMeleePick_()
 // right_click=true 表示取消当前拾取。
 static void DoPickCapture_(int hex, bool right_click)
 {
-    // 循环移动路径拾取
+    // 循环移动：每次只点 1 格。已有槽覆盖，末尾「＋」追加；右键取消不改原记录。
     if (s_move_pick_cell >= 0 && s_move_pick_cell < CELL_COUNT) {
         if (right_click) {
             EndMovePathPick_();
             return;
         }
         CellControl* ctrl = &s_p.cells[s_move_pick_cell];
-        if (ctrl->has_data) {
+        if (ctrl->has_data && CellControl_HexValid(hex)
+            && s_move_pick_wp >= 0 && s_move_pick_wp < 6) {
             AutoTargetRule& t = ctrl->data.rule.target;
-            if (hex >= 1 && hex <= 185) {
-                if (t.moveWaypointCount < 6) {
-                    t.moveWaypoints[t.moveWaypointCount] = (int16_t)hex;
-                    t.moveWaypointCount++;
-                    ctrl->dirty = true;
-                    WriteLog("[Panel] move waypoint #%d hex=%d cell=%d",
-                        (int)t.moveWaypointCount, hex, s_move_pick_cell);
-                }
-                if (t.moveWaypointCount >= 6)
-                    EndMovePathPick_();
+            const int wp = s_move_pick_wp;
+            const bool append = wp == t.moveWaypointCount;
+            if (wp < t.moveWaypointCount || append) {
+                t.moveWaypoints[wp] = static_cast<int16_t>(hex);
+                if (append && t.moveWaypointCount < 6)
+                    ++t.moveWaypointCount;
+                if (t.moveWaypointCursor >= t.moveWaypointCount)
+                    t.moveWaypointCursor = 0;
+                ctrl->dirty = true;
+                WriteLog("[Panel] move waypoint saved cell=%d wp=%d hex=%d count=%d",
+                    s_move_pick_cell, wp, hex, (int)t.moveWaypointCount);
+                EndMovePathPick_();
             }
         }
         return;
@@ -2038,6 +2046,7 @@ void OpenSettingsPanel_()
     s_melee_pick_phase = 0;
     s_melee_pick_stand_hex = -1;
     s_move_pick_cell = -1;
+    s_move_pick_wp = -1;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -2135,6 +2144,7 @@ void CloseSettingsPanel()
     s_panel_hidden_for_pick = false;
     s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
+    s_move_pick_wp = -1;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -2254,15 +2264,20 @@ static bool UpdateDropdownHover_(int px, int py)
         CellControl* ctrl = &s_p.cells[i];
         if (ctrl->expanded == CEX_NONE) continue;
         RECT cRc = CellRect(i);
+        // 按当前展开类型的真实列表矩形判定（行动=小列2，选择器/阵营=小列3）。
+        // 旧逻辑写死 CC_COMBO_X，导致右侧选择器永远无 hover 高亮。
+        RECT dropRc = {};
+        if (!CellControl_GetExpandRectForCtrl(ctrl, cRc.left, cRc.top, &dropRc))
+            continue;
+        if (!PointInRect_(px, py, dropRc.left, dropRc.top,
+            dropRc.right - dropRc.left, dropRc.bottom - dropRc.top)) {
+            // 光标不在该展开列表内：清除 hover，继续看其它展开项。
+            continue;
+        }
         const int lx = px - cRc.left;
         const int ly = py - cRc.top;
-        if (lx < CC_COMBO_X || lx >= CC_COMBO_X + CC_COMBO_W) {
-            new_hover_cell = -1;
-            new_hover_idx = -1;
-            break;
-        }
-        // 站立/攻击下拉从各自行下方展开；返回绝对项索引（含滚动）
-        int idx = CellControl_HitExpandIndex(ctrl, lx, ly);
+        // 站立/攻击下拉返回绝对项索引（含滚动）；其它下拉等同可见索引。
+        const int idx = CellControl_HitExpandIndex(ctrl, lx, ly);
         new_hover_cell = i;
         new_hover_idx = idx;
         break;
@@ -2361,22 +2376,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     // 面板按下(raw 8) → 格子按下(4)，触发下拉展开/收起
                     if (CellControl_OnMouse(ctrl, 4,
                             px - cRc.left, py - cRc.top, false)) {
-                        // 循环移动：格子请求进入/退出战场路径拾取模式
+                        // 循环移动：已有路径点可覆盖重设，末尾「＋」追加。
+                        // 隐藏面板后只点 1 格即回写对应槽位。
                         if (ctrl->move_path_pick_request != 0) {
-                            if (ctrl->move_path_pick_request == 1) {
-                                // 开始拾取：只隐藏面板绘制（s_panel_hidden_for_pick），
-                                // 保持 suspended=false + 屏障与正常打开态一致，
-                                // 否则真实点击不会派发到屏障 item（只剩 cmd=0 空消息）。
-                                // hover 补丁保持不撤销，游戏不显示待行动兵种高亮。
-                                s_move_pick_cell = i;
-                                s_panel_hidden_for_pick = true;
-                                s_pick_wait_button_release = true;
-                                HidePanelForPick_();
-                                WriteLog("[Panel] 进入循环移动路径拾取 cell=%d", i);
-                            } else {
-                                // 结束拾取
-                                EndMovePathPick_();
-                            }
+                            s_move_pick_wp = ctrl->move_path_pick_request - 1;
+                            s_move_pick_cell = i;
+                            s_panel_hidden_for_pick = true;
+                            s_pick_wait_button_release = true;
+                            HidePanelForPick_();
+                            WriteLog("[Panel] 进入循环移动拾取 cell=%d wp=%d",
+                                i, s_move_pick_wp);
                             ctrl->move_path_pick_request = 0;
                         }
                         // 循环近战：已有组合可覆盖重设，末尾「＋」追加。

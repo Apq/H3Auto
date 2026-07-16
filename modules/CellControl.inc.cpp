@@ -109,7 +109,8 @@ struct CellControl
 
     // 循环近战组合拾取请求：0=无，1..6=要新增/重设的组合索引+1。
     int              melee_pair_pick_request;
-    // 循环移动路径拾取请求：1=请求进入战场连续拾取，0=无
+    // 循环移动路径点拾取请求：0=无，1..6=要新增/重设的路径点索引+1。
+    // 与循环近战一致：每次只进战场点 1 格，返回后覆盖/追加对应槽。
     int              move_path_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
@@ -542,6 +543,7 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
     ctrl->melee_pair_pick_request = 0;
+    ctrl->move_path_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -677,25 +679,18 @@ static void CellControl_FormatPosition(char* buf, int bufsize, int hex)
     _snprintf(buf, bufsize, "%c%02d", 'A' + row, col);
 }
 
-// 格式化移动路径点列表为 "A01→B05→C09"；无点时返回 "(未设路径)"。
-static void CellControl_FormatWaypointList(char* buf, int bufsize,
-    const int16_t* wps, int count)
+// 格式化单个循环移动路径点（A01 样式）。
+static void CellControl_FormatWaypoint(char* buf, int bufsize,
+    const AutoTargetRule& target, int index)
 {
-    if (bufsize <= 0) return;
+    if (!buf || bufsize <= 0) return;
     buf[0] = 0;
-    if (count <= 0) {
-        strncpy(buf, "(未设路径)", bufsize - 1);
+    if (index < 0 || index >= target.moveWaypointCount || index >= 6) {
+        strncpy(buf, "+", bufsize - 1);
         buf[bufsize - 1] = 0;
         return;
     }
-    int off = 0;
-    for (int i = 0; i < count && off < bufsize - 1; ++i) {
-        char one[8] = {};
-        CellControl_FormatPosition(one, sizeof(one), wps[i]);
-        const char* sep = (i == 0) ? "" : "→";
-        off += _snprintf(buf + off, bufsize - off, "%s%s", sep, one);
-    }
-    buf[bufsize - 1] = 0;
+    CellControl_FormatPosition(buf, bufsize, target.moveWaypoints[index]);
 }
 
 static void CellControl_FormatMeleePair(char* buf, int bufsize,
@@ -887,27 +882,36 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     // 小列3 上行 = 选择器 / 近战攻击格；下行 = 阵营 / 固定说明。
     if (needs_target) {
         if (rule.action == AA_MOVE) {
-            // 循环移动：小列3上行=「编辑路径(n/6)」按钮；下行=路径文本。
-            char btn_buf[24] = {};
-            _snprintf(btn_buf, sizeof(btn_buf), "编辑路径 (%d/6)",
-                (int)rule.target.moveWaypointCount);
-            const bool picking = (ctrl->move_path_pick_request != 0);
-            CellControl_DrawButtonBg(scr, CC_COL3_X, CC_TOP_Y, CC_COL_W, CC_ROW_H,
-                picking, false);
-            CellControl_DrawText(scr, fntS, picking ? "正在选点…右键/再点结束" : btn_buf,
-                CC_COL3_X + 4, CC_TOP_Y, CC_COL_W - 8, CC_ROW_H,
-                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            // 循环移动：与循环近战同款 2×3 槽位，每槽一个路径点。
+            // 已有槽显示坐标（可点重设）；末尾「＋」追加；最多 6 点。
+            const int gap = 3;
+            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            const int count = rule.target.moveWaypointCount;
+            for (int index = 0; index < 6; ++index) {
+                const int row = index / 3;
+                const int col = index % 3;
+                const int x = CC_COL3_X + col * (slot_w + gap);
+                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                const bool existing = index < count;
+                const bool add_slot = index == count && count < 6;
+                if (!existing && !add_slot) continue;
 
-            // 路径文本：小列3下行（一行显示全部）
-            char wp_buf[64] = {};
-            CellControl_FormatWaypointList(wp_buf, sizeof(wp_buf),
-                rule.target.moveWaypoints, rule.target.moveWaypointCount);
-            Fill(scr, CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H, 48, 36, 20);
-            scr->DrawFrame(CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H,
-                (BYTE)120, (BYTE)96, (BYTE)48);
-            CellControl_DrawText(scr, fntS, wp_buf,
-                CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 8, CC_ROW_H,
-                (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
+                const bool requested = ctrl->move_path_pick_request == index + 1;
+                CellControl_DrawButtonBg(scr, x, y, slot_w, CC_ROW_H,
+                    requested, false);
+                if (add_slot) {
+                    CellControl_DrawPlusButton(scr,
+                        x + (slot_w - 16) / 2, y + (CC_ROW_H - 16) / 2,
+                        16, requested);
+                } else {
+                    char wp_buf[12] = {};
+                    CellControl_FormatWaypoint(wp_buf, sizeof(wp_buf),
+                        rule.target, index);
+                    CellControl_DrawText(scr, fntS, wp_buf,
+                        x + 2, y, slot_w - 4, CC_ROW_H,
+                        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+                }
+            }
         } else if (CellControl_ActionUsesTwoHex(rule.action)) {
             // 循环近战：两行各 3 个组合槽位。已有槽位显示“站立位→攻击位”，
             // 点击可覆盖重设；有效序列末尾显示「＋」用于追加，最多 6 组。
@@ -937,7 +941,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                         rule.target, index);
                     CellControl_DrawText(scr, fntS, pair_buf,
                         x + 2, y, slot_w - 4, CC_ROW_H,
-                        (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_CENTER);
+                        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
                 }
             }
         } else {
@@ -949,7 +953,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                 ctrl->selector_pressed, false);
             CellControl_DrawText(scr, fntS, sel_label,
                 CC_COL3_X + 4, CC_TOP_Y, CC_COL_W - 20, CC_ROW_H,
-                (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_LEFT);
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
             CellControl_DrawArrow(scr, CC_COL3_X + CC_COL_W - 14,
                 CC_TOP_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SELECTOR);
 
@@ -1375,8 +1379,12 @@ enum CellHitArea
     CELL_HIT_MELEE_PAIR_3,
     CELL_HIT_MELEE_PAIR_4,
     CELL_HIT_MELEE_PAIR_5,
-    CELL_HIT_MOVE_EDIT,    // 循环移动：编辑路径按钮
-    CELL_HIT_MOVE_CLEAR,   // 循环移动：路径文本（点击清空）
+    CELL_HIT_MOVE_WP_0,    // 循环移动路径点槽位 0..5（必须连续）
+    CELL_HIT_MOVE_WP_1,
+    CELL_HIT_MOVE_WP_2,
+    CELL_HIT_MOVE_WP_3,
+    CELL_HIT_MOVE_WP_4,
+    CELL_HIT_MOVE_WP_5,
     CELL_HIT_SPELL_CHK,    // 快捷施法复选框
     CELL_HIT_SPELL_SLOT,   // 魔法槽位下拉
 };
@@ -1415,11 +1423,23 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
 
     if (needs_target) {
         if (ctrl->data.rule.action == AA_MOVE) {
-            // 循环移动：编辑路径按钮（小列3上行），路径文本清空（小列3下行）
-            if (in_box(CC_COL3_X, CC_TOP_Y))
-                return CELL_HIT_MOVE_EDIT;
-            if (in_box(CC_COL3_X, CC_BOT_Y))
-                return CELL_HIT_MOVE_CLEAR;
+            // 循环移动：命中 2×3 路径点槽位；只暴露已有项和末尾追加项。
+            const int gap = 3;
+            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            for (int index = 0; index < 6; ++index) {
+                const int row = index / 3;
+                const int col = index % 3;
+                const int x = CC_COL3_X + col * (slot_w + gap);
+                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                if (local_x >= x && local_x < x + slot_w
+                    && local_y >= y && local_y < y + CC_ROW_H
+                    && (index < ctrl->data.rule.target.moveWaypointCount
+                        || (index == ctrl->data.rule.target.moveWaypointCount
+                            && index < 6)))
+                {
+                    return static_cast<CellHitArea>(CELL_HIT_MOVE_WP_0 + index);
+                }
+            }
         } else if (melee) {
             // 循环近战：命中 2×3 组合槽位；只暴露已有项和末尾追加项。
             const int gap = 3;
@@ -1580,18 +1600,11 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
-        if (hit == CELL_HIT_MOVE_EDIT) {
-            // 循环移动：请求进入战场选点模式（由 SettingsDlg 接线激活）。
+        if (hit >= CELL_HIT_MOVE_WP_0 && hit <= CELL_HIT_MOVE_WP_5) {
+            // 路径点设置：隐藏面板后进战场点 1 格；可覆盖已有或末尾追加。
             ctrl->expanded = CEX_NONE;
-            ctrl->move_path_pick_request = 1;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit == CELL_HIT_MOVE_CLEAR) {
-            // 点击路径文本：清空全部路径点，重来。
-            ctrl->expanded = CEX_NONE;
-            for (int k = 0; k < 6; ++k) ctrl->data.rule.target.moveWaypoints[k] = -1;
-            ctrl->data.rule.target.moveWaypointCount = 0;
+            ctrl->move_path_pick_request =
+                (hit - CELL_HIT_MOVE_WP_0) + 1; // 1..6
             ctrl->dirty = true;
             return true;
         }
