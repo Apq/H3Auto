@@ -287,8 +287,10 @@ static BattleInputBlocker s_input_blocker = {};
 static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
     // 战场拾取期间：屏障 item 会收到战场点击。此时不派发给战场（靠
-    // StopProcessing 吞掉，部队绝不行动），改为读战斗管理器每帧维护的
-    // mouseCoord（当前鼠标所在 hex），回填到规则。左键松开=确认，右键=取消。
+    // StopProcessing 吞掉，部队绝不行动）。hex 直接从消息中的游戏逻辑坐标
+    // 用 SquareAtCoordinates(0x464380) 转换，不依赖 mouseCoord 也不恢复 hover，
+    // 因此拾取期间游戏不会显示任何与待行动兵种相关的悬停高亮，只有我
+    // 们自己的蓝色格子标示。左键松开=确认，右键=取消。
     if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0)) {
         const int raw = static_cast<int>(msg.command);
         if (raw == static_cast<int>(eMsgCommand::RBUTTON_UP)
@@ -297,10 +299,12 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
         } else if (raw == static_cast<int>(eMsgCommand::LBUTTON_UP)
             || raw == static_cast<int>(eMsgCommand::LCLICK_OUTSIDE)) {
             int hex = -1;
-            if (H3CombatManager* mgr = GetCombatMgr()) {
+            H3CombatManager* mgr = GetCombatMgr();
+            if (mgr) {
+                const int sx = msg.position.x;
+                const int sy = msg.position.y;
                 __try {
-                    hex = *reinterpret_cast<INT32*>(
-                        reinterpret_cast<char*>(mgr) + 0x132D4); // mouseCoord
+                    hex = THISCALL_3(int, 0x464380, mgr, sx, sy);
                 } __except (EXCEPTION_EXECUTE_HANDLER) { hex = -1; }
             }
             DoPickCapture_(hex, false);
@@ -1285,8 +1289,7 @@ static void EndMovePathPick_()
     WriteLog("[Panel] 结束循环移动路径拾取 cell=%d", s_move_pick_cell);
     s_move_pick_cell = -1;
     s_panel_hidden_for_pick = false;
-    // 进入拾取时临时恢复了 hover，这里重新屏蔽。
-    BlockBattleHover_();
+    // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
 }
@@ -1302,8 +1305,7 @@ static void EndMeleePick_()
     s_melee_pick_attack_hex = -1;
     s_panel_hidden_for_pick = false;
     RefreshBattleAfterPick_();
-    // 进入拾取时临时恢复了 hover，这里重新屏蔽。
-    BlockBattleHover_();
+    // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
     WriteLog("[Panel] 结束循环近战拾取 cell=%d pair=%d", old_cell, old_pair);
@@ -1311,8 +1313,7 @@ static void EndMeleePick_()
 
 // 战场拾取坐标捕获：屏障已吞掉点击（不会触发部队行动），这里只把屏幕坐标
 // 转成 hex 回填。right_click=true 表示取消当前拾取。
-// 战场拾取回填：hex 为战斗管理器 mouseCoord（游戏每帧维护的鼠标所在格），
-// 由屏障处理器 BlockBattleItemMessage_ 在收到点击时直接读取并传入，无需坐标转换。
+// 战场拾取回填：hex 由屏障处理器从消息坐标通过 SquareAtCoordinates 转换后传入。
 // right_click=true 表示取消当前拾取。
 static void DoPickCapture_(int hex, bool right_click)
 {
@@ -2127,13 +2128,11 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         if (ctrl->move_path_pick_request != 0) {
                             if (ctrl->move_path_pick_request == 1) {
                                 // 开始拾取：只隐藏面板绘制（s_panel_hidden_for_pick），
-                                // 保持 suspended=false + 屏障/hover 与正常打开态一致，
+                                // 保持 suspended=false + 屏障与正常打开态一致，
                                 // 否则真实点击不会派发到屏障 item（只剩 cmd=0 空消息）。
+                                // hover 补丁保持不撤销，游戏不显示待行动兵种高亮。
                                 s_move_pick_cell = i;
                                 s_panel_hidden_for_pick = true;
-                                // 恢复战场 hover，让游戏每帧更新 mouseCoord
-                                // 并高亮跟随光标；否则读到的是屏蔽前的旧值。
-                                RestoreBattleHover_();
                                 HidePanelForPick_();
                                 WriteLog("[Panel] 进入循环移动路径拾取 cell=%d", i);
                             } else {
@@ -2150,9 +2149,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             s_melee_pick_phase = 1;
                             s_melee_pick_attack_hex = -1;
                             s_panel_hidden_for_pick = true;
-                            // 恢复战场 hover，让游戏每帧更新 mouseCoord
-                            // 并高亮跟随光标；否则读到的是屏蔽前的旧值。
-                            RestoreBattleHover_();
                             HidePanelForPick_();
                             WriteLog("[Panel] 进入循环近战拾取 cell=%d pair=%d",
                                 i, s_melee_pick_pair);
