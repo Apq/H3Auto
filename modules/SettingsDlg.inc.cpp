@@ -1324,12 +1324,11 @@ static void DrawMeleePickMarker_()
     H3CombatManager* mgr = GetCombatMgr();
     if (!mgr || !mgr->CCellShdPcx) return;
     __try {
-        // drawBuffer 使用相对战斗窗口的 square 坐标（原版 ShadeSquare 路径）。
-        if (mgr->drawBuffer)
-            mgr->ShadeSquare(s_melee_pick_stand_hex);
-
+        // 可见路径：画到 screenPcx16 + 后缓冲。
+        // 绝不能 ShadeSquare/写 drawBuffer——那会污染战场离屏缓冲，
+        // 结束拾取后的 Refresh 会把蓝标重新画出来。
+        // 只脏 screen 层；结束时完整 Refresh 从干净 drawBuffer 重建即可撤销。
         H3CombatSquare& sq = mgr->squares[s_melee_pick_stand_hex];
-        // square.left/top 是相对战斗窗口；screenPcx16 / DirectDraw 后缓冲要绝对坐标。
         int dlg_x = 0;
         int dlg_y = 0;
         if (mgr->dlg) {
@@ -1346,43 +1345,48 @@ static void DrawMeleePickMarker_()
         const int abs_x = dlg_x + static_cast<int>(sq.left);
         const int abs_y = dlg_y + static_cast<int>(sq.top);
 
-        // 离屏合成一份 45x52 标示，再写到绝对屏幕坐标。
         static H3LoadedPcx16* s_marker_tile = nullptr;
         if (!s_marker_tile)
             s_marker_tile = H3LoadedPcx16::Create(0x2D, 0x34);
-        if (s_marker_tile && s_marker_tile->buffer) {
-            const bool mode32 = H3BitMode::Get() == 4;
-            for (int y = 0; y < s_marker_tile->height; ++y) {
-                BYTE* row = s_marker_tile->buffer + y * s_marker_tile->scanlineSize;
-                if (mode32) {
-                    DWORD* px = reinterpret_cast<DWORD*>(row);
-                    for (int x = 0; x < s_marker_tile->width; ++x)
-                        px[x] = 0xFF00FFFFu;
-                } else {
-                    WORD* px = reinterpret_cast<WORD*>(row);
-                    for (int x = 0; x < s_marker_tile->width; ++x)
-                        px[x] = 0x7FDF;
-                }
+        if (!s_marker_tile || !s_marker_tile->buffer) return;
+
+        const bool mode32 = H3BitMode::Get() == 4;
+        for (int y = 0; y < s_marker_tile->height; ++y) {
+            BYTE* row = s_marker_tile->buffer + y * s_marker_tile->scanlineSize;
+            if (mode32) {
+                DWORD* px = reinterpret_cast<DWORD*>(row);
+                for (int x = 0; x < s_marker_tile->width; ++x)
+                    px[x] = 0xFF00FFFFu;
+            } else {
+                WORD* px = reinterpret_cast<WORD*>(row);
+                for (int x = 0; x < s_marker_tile->width; ++x)
+                    px[x] = 0x7FDF;
             }
+        }
+        mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
+            s_marker_tile, 0, 0, TRUE);
+
+        // BltComplete 钩在呈现前后缓冲；只写后缓冲会被下一帧战场重画盖掉。
+        // 同步写 screenPcx16 才能稳定可见。
+        bool screen_ok = false;
+        if (o_WndMgr && o_WndMgr->screenPcx16) {
             mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
-                s_marker_tile, 0, 0, TRUE);
-            const bool blitted = BlitPcx16ToBackBuffer_(s_marker_tile, abs_x, abs_y);
-            if (o_WndMgr && o_WndMgr->screenPcx16) {
-                mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
-                    o_WndMgr->screenPcx16, abs_x, abs_y, TRUE);
-                if (!s_panel_redraw_in_progress) {
-                    s_panel_redraw_in_progress = true;
-                    o_WndMgr->H3Redraw(abs_x, abs_y, 0x2D, 0x34);
-                    s_panel_redraw_in_progress = false;
-                }
+                o_WndMgr->screenPcx16, abs_x, abs_y, TRUE);
+            if (!s_panel_redraw_in_progress) {
+                s_panel_redraw_in_progress = true;
+                o_WndMgr->H3Redraw(abs_x, abs_y, 0x2D, 0x34);
+                s_panel_redraw_in_progress = false;
             }
-            static int s_marker_log_hex = -1;
-            if (s_marker_log_hex != s_melee_pick_stand_hex) {
-                s_marker_log_hex = s_melee_pick_stand_hex;
-                WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) blt=%d",
-                    s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
-                    abs_x, abs_y, dlg_x, dlg_y, blitted ? 1 : 0);
-            }
+            screen_ok = true;
+        }
+        const bool blitted = BlitPcx16ToBackBuffer_(s_marker_tile, abs_x, abs_y);
+
+        static int s_marker_log_hex = -1;
+        if (s_marker_log_hex != s_melee_pick_stand_hex) {
+            s_marker_log_hex = s_melee_pick_stand_hex;
+            WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
+                s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
+                abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         WriteLog("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
@@ -1393,7 +1397,10 @@ static void RefreshBattleAfterPick_()
 {
     if (H3CombatManager* mgr = GetCombatMgr()) {
         __try {
-            THISCALL_7(void, 0x493FC0, mgr, FALSE, TRUE, FALSE, 0, TRUE, FALSE);
+            // 完整重建战场：从干净 drawBuffer 重画到屏幕，清掉 screen 层临时蓝标。
+            // 注意：拾取期间不能 ShadeSquare，否则 drawBuffer 带脏像素，这里会重现蓝标。
+            THISCALL_7(void, 0x493FC0, mgr, TRUE, FALSE, FALSE, 0, TRUE, FALSE);
+            WriteLog("[Panel] 已请求战场完整重绘以撤销临时标示");
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 }
