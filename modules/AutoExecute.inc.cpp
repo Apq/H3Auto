@@ -380,12 +380,27 @@ static _BattleStack_* FindEnemyOccupyingHex_(_BattleMgr_* mgr, _BattleStack_* se
 // 提交：action=6, actionTarget=攻击格, actionParameter=站立格
 // （对应 FUN_00476500 case7 的 0x132d4/0x132d8）。
 // 同时写入 mouse_coord/attacker_coord，贴近玩家点击后的状态。
-static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
+static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, AutoStackRule& rule)
 {
     if (!mgr || !self) return false;
-    const int attack_hex = rule.target.meleeAttackHex;
-    if (attack_hex < 1 || attack_hex > 185) {
-        WriteLog("[Auto] melee missing attack hex slot=%d", self->army_slot_ix);
+    AutoTargetRule& target = rule.target;
+    int count = target.meleePairCount;
+    if (count < 0) count = 0;
+    if (count > MELEE_PAIR_CAPACITY) count = MELEE_PAIR_CAPACITY;
+
+    // 兼容旧版单组规则：序列为空时仍执行旧字段，但不虚构新记录。
+    const bool legacy = count == 0;
+    int cursor = legacy ? 0 : target.meleePairCursor;
+    if (!legacy && (cursor < 0 || cursor >= count)) cursor = 0;
+
+    const int attack_hex = legacy
+        ? target.meleeAttackHex : target.meleeAttackHexes[cursor];
+    const int stand_hex = legacy
+        ? target.meleeStandHex : target.meleeStandHexes[cursor];
+    if (attack_hex < 1 || attack_hex > 185
+        || stand_hex < 1 || stand_hex > 185) {
+        WriteLog("[Auto] melee pair invalid slot=%d cursor=%d/%d stand=%d attack=%d",
+            self->army_slot_ix, cursor, count, stand_hex, attack_hex);
         return false;
     }
 
@@ -396,10 +411,6 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackR
         return false;
     }
 
-    int stand_hex = rule.target.meleeStandHex;
-    if (stand_hex < 1 || stand_hex > 185)
-        stand_hex = self->hex_ix; // 未设站立格：原地攻击
-
     // 写悬停相关字段，模拟玩家点过该攻击格
     mgr->mouse_coord = attack_hex;
     mgr->attacker_coord = stand_hex;
@@ -407,8 +418,12 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackR
 
     if (!WriteAction_(mgr, self, BA_WALK_ATTACK, stand_hex, attack_hex))
         return false;
-    WriteLog("[Auto] submit MELEE stand=%d attack=%d enemy_slot=%d enemy_hex=%d",
-        stand_hex, attack_hex, enemy->army_slot_ix, enemy->hex_ix);
+    // 只在成功提交后推进；失败时保持当前组合不变。
+    if (!legacy && count > 0)
+        target.meleePairCursor = static_cast<int8_t>((cursor + 1) % count);
+    WriteLog("[Auto] submit MELEE(loop) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
+        cursor, count, stand_hex, attack_hex, enemy->army_slot_ix, enemy->hex_ix,
+        legacy ? 0 : (int)target.meleePairCursor);
     return true;
 }
 
@@ -488,7 +503,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr)
     case AA_MOVE:
         return fallback_or_fail(SubmitMove_(mgr, self, g_active_rules[idx]));
     case AA_MELEE_ATTACK:
-        return fallback_or_fail(SubmitMelee_(mgr, self, rule));
+        return fallback_or_fail(SubmitMelee_(mgr, self, g_active_rules[idx]));
     case AA_RANGED_ATTACK:
         return fallback_or_fail(SubmitRanged_(mgr, self, rule));
     case AA_FIRST_AID:

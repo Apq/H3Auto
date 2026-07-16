@@ -55,7 +55,7 @@ static const int GRID_FRAME_Y = 72;
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
-    "手动", "防御", "等待", "循环移动", "近战攻击", "远程攻击", "急救治疗", "投石车攻击",
+    "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗", "投石车攻击",
 };
 static const char* DEFAULT_SIDE_LABELS[ATS_COUNT] = {
     "自己", "敌方", "双方",
@@ -152,6 +152,8 @@ static bool s_panel_cancel_pressed_load_failed = false;
 static bool s_panel_button_frame_load_failed = false;
 static bool s_panel_redraw_in_progress = false;
 static bool s_panel_modal_suspended = false;
+// 战场拾取期间隐藏面板（不绘制），但保持 s_p.active，用于取坐标而不放行点击
+static bool s_panel_hidden_for_pick = false;
 static Patch* s_hover_patch_primary = nullptr;
 static Patch* s_hover_patch_secondary = nullptr;
 
@@ -184,17 +186,23 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 static HHOOK s_mouse_hook = nullptr;
 static bool UpdateDropdownHover_(int px, int py);  // 前向声明（钩子先用到）
 
-// 近战选格：1=站立格，2=攻击格；pick_cell 为格子控件索引
-static int s_melee_pick_mode = 0;
+// 循环近战连续拾取：phase=1 选攻击目标格，phase=2 选相邻站立格。
 static int s_melee_pick_cell = -1;
+static int s_melee_pick_pair = -1;
+static int s_melee_pick_phase = 0;
+static int s_melee_pick_attack_hex = -1;
 
 // 循环移动路径拾取：选点期间面板挂起，每次点战场空格追加一个路径点。
 // s_move_pick_cell 为格子控件索引，-1=未激活。
 static int s_move_pick_cell = -1;
 static void EndMovePathPick_();
+static void DoPickCapture_(int hex, bool right_click);
 
 static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
+    // 战场拾取的点击捕获已移回 BattleUI 输入屏障处理器
+    // BlockBattleItemMessage_（读战斗管理器 mouseCoord），此处只保留
+    // 下拉展开时的悬停高亮刷新。
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
         && wParam == WM_MOUSEMOVE)
     {
@@ -262,6 +270,9 @@ static bool PointInRect_(int x, int y, int left, int top, int width, int height)
 static bool IsGameWindowForeground_();
 static bool IsGameMouseInputActive_();
 static void CancelPanelTransientInput_();
+static void DoPickCapture_(int hex, bool right_click);
+static void HidePanelForPick_();
+static H3CombatManager* GetCombatMgr();
 
 struct BattleInputBlocker
 {
@@ -275,6 +286,28 @@ static BattleInputBlocker s_input_blocker = {};
 
 static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
+    // 战场拾取期间：屏障 item 会收到战场点击。此时不派发给战场（靠
+    // StopProcessing 吞掉，部队绝不行动），改为读战斗管理器每帧维护的
+    // mouseCoord（当前鼠标所在 hex），回填到规则。左键松开=确认，右键=取消。
+    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0)) {
+        const int raw = static_cast<int>(msg.command);
+        if (raw == static_cast<int>(eMsgCommand::RBUTTON_UP)
+            || raw == static_cast<int>(eMsgCommand::RCLICK_OUTSIDE)) {
+            DoPickCapture_(-1, true);
+        } else if (raw == static_cast<int>(eMsgCommand::LBUTTON_UP)
+            || raw == static_cast<int>(eMsgCommand::LCLICK_OUTSIDE)) {
+            int hex = -1;
+            if (H3CombatManager* mgr = GetCombatMgr()) {
+                __try {
+                    hex = *reinterpret_cast<INT32*>(
+                        reinterpret_cast<char*>(mgr) + 0x132D4); // mouseCoord
+                } __except (EXCEPTION_EXECUTE_HANDLER) { hex = -1; }
+            }
+            DoPickCapture_(hex, false);
+        }
+        return msg.StopProcessing();
+    }
+
     const bool panel_was_active = s_p.active && !s_panel_modal_suspended;
     const int raw_command = static_cast<int>(msg.command);
     const bool mouse_command = raw_command == 4 || raw_command == 8
@@ -1125,6 +1158,43 @@ static void RestoreBattleHover_()
     WriteLog("[Panel] 战场悬停处理已恢复。");
 }
 
+// 第一格（攻击目标格）的临时标示。直接使用原版 CCellShd 蓝色格子资源，
+// 每帧画到战场 drawBuffer；不修改 square/部队/行动状态，退出拾取后只需
+// 请求一次原版战场重绘即可彻底撤销。
+static void DrawMeleePickMarker_()
+{
+    if (!s_panel_hidden_for_pick || s_melee_pick_phase != 2
+        || !CellControl_HexValid(s_melee_pick_attack_hex))
+        return;
+
+    H3CombatManager* mgr = GetCombatMgr();
+    if (!mgr || !mgr->drawBuffer || !mgr->CCellShdPcx) return;
+    __try {
+        mgr->ShadeSquare(s_melee_pick_attack_hex);
+        H3CombatSquare& sq = mgr->squares[s_melee_pick_attack_hex];
+        // Hook_BltComplete 位于最终 blit 前：同步写 drawBuffer 和可见屏幕缓冲，
+        // 既能随重绘保持，也不会依赖真实 hover/敌人是否存在。
+        if (o_WndMgr && o_WndMgr->screenPcx16) {
+            mgr->CCellShdPcx->DrawToPcx16(0, 0, 0x2D, 0x34,
+                o_WndMgr->screenPcx16, sq.left, sq.top, TRUE);
+            if (!s_panel_redraw_in_progress) {
+                s_panel_redraw_in_progress = true;
+                o_WndMgr->H3Redraw(sq.left, sq.top, 0x2D, 0x34);
+                s_panel_redraw_in_progress = false;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void RefreshBattleAfterPick_()
+{
+    if (H3CombatManager* mgr = GetCombatMgr()) {
+        __try {
+            THISCALL_7(void, 0x493FC0, mgr, FALSE, TRUE, FALSE, 0, TRUE, FALSE);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
 static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
 {
     if (!o_WndMgr) return nullptr;
@@ -1214,16 +1284,121 @@ static void EndMovePathPick_()
     if (s_move_pick_cell < 0) return;
     WriteLog("[Panel] 结束循环移动路径拾取 cell=%d", s_move_pick_cell);
     s_move_pick_cell = -1;
-    s_panel_modal_suspended = false;
+    s_panel_hidden_for_pick = false;
+    // 进入拾取时临时恢复了 hover，这里重新屏蔽。
     BlockBattleHover_();
-    InstallBattleInputBlocker_();
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
+}
+
+// 结束近战选格：恢复面板输入/绘制（屏障始终保留，无需重装）。
+static void EndMeleePick_()
+{
+    const int old_cell = s_melee_pick_cell;
+    const int old_pair = s_melee_pick_pair;
+    s_melee_pick_phase = 0;
+    s_melee_pick_cell = -1;
+    s_melee_pick_pair = -1;
+    s_melee_pick_attack_hex = -1;
+    s_panel_hidden_for_pick = false;
+    RefreshBattleAfterPick_();
+    // 进入拾取时临时恢复了 hover，这里重新屏蔽。
+    BlockBattleHover_();
+    ForcePanelModalDepth_(true);
+    DrawPanelToBuffer_();
+    WriteLog("[Panel] 结束循环近战拾取 cell=%d pair=%d", old_cell, old_pair);
+}
+
+// 战场拾取坐标捕获：屏障已吞掉点击（不会触发部队行动），这里只把屏幕坐标
+// 转成 hex 回填。right_click=true 表示取消当前拾取。
+// 战场拾取回填：hex 为战斗管理器 mouseCoord（游戏每帧维护的鼠标所在格），
+// 由屏障处理器 BlockBattleItemMessage_ 在收到点击时直接读取并传入，无需坐标转换。
+// right_click=true 表示取消当前拾取。
+static void DoPickCapture_(int hex, bool right_click)
+{
+    // 循环移动路径拾取
+    if (s_move_pick_cell >= 0 && s_move_pick_cell < CELL_COUNT) {
+        if (right_click) {
+            EndMovePathPick_();
+            return;
+        }
+        CellControl* ctrl = &s_p.cells[s_move_pick_cell];
+        if (ctrl->has_data) {
+            AutoTargetRule& t = ctrl->data.rule.target;
+            if (hex >= 1 && hex <= 185) {
+                if (t.moveWaypointCount < 6) {
+                    t.moveWaypoints[t.moveWaypointCount] = (int16_t)hex;
+                    t.moveWaypointCount++;
+                    ctrl->dirty = true;
+                    WriteLog("[Panel] move waypoint #%d hex=%d cell=%d",
+                        (int)t.moveWaypointCount, hex, s_move_pick_cell);
+                }
+                if (t.moveWaypointCount >= 6)
+                    EndMovePathPick_();
+            }
+        }
+        return;
+    }
+
+    // 循环近战连续拾取：第一击保存攻击目标并保持面板隐藏；第二击必须相邻，
+    // 成功后一次性覆盖/追加组合并恢复面板。右键任一阶段均取消且不改原记录。
+    if (s_melee_pick_phase != 0 && s_melee_pick_cell >= 0
+        && s_melee_pick_cell < CELL_COUNT) {
+        if (right_click) {
+            EndMeleePick_();
+            return;
+        }
+        CellControl* ctrl = &s_p.cells[s_melee_pick_cell];
+        if (ctrl->has_data && CellControl_HexValid(hex)
+            && s_melee_pick_pair >= 0
+            && s_melee_pick_pair < MELEE_PAIR_CAPACITY) {
+            AutoTargetRule& target = ctrl->data.rule.target;
+            if (s_melee_pick_phase == 1) {
+                s_melee_pick_attack_hex = hex;
+                s_melee_pick_phase = 2;
+                WriteLog("[Panel] melee pair target hex=%d cell=%d pair=%d; wait stand",
+                    hex, s_melee_pick_cell, s_melee_pick_pair);
+                // 下一帧 DrawMeleePickMarker_ 会显示蓝色临时标示，面板保持隐藏。
+            } else if (s_melee_pick_phase == 2) {
+                if (!CellControl_HexAdjacent(s_melee_pick_attack_hex, hex)) {
+                    WriteLog("[Panel] melee pair stand 非相邻 hex=%d target=%d 忽略",
+                        hex, s_melee_pick_attack_hex);
+                    return;
+                }
+
+                const int pair = s_melee_pick_pair;
+                const bool append = pair == target.meleePairCount;
+                if (pair < target.meleePairCount || append) {
+                    target.meleeAttackHexes[pair] =
+                        static_cast<int16_t>(s_melee_pick_attack_hex);
+                    target.meleeStandHexes[pair] = static_cast<int16_t>(hex);
+                    if (append && target.meleePairCount < MELEE_PAIR_CAPACITY)
+                        ++target.meleePairCount;
+                    // 同步旧版单组兼容镜像。
+                    if (target.meleePairCount > 0) {
+                        target.meleeStandHex = target.meleeStandHexes[0];
+                        target.meleeAttackHex = target.meleeAttackHexes[0];
+                    }
+                    ctrl->dirty = true;
+                    WriteLog("[Panel] melee pair saved cell=%d pair=%d stand=%d attack=%d count=%d",
+                        s_melee_pick_cell, pair, hex, s_melee_pick_attack_hex,
+                        (int)target.meleePairCount);
+                    EndMeleePick_();
+                }
+            }
+        }
+        return;
+    }
 }
 
 static void UpdatePanelModalSuspension_()
 {
     if (!s_p.active) return;
+    // 战场拾取模式（循环移动路径 / 近战选格）激活期间，面板由拾取逻辑
+    // 手动挂起（s_panel_modal_suspended=true）以让出战场点击。此时不能让
+    // 本函数按“无系统模态”把挂起状态重置回 false，否则会立刻重装输入拦截、
+    // 吃掉战场点击，导致拾取永远收不到坐标、反复重进选格模式。
+    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0) return;
     const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
     // The same counter also rises while the game is inactive. Only an in-game
     // modal dialog should hide the panel; clicking outside must leave it intact.
@@ -1384,11 +1559,15 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     if (s_p.active) {
         ForcePanelModalDepth_(true);
         UpdatePanelModalSuspension_();
-        if (s_p.active && !s_panel_modal_suspended) {
+        // 拾取期间（s_panel_hidden_for_pick）面板隐藏：跳过重绘与常规输入，
+        // 点击交给屏障 item 处理。但 suspended 保持 false，否则输入不派发。
+        if (s_p.active && !s_panel_modal_suspended && !s_panel_hidden_for_pick) {
             HandlePanelInput_();
             DrawPanelToBuffer_();
             ForcePanelDefaultCursor_();
         }
+        if (s_p.active && s_panel_hidden_for_pick)
+            DrawMeleePickMarker_();
     }
     return EXEC_DEFAULT;
 }
@@ -1403,98 +1582,11 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
     (void)h;
 
-    // 循环移动路径拾取：连续追加模式。左键点战场空格追加路径点（最多6个，
-    // 满6自动结束）；右键结束拾取。面板 modal-suspended 期间仍接收战场点击。
-    if (s_p.active && s_move_pick_cell >= 0 && s_move_pick_cell < CELL_COUNT) {
-        __try {
-            int* msg = *reinterpret_cast<int**>(c->esp + 4);
-            // msg[0]: 16=左键松开，32=右键松开（原版消息码）
-            if (msg && (msg[0] == 16 || msg[0] == 32)) {
-                const bool right_click = (msg[0] == 32);
-                if (right_click) {
-                    EndMovePathPick_();
-                    DrawPanelToBuffer_();
-                } else {
-                    H3CombatManager* mgr = GetCombatMgr();
-                    CellControl* ctrl = &s_p.cells[s_move_pick_cell];
-                    const int sx = msg[4];
-                    const int sy = msg[5];
-                    const int px = sx - s_p.x;
-                    const int py = sy - s_p.y;
-                    const bool in_panel = (px >= 0 && py >= 0 && px < PANEL_W && py < PANEL_H);
-                    if (!in_panel && mgr && ctrl->has_data) {
-                        int hex = -1;
-                        __try {
-                            hex = THISCALL_3(int, 0x464380, mgr, sx, sy);
-                        } __except (EXCEPTION_EXECUTE_HANDLER) {
-                            hex = -1;
-                        }
-                        AutoTargetRule& t = ctrl->data.rule.target;
-                        if (hex >= 1 && hex <= 185) {
-                            if (t.moveWaypointCount < 6) {
-                                t.moveWaypoints[t.moveWaypointCount] = (int16_t)hex;
-                                t.moveWaypointCount++;
-                                ctrl->dirty = true;
-                                WriteLog("[Panel] move waypoint #%d hex=%d cell=%d",
-                                    (int)t.moveWaypointCount, hex, s_move_pick_cell);
-                                DrawPanelToBuffer_();
-                            }
-                            if (t.moveWaypointCount >= 6) {
-                                EndMovePathPick_();
-                                DrawPanelToBuffer_();
-                            }
-                        }
-                    }
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        return EXEC_DEFAULT; // 拾取期间不屏蔽 hover，也不自动执行
-    }
+    // 战场拾取（近战选格 / 循环移动路径）的点击捕获已移到透明 item 屏障
+    // BlockBattleItemMessage_ 里处理（靠 StopProcessing 吞点击，绝不触发
+    // 部队行动）。此处不再处理拾取，避免与屏障逻辑冲突、空转。
 
-    // 近战选格模式优先：面板可能已 modal-suspended，但仍需接收战场点击。
-    if (s_p.active && s_melee_pick_mode != 0) {
-        __try {
-            int* msg = *reinterpret_cast<int**>(c->esp + 4);
-            if (msg && msg[0] == 16 /* LBUTTONUP */) {
-                H3CombatManager* mgr = GetCombatMgr();
-                if (mgr && s_melee_pick_cell >= 0 && s_melee_pick_cell < CELL_COUNT) {
-                    const int sx = msg[4];
-                    const int sy = msg[5];
-                    const int px = sx - s_p.x;
-                    const int py = sy - s_p.y;
-                    const bool in_panel = (px >= 0 && py >= 0 && px < PANEL_W && py < PANEL_H);
-                    if (!in_panel) {
-                        int hex = -1;
-                        __try {
-                            hex = THISCALL_3(int, 0x464380, mgr, sx, sy);
-                        } __except (EXCEPTION_EXECUTE_HANDLER) {
-                            hex = -1;
-                        }
-                        CellControl* ctrl = &s_p.cells[s_melee_pick_cell];
-                        if (hex >= 1 && hex <= 185 && ctrl->has_data) {
-                            if (s_melee_pick_mode == 1)
-                                ctrl->data.rule.target.meleeStandHex = (int16_t)hex;
-                            else if (s_melee_pick_mode == 2)
-                                ctrl->data.rule.target.meleeAttackHex = (int16_t)hex;
-                            ctrl->dirty = true;
-                            WriteLog("[Panel] melee pick mode=%d hex=%d cell=%d",
-                                s_melee_pick_mode, hex, s_melee_pick_cell);
-                        } else {
-                            WriteLog("[Panel] melee pick invalid hex=%d", hex);
-                        }
-                        s_melee_pick_mode = 0;
-                        s_melee_pick_cell = -1;
-                        s_panel_modal_suspended = false;
-                        ForcePanelModalDepth_(true);
-                        DrawPanelToBuffer_();
-                    }
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        return EXEC_DEFAULT; // 选格期间不屏蔽 hover，也不自动执行
-    }
-
-    if (s_p.active && !s_panel_modal_suspended) {
+    if (s_p.active && !s_panel_modal_suspended && !s_panel_hidden_for_pick) {
         __try {
             int* msg = *reinterpret_cast<int**>(c->esp + 4);
             if (msg && msg[0] == 4) {   // 鼠标移动
@@ -1600,6 +1692,21 @@ static void DrawPanelToBuffer_()
     }
 }
 
+// 拾取模式：隐藏面板，让战场重绘覆盖面板区域（只隐藏，不关闭）。
+// 拾取期间 s_panel_modal_suspended=true，Hook_BltComplete 不再重绘面板，
+// 因此这次战场重绘后面板保持隐藏，直到拾取结束再 DrawPanelToBuffer_ 恢复。
+static void HidePanelForPick_()
+{
+    if (!o_WndMgr) return;
+    __try {
+        s_panel_redraw_in_progress = true;
+        o_WndMgr->H3Redraw(s_p.x, s_p.y, PANEL_W, PANEL_H);
+        s_panel_redraw_in_progress = false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s_panel_redraw_in_progress = false;
+    }
+}
+
 // ========================================================================
 // 第七部分：面板控制
 // ========================================================================
@@ -1688,6 +1795,12 @@ void OpenSettingsPanel_()
     s_p.saved_cursor_type = mouse ? mouse->GetType() : 0;
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
     s_panel_modal_suspended = false;
+    s_panel_hidden_for_pick = false;
+    s_melee_pick_cell = -1;
+    s_melee_pick_pair = -1;
+    s_melee_pick_phase = 0;
+    s_melee_pick_attack_hex = -1;
+    s_move_pick_cell = -1;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -1778,8 +1891,11 @@ void CloseSettingsPanel()
     if (!s_p.active) return;
     s_p.active = false;
     s_panel_modal_suspended = false;
-    s_melee_pick_mode = 0;
+    s_melee_pick_phase = 0;
     s_melee_pick_cell = -1;
+    s_melee_pick_pair = -1;
+    s_melee_pick_attack_hex = -1;
+    s_panel_hidden_for_pick = false;
     s_move_pick_cell = -1;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
@@ -2010,11 +2126,15 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         // 循环移动：格子请求进入/退出战场路径拾取模式
                         if (ctrl->move_path_pick_request != 0) {
                             if (ctrl->move_path_pick_request == 1) {
-                                // 开始拾取：挂起面板输入，等战场点击追加路径点
+                                // 开始拾取：只隐藏面板绘制（s_panel_hidden_for_pick），
+                                // 保持 suspended=false + 屏障/hover 与正常打开态一致，
+                                // 否则真实点击不会派发到屏障 item（只剩 cmd=0 空消息）。
                                 s_move_pick_cell = i;
-                                s_panel_modal_suspended = true;
-                                RemoveBattleInputBlocker_();
+                                s_panel_hidden_for_pick = true;
+                                // 恢复战场 hover，让游戏每帧更新 mouseCoord
+                                // 并高亮跟随光标；否则读到的是屏蔽前的旧值。
                                 RestoreBattleHover_();
+                                HidePanelForPick_();
                                 WriteLog("[Panel] 进入循环移动路径拾取 cell=%d", i);
                             } else {
                                 // 结束拾取
@@ -2022,7 +2142,25 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             }
                             ctrl->move_path_pick_request = 0;
                         }
-                        DrawPanelToBuffer_();
+                        // 循环近战：已有组合可覆盖重设，末尾「＋」追加。
+                        // 单次隐藏面板后连续选攻击目标格、相邻站立格。
+                        if (ctrl->melee_pair_pick_request != 0) {
+                            s_melee_pick_pair = ctrl->melee_pair_pick_request - 1;
+                            s_melee_pick_cell = i;
+                            s_melee_pick_phase = 1;
+                            s_melee_pick_attack_hex = -1;
+                            s_panel_hidden_for_pick = true;
+                            // 恢复战场 hover，让游戏每帧更新 mouseCoord
+                            // 并高亮跟随光标；否则读到的是屏蔽前的旧值。
+                            RestoreBattleHover_();
+                            HidePanelForPick_();
+                            WriteLog("[Panel] 进入循环近战拾取 cell=%d pair=%d",
+                                i, s_melee_pick_pair);
+                            ctrl->melee_pair_pick_request = 0;
+                        }
+                        // 进入拾取后必须保持面板隐藏；只在普通卡片操作时重画。
+                        if (!s_panel_hidden_for_pick)
+                            DrawPanelToBuffer_();
                         return;
                     }
                 }

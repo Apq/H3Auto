@@ -6,7 +6,7 @@ enum AutoActionKind : uint8_t {
     AA_DEFEND,            // 防御
     AA_WAIT,              // 等待
     AA_MOVE,              // 移动
-    AA_MELEE_ATTACK,      // 近战攻击
+    AA_MELEE_ATTACK,      // 循环近战（枚举值固定为 4）
     AA_RANGED_ATTACK,     // 远程攻击
     AA_FIRST_AID,         // 急救帐篷疗伤
     AA_CATAPULT,          // 投石车攻击城墙
@@ -41,6 +41,8 @@ enum AutoTargetSelector : uint8_t {
     SEL_COUNT
 };
 
+static const int MELEE_PAIR_CAPACITY = 6;
+
 struct AutoTargetRule {
     AutoTargetKind kind;
     AutoTargetSide side;
@@ -60,6 +62,14 @@ struct AutoTargetRule {
     int16_t moveWaypoints[6];  // 路径点，原版 hex 1..185，-1=空
     int8_t  moveWaypointCount; // 有效点数 0..6
     int8_t  moveWaypointCursor;// 运行时游标：下一个要走向的点索引
+
+    // 循环近战专用：最多 6 组“站立位 + 攻击位”。
+    // 保留上面的 meleeStandHex/meleeAttackHex 作为旧规则兼容镜像；
+    // 新 UI 和执行端均以本序列为准。
+    int16_t meleeStandHexes[MELEE_PAIR_CAPACITY];
+    int16_t meleeAttackHexes[MELEE_PAIR_CAPACITY];
+    int8_t  meleePairCount;    // 有效组合数 0..6
+    int8_t  meleePairCursor;   // 运行时游标：下一组组合索引
 };
 
 struct AutoStackRule {
@@ -86,6 +96,12 @@ static AutoStackRule MakeDefaultRule_()
     for (int i = 0; i < 6; ++i) r.target.moveWaypoints[i] = -1;
     r.target.moveWaypointCount = 0;
     r.target.moveWaypointCursor = 0;
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
+        r.target.meleeStandHexes[i] = -1;
+        r.target.meleeAttackHexes[i] = -1;
+    }
+    r.target.meleePairCount = 0;
+    r.target.meleePairCursor = 0;
     r.allowDefendFallback = false;
     r.quickCastFirst = false;
     r.spellSlot = 1;

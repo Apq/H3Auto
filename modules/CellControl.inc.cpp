@@ -107,8 +107,8 @@ struct CellControl
     bool             has_data;
     H3LoadedDef*     def_cache;
 
-    // 近战选格请求：1=选站立格，2=选攻击格，0=无（旧机制，保留兼容）
-    int              melee_pick_request;
+    // 循环近战组合拾取请求：0=无，1..6=要新增/重设的组合索引+1。
+    int              melee_pair_pick_request;
     // 循环移动路径拾取请求：1=请求进入战场连续拾取，0=无
     int              move_path_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
@@ -180,6 +180,63 @@ static int CellControl_HexNeighbors(int hex, int out[6])
             out[n++] = cand[i];
     }
     return n;
+}
+
+static bool CellControl_HexAdjacent(int a, int b)
+{
+    if (!CellControl_HexValid(a) || !CellControl_HexValid(b)) return false;
+    int neighbors[6];
+    const int n = CellControl_HexNeighbors(a, neighbors);
+    for (int i = 0; i < n; ++i)
+        if (neighbors[i] == b) return true;
+    return false;
+}
+
+// 规范化循环近战序列：压紧有效组合、迁移旧的单组字段、同步兼容镜像。
+static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
+{
+    if (!target) return;
+
+    int requested = target->meleePairCount;
+    if (requested < 0) requested = 0;
+    if (requested > MELEE_PAIR_CAPACITY) requested = MELEE_PAIR_CAPACITY;
+
+    int16_t stands[MELEE_PAIR_CAPACITY];
+    int16_t attacks[MELEE_PAIR_CAPACITY];
+    int count = 0;
+    for (int i = 0; i < requested; ++i) {
+        const int stand_hex = target->meleeStandHexes[i];
+        const int attack_hex = target->meleeAttackHexes[i];
+        if (!CellControl_HexAdjacent(attack_hex, stand_hex)) continue;
+        stands[count] = static_cast<int16_t>(stand_hex);
+        attacks[count] = static_cast<int16_t>(attack_hex);
+        ++count;
+    }
+
+    // 旧版只保存一组 meleeStandHex/meleeAttackHex；首次加载时迁移为序列第 1 组。
+    if (count == 0
+        && CellControl_HexAdjacent(target->meleeAttackHex, target->meleeStandHex)) {
+        stands[0] = target->meleeStandHex;
+        attacks[0] = target->meleeAttackHex;
+        count = 1;
+    }
+
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
+        target->meleeStandHexes[i] = (i < count) ? stands[i] : -1;
+        target->meleeAttackHexes[i] = (i < count) ? attacks[i] : -1;
+    }
+    target->meleePairCount = static_cast<int8_t>(count);
+    if (count == 0) {
+        target->meleePairCursor = 0;
+        target->meleeStandHex = -1;
+        target->meleeAttackHex = -1;
+    } else {
+        int cursor = target->meleePairCursor;
+        if (cursor < 0 || cursor >= count) cursor = 0;
+        target->meleePairCursor = static_cast<int8_t>(cursor);
+        target->meleeStandHex = target->meleeStandHexes[0];
+        target->meleeAttackHex = target->meleeAttackHexes[0];
+    }
 }
 
 // 全战场有效坐标枚举（行优先，A01..K15），返回数量（<=165）。
@@ -270,6 +327,13 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
     t.fixedSlot = -1;
     t.fixedCreatureId = -1;
     t.fixedHex = -1;
+    t.meleeStandHex = -1;
+    t.meleeAttackHex = -1;
+    for (int i = 0; i < 6; ++i) t.moveWaypoints[i] = -1;
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
+        t.meleeStandHexes[i] = -1;
+        t.meleeAttackHexes[i] = -1;
+    }
 
     switch (action) {
     case AA_MOVE:
@@ -281,7 +345,7 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
         t.meleeAttackHex = -1;
         break;
     case AA_MELEE_ATTACK:
-        // 近战：站立格 + 攻击格（模拟点击）
+        // 循环近战：最多 6 组站立格 + 攻击格（模拟点击）
         t.kind = AT_POSITION;
         t.side = ATS_ENEMY;
         t.selector = SEL_FIXED;
@@ -346,10 +410,7 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bo
         rule->target.kind = AT_POSITION;
         rule->target.side = ATS_ENEMY;
         rule->target.selector = SEL_FIXED;
-        if (rule->target.meleeStandHex < 1 || rule->target.meleeStandHex > 185)
-            rule->target.meleeStandHex = -1;
-        if (rule->target.meleeAttackHex < 1 || rule->target.meleeAttackHex > 185)
-            rule->target.meleeAttackHex = -1;
+        CellControl_NormalizeMeleePairs(&rule->target);
         break;
     case AA_RANGED_ATTACK:
         rule->target.kind = AT_STACK;
@@ -432,7 +493,7 @@ static const char* CellControl_FixedSideHint(AutoActionKind action)
 {
     switch (action) {
     case AA_MELEE_ATTACK:
-        return "站立格+攻击格";
+        return "循环站立位+攻击位";
     case AA_RANGED_ATTACK:
         return nullptr; // 远程攻击不显示固定说明
     case AA_FIRST_AID:
@@ -461,7 +522,7 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->data.army_slot_ix = -1;
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
-    ctrl->melee_pick_request = 0;
+    ctrl->melee_pair_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -477,22 +538,7 @@ static void CellControl_EnsureMeleeDefaults(CellControl* ctrl)
 {
     if (!ctrl || !ctrl->has_data) return;
     if (!CellControl_ActionUsesTwoHex(ctrl->data.rule.action)) return;
-    // 第一点默认取当前位置；第二点保持未选（--）直到用户选择。
-    if (!CellControl_HexValid(ctrl->data.rule.target.meleeStandHex)
-        && CellControl_HexValid(ctrl->data.position))
-        ctrl->data.rule.target.meleeStandHex = (int16_t)ctrl->data.position;
-    // 仅近战：第二点（攻击格）必须与第一点（站立格）相邻，否则清空。
-    // 循环移动：两点独立，无相邻约束。
-    if (ctrl->data.rule.action == AA_MELEE_ATTACK
-        && CellControl_HexValid(ctrl->data.rule.target.meleeAttackHex)
-        && CellControl_HexValid(ctrl->data.rule.target.meleeStandHex)) {
-        int nb[6];
-        const int m = CellControl_HexNeighbors(ctrl->data.rule.target.meleeStandHex, nb);
-        bool still = false;
-        for (int k = 0; k < m; ++k)
-            if (nb[k] == ctrl->data.rule.target.meleeAttackHex) { still = true; break; }
-        if (!still) ctrl->data.rule.target.meleeAttackHex = -1;
-    }
+    CellControl_NormalizeMeleePairs(&ctrl->data.rule.target);
 }
 
 static void CellControl_SetData(CellControl* ctrl, const CellData* data)
@@ -633,6 +679,27 @@ static void CellControl_FormatWaypointList(char* buf, int bufsize,
     buf[bufsize - 1] = 0;
 }
 
+static void CellControl_FormatMeleePair(char* buf, int bufsize,
+    const AutoTargetRule& target, int index)
+{
+    if (!buf || bufsize <= 0) return;
+    buf[0] = 0;
+    if (index < 0 || index >= target.meleePairCount
+        || index >= MELEE_PAIR_CAPACITY) {
+        strncpy(buf, "+", bufsize - 1);
+        buf[bufsize - 1] = 0;
+        return;
+    }
+    char stand_pos[8] = {};
+    char attack_pos[8] = {};
+    CellControl_FormatPosition(stand_pos, sizeof(stand_pos),
+        target.meleeStandHexes[index]);
+    CellControl_FormatPosition(attack_pos, sizeof(attack_pos),
+        target.meleeAttackHexes[index]);
+    _snprintf(buf, bufsize, "%s→%s", stand_pos, attack_pos);
+    buf[bufsize - 1] = 0;
+}
+
 static void CellControl_DrawText(H3LoadedPcx16* scr, H3Font* fnt,
     const char* text, int x, int y, int w, int h, INT32 color,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
@@ -689,6 +756,24 @@ static void CellControl_DrawArrow(H3LoadedPcx16* scr, int x, int y, bool down)
         Fill(scr, x + 2, y + 1, 3, 1, 235, 205, 116);
         Fill(scr, x + 1, y + 2, 5, 1, 235, 205, 116);
         Fill(scr, x,     y + 3, 7, 1, 235, 205, 116);
+    }
+}
+
+// 方块「＋」拾取按钮：金框凹槽 + 居中加号。active=拾取进行中（高亮）。
+static void CellControl_DrawPlusButton(H3LoadedPcx16* scr, int x, int y, int size,
+    bool active)
+{
+    if (size <= 0) return;
+    BYTE bg_r = active ? 210 : 74, bg_g = active ? 170 : 52, bg_b = active ? 72 : 24;
+    Fill(scr, x, y, size, size, bg_r, bg_g, bg_b);
+    scr->DrawFrame(x, y, size, size, (BYTE)210, (BYTE)170, (BYTE)72);
+    // 加号：横竖各一条，居中
+    const int cx = x + size / 2;
+    const int cy = y + size / 2;
+    const int arm = size / 2 - 3;
+    if (arm > 0) {
+        Fill(scr, cx - arm, cy, arm * 2 + 1, 2, 235, 205, 116); // 横
+        Fill(scr, cx, cy - arm, 2, arm * 2 + 1, 235, 205, 116); // 竖
     }
 }
 
@@ -805,36 +890,37 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                 CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 8, CC_ROW_H,
                 (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
         } else if (CellControl_ActionUsesTwoHex(rule.action)) {
-            // 两格 UI：近战=站立格+攻击格。小列3上下行。
-            const bool is_move = false;
-            char stand_buf[24] = {};
-            char atk_buf[24] = {};
-            char pos1[8] = {}, pos2[8] = {};
-            int stand_show = rule.target.meleeStandHex;
-            if (!CellControl_HexValid(stand_show))
-                stand_show = ctrl->data.position; // 默认当前位置
-            CellControl_FormatPosition(pos1, sizeof(pos1), stand_show);
-            CellControl_FormatPosition(pos2, sizeof(pos2), rule.target.meleeAttackHex);
-            _snprintf(stand_buf, sizeof(stand_buf), is_move ? "位置1: %s" : "站立: %s", pos1);
-            _snprintf(atk_buf, sizeof(atk_buf), is_move ? "位置2: %s" : "攻击: %s", pos2);
+            // 循环近战：两行各 3 个组合槽位。已有槽位显示“站立位→攻击位”，
+            // 点击可覆盖重设；有效序列末尾显示「＋」用于追加，最多 6 组。
+            const int gap = 3;
+            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            const int count = rule.target.meleePairCount;
+            for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
+                const int row = index / 3;
+                const int col = index % 3;
+                const int x = CC_COL3_X + col * (slot_w + gap);
+                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                const bool existing = index < count;
+                const bool add_slot = index == count && count < MELEE_PAIR_CAPACITY;
+                const bool visible = existing || add_slot;
+                if (!visible) continue;
 
-            // 站立格：小列3上行
-            CellControl_DrawButtonBg(scr, CC_COL3_X, CC_TOP_Y, CC_COL_W, CC_ROW_H,
-                ctrl->side_pressed, false);
-            CellControl_DrawText(scr, fntS, stand_buf,
-                CC_COL3_X + 4, CC_TOP_Y, CC_COL_W - 20, CC_ROW_H,
-                (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
-            CellControl_DrawArrow(scr, CC_COL3_X + CC_COL_W - 14,
-                CC_TOP_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_STAND);
-
-            // 攻击格：小列3下行
-            CellControl_DrawButtonBg(scr, CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H,
-                ctrl->selector_pressed, false);
-            CellControl_DrawText(scr, fntS, atk_buf,
-                CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 20, CC_ROW_H,
-                (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_LEFT);
-            CellControl_DrawArrow(scr, CC_COL3_X + CC_COL_W - 14,
-                CC_BOT_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_ATTACK);
+                const bool requested = ctrl->melee_pair_pick_request == index + 1;
+                CellControl_DrawButtonBg(scr, x, y, slot_w, CC_ROW_H,
+                    requested, false);
+                if (add_slot) {
+                    CellControl_DrawPlusButton(scr,
+                        x + (slot_w - 16) / 2, y + (CC_ROW_H - 16) / 2,
+                        16, requested);
+                } else {
+                    char pair_buf[24] = {};
+                    CellControl_FormatMeleePair(pair_buf, sizeof(pair_buf),
+                        rule.target, index);
+                    CellControl_DrawText(scr, fntS, pair_buf,
+                        x + 2, y, slot_w - 4, CC_ROW_H,
+                        (INT32)eTextColor::CYAN, eTextAlignment::MIDDLE_CENTER);
+                }
+            }
         } else {
             // 选择器：小列3上行
             const char* sel_label =
@@ -1264,8 +1350,12 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
-    CELL_HIT_MELEE_STAND,  // 近战站立格
-    CELL_HIT_MELEE_ATTACK, // 近战攻击格
+    CELL_HIT_MELEE_PAIR_0, // 循环近战组合槽位 0..5（必须连续）
+    CELL_HIT_MELEE_PAIR_1,
+    CELL_HIT_MELEE_PAIR_2,
+    CELL_HIT_MELEE_PAIR_3,
+    CELL_HIT_MELEE_PAIR_4,
+    CELL_HIT_MELEE_PAIR_5,
     CELL_HIT_MOVE_EDIT,    // 循环移动：编辑路径按钮
     CELL_HIT_MOVE_CLEAR,   // 循环移动：路径文本（点击清空）
     CELL_HIT_SPELL_CHK,    // 快捷施法复选框
@@ -1312,11 +1402,23 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
             if (in_box(CC_COL3_X, CC_BOT_Y))
                 return CELL_HIT_MOVE_CLEAR;
         } else if (melee) {
-            // 站立格：小列3上行；攻击格：小列3下行
-            if (ctrl->expanded != CEX_STAND && in_box(CC_COL3_X, CC_TOP_Y))
-                return CELL_HIT_MELEE_STAND;
-            if (ctrl->expanded != CEX_ATTACK && in_box(CC_COL3_X, CC_BOT_Y))
-                return CELL_HIT_MELEE_ATTACK;
+            // 循环近战：命中 2×3 组合槽位；只暴露已有项和末尾追加项。
+            const int gap = 3;
+            const int slot_w = (CC_COL_W - gap * 2) / 3;
+            for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
+                const int row = index / 3;
+                const int col = index % 3;
+                const int x = CC_COL3_X + col * (slot_w + gap);
+                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                if (local_x >= x && local_x < x + slot_w
+                    && local_y >= y && local_y < y + CC_ROW_H
+                    && (index < ctrl->data.rule.target.meleePairCount
+                        || (index == ctrl->data.rule.target.meleePairCount
+                            && index < MELEE_PAIR_CAPACITY)))
+                {
+                    return static_cast<CellHitArea>(CELL_HIT_MELEE_PAIR_0 + index);
+                }
+            }
         } else {
             // 选择器：小列3上行
             if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y))
@@ -1439,19 +1541,11 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
-        if (hit == CELL_HIT_MELEE_STAND) {
-            ctrl->expanded = (ctrl->expanded == CEX_STAND) ? CEX_NONE : CEX_STAND;
-            ctrl->dd_scroll = 0;
-            ctrl->side_pressed = true;
-            ctrl->hover_item = -1;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit == CELL_HIT_MELEE_ATTACK) {
-            ctrl->expanded = (ctrl->expanded == CEX_ATTACK) ? CEX_NONE : CEX_ATTACK;
-            ctrl->dd_scroll = 0;
-            ctrl->selector_pressed = true;
-            ctrl->hover_item = -1;
+        if (hit >= CELL_HIT_MELEE_PAIR_0 && hit <= CELL_HIT_MELEE_PAIR_5) {
+            // 组合设置始终连续拾取：先攻击目标格，再相邻站立格。
+            ctrl->expanded = CEX_NONE;
+            ctrl->melee_pair_pick_request =
+                static_cast<int>(hit - CELL_HIT_MELEE_PAIR_0) + 1;
             ctrl->dirty = true;
             return true;
         }
