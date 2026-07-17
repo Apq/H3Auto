@@ -792,7 +792,6 @@ enum BattleActionCode {
     BA_WALK_ATTACK = 6,
     BA_SHOOT       = 7,
     BA_WAIT        = 8,
-    BA_CATAPULT    = 9,
     BA_FIRST_AID   = 11,
 };
 
@@ -803,32 +802,38 @@ static bool IsWarMachineCid_(int cid)
         || cid == WM_ARROW_TOWER;
 }
 
+// 失血数值 = 阵亡单位满血 + 当前顶层单位已损 HP。
+static int WoundValueOf_(_BattleStack_* t)
+{
+    if (!t) return 0;
+    const int hp = (t->creature.hit_points > 0) ? t->creature.hit_points : 1;
+    int dead = t->count_at_start - t->count_current;
+    if (dead < 0) dead = 0;
+    int lost = t->lost_hp;
+    if (lost < 0) lost = 0;
+    return dead * hp + lost;
+}
+
+// 失血比例比较键：wound * 10000 / total_max_hp，便于整数比较。
+static int WoundRatioKey_(_BattleStack_* t)
+{
+    if (!t) return 0;
+    const int hp = (t->creature.hit_points > 0) ? t->creature.hit_points : 1;
+    int start = t->count_at_start;
+    if (start <= 0) start = t->count_current;
+    if (start <= 0) return 0;
+    const int total = start * hp;
+    if (total <= 0) return 0;
+    return (int)(((__int64)WoundValueOf_(t) * 10000) / total);
+}
+
 // 通用部队选择：side_filter = 0己方 / 1敌方 / 2双方；require_wounded 用于急救。
+// 远程：随机 / 远程高速优先 / 数量最多；急救：随机 / 失血比例 / 失血数值。
 static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule, int side_filter, bool require_wounded,
     bool require_can_shoot)
 {
     if (!mgr || !self) return nullptr;
-
-    // 固定部队优先
-    if (rule.target.selector == SEL_FIXED
-        && rule.target.fixedSide >= 0 && rule.target.fixedSlot >= 0
-        && rule.target.fixedSide <= 1 && rule.target.fixedSlot < 21)
-    {
-        _BattleStack_* t = &mgr->stack[rule.target.fixedSide][rule.target.fixedSlot];
-        if (t->count_current > 0
-            && (rule.target.fixedCreatureId < 0
-                || t->creature_id == rule.target.fixedCreatureId)
-            && (!require_can_shoot || self->CanShoot(t))
-            && (!require_wounded || t->lost_hp > 0 || t->count_current < t->count_at_start))
-        {
-            if (side_filter == 2
-                || (side_filter == 0 && t->def_group_ix == self->def_group_ix)
-                || (side_filter == 1 && t->def_group_ix != self->def_group_ix))
-                return t;
-        }
-        return nullptr;
-    }
 
     _BattleStack_* candidates[42] = {};
     int count = 0;
@@ -850,56 +855,11 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     if (count <= 0) return nullptr;
 
     switch (rule.target.selector) {
-    case SEL_SEQUENTIAL: {
-        _BattleStack_* best = candidates[0];
-        for (int i = 1; i < count; ++i)
-            if (candidates[i]->army_slot_ix < best->army_slot_ix)
-                best = candidates[i];
-        return best;
-    }
     case SEL_COUNT_HIGH: {
         _BattleStack_* best = candidates[0];
         for (int i = 1; i < count; ++i)
             if (candidates[i]->count_current > best->count_current)
                 best = candidates[i];
-        return best;
-    }
-    case SEL_COUNT_LOW: {
-        _BattleStack_* best = candidates[0];
-        for (int i = 1; i < count; ++i)
-            if (candidates[i]->count_current < best->count_current)
-                best = candidates[i];
-        return best;
-    }
-    case SEL_MOST_WOUNDED: {
-        _BattleStack_* best = candidates[0];
-        int best_loss = best->count_at_start - best->count_current;
-        if (best_loss < 0) best_loss = 0;
-        best_loss = best_loss * 1000 + best->lost_hp;
-        for (int i = 1; i < count; ++i) {
-            int loss = candidates[i]->count_at_start - candidates[i]->count_current;
-            if (loss < 0) loss = 0;
-            loss = loss * 1000 + candidates[i]->lost_hp;
-            if (loss > best_loss) {
-                best = candidates[i];
-                best_loss = loss;
-            }
-        }
-        return best;
-    }
-    case SEL_NEAREST:
-    case SEL_FARTHEST: {
-        _BattleStack_* best = candidates[0];
-        int best_d = abs(best->hex_ix - self->hex_ix);
-        for (int i = 1; i < count; ++i) {
-            int d = abs(candidates[i]->hex_ix - self->hex_ix);
-            if ((rule.target.selector == SEL_NEAREST && d < best_d)
-                || (rule.target.selector == SEL_FARTHEST && d > best_d))
-            {
-                best = candidates[i];
-                best_d = d;
-            }
-        }
         return best;
     }
     case SEL_RANGED_SPEED: {
@@ -918,22 +878,41 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         }
         return best;
     }
+    case SEL_WOUND_VALUE: {
+        _BattleStack_* best = candidates[0];
+        int best_v = WoundValueOf_(best);
+        for (int i = 1; i < count; ++i) {
+            const int v = WoundValueOf_(candidates[i]);
+            if (v > best_v) {
+                best = candidates[i];
+                best_v = v;
+            }
+        }
+        return best;
+    }
+    case SEL_WOUND_RATIO: {
+        _BattleStack_* best = candidates[0];
+        int best_r = WoundRatioKey_(best);
+        for (int i = 1; i < count; ++i) {
+            const int r = WoundRatioKey_(candidates[i]);
+            if (r > best_r) {
+                best = candidates[i];
+                best_r = r;
+            }
+        }
+        return best;
+    }
     case SEL_RANDOM:
     default:
         return candidates[rand() % count];
     }
 }
 
-// 解析位置目标：固定 hex 优先，否则用部队目标的位置，或随机合法邻格占位。
+// 解析位置目标：用部队目标的位置作锚点（循环移动旧单目标兜底）。
 static int ResolvePositionTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule)
 {
     if (!mgr || !self) return -1;
-    if (rule.target.kind == AT_POSITION
-        && rule.target.fixedHex >= 1 && rule.target.fixedHex <= 185)
-        return rule.target.fixedHex;
-
-    // 部队作为靠近锚点：返回该部队 hex
     int side_filter = 2;
     if (rule.target.side == ATS_OWN) side_filter = 0;
     else if (rule.target.side == ATS_ENEMY) side_filter = 1;
@@ -1131,23 +1110,6 @@ static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoSta
     return true;
 }
 
-// 提交投石：action=9, actionTarget=城墙/位置 hex。
-// 城墙合法性未完整复用 FUN_00473530；先按位置目标提交。
-static bool SubmitCatapult_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
-{
-    int hex = ResolvePositionTarget_(mgr, self, rule);
-    if (hex < 1 || hex > 185) {
-        // 无配置位置时给一个常见城墙 hex 占位（后续替换为原版城墙枚举）
-        hex = rule.target.fixedHex;
-        if (hex < 1 || hex > 185) return false;
-    }
-    if (!WriteAction_(mgr, self, BA_CATAPULT, -1, hex))
-        return false;
-    WriteLog("[Auto] submit CATAPULT slot=%d -> hex=%d",
-        self->army_slot_ix, hex);
-    return true;
-}
-
 // 提交部队主动作（不含循环施法阶段）。
 static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule, StackTrackEntry& runtime)
@@ -1181,9 +1143,6 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     case AA_FIRST_AID:
         if (cid != WM_FIRST_AID) return false;
         return SubmitFirstAid_(mgr, self, rule); // 帐篷不降级
-    case AA_CATAPULT:
-        if (cid != WM_CATAPULT) return false;
-        return SubmitCatapult_(mgr, self, rule); // 投石不降级
     default:
         return false;
     }
@@ -1377,25 +1336,27 @@ int DecideTakeover(_BattleMgr_* mgr)
         return CD_KEEP_ORIGINAL;
 
     case WM_FIRST_AID:
-        // 配置了急救→主动执行；否则保持原版。
+        // 对齐弩车：有急救术可选手动（原版）；配置急救→插件执行；
+        // 无急救术 UI 仅急救，残留手动→交 AI。
         if (rule.action == AA_FIRST_AID)
             return CD_EXECUTE_H3AUTO;
-        return CD_KEEP_ORIGINAL;
-
-    case WM_CATAPULT:
-        if (rule.action == AA_CATAPULT)
-            return CD_EXECUTE_H3AUTO;
-        // 无弹道术时原版很笨：未配置则交回 AI；有弹道术则保持原版。
-        if (HeroHasSkill(mgr, SK_BALLISTICS))
+        if (rule.action == AA_MANUAL && HeroHasSkill(mgr, SK_FIRST_AID))
             return CD_KEEP_ORIGINAL;
         return CD_HAND_TO_AI;
 
+    case WM_CATAPULT:
+        // 仅手动 / 防御：防御由普通主动作路径提交；手动交回原版。
+        if (rule.action == AA_DEFEND)
+            return CD_EXECUTE_H3AUTO;
+        return CD_KEEP_ORIGINAL;
+
     case WM_BALLISTA:
     case WM_ARROW_TOWER:
+        // 有炮术：可选手动（交回原版）或远程攻击（插件执行）。
+        // 无炮术：UI 只给远程攻击，这里也只执行远程；其余交 AI。
         if (rule.action == AA_RANGED_ATTACK)
             return CD_EXECUTE_H3AUTO;
-        // 无炮术时原版很笨：未配置则交回 AI；有炮术则保持原版。
-        if (HeroHasSkill(mgr, SK_ARTILLERY))
+        if (rule.action == AA_MANUAL && HeroHasSkill(mgr, SK_ARTILLERY))
             return CD_KEEP_ORIGINAL;
         return CD_HAND_TO_AI;
 

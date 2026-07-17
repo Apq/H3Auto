@@ -29,6 +29,8 @@ struct CellData
     H3LoadedDef* creature_def;
     INT     army_slot_ix;
     bool    is_ranged;   // 由面板打开时按 stack.info.shooter 精确判定并保存
+    bool    has_artillery; // 英雄有炮术（弩车/箭塔：可选手动）
+    bool    has_first_aid; // 英雄有急救术（帐篷：可选手动）
     AutoStackRule rule;
 };
 
@@ -360,8 +362,9 @@ static int CellControl_AllHexes(int out[165])
 }
 
 // 根据单位类型填充可选行动列表，返回数量。
+// has_artillery：炮术（弩车/箭塔）；has_first_aid：急救术（帐篷）。
 static int CellControl_GetAllowedActions(int creature_type, bool is_ranged,
-    AutoActionKind out_actions[AA_COUNT])
+    bool has_artillery, bool has_first_aid, AutoActionKind out_actions[AA_COUNT])
 {
     int n = 0;
     auto push = [&](AutoActionKind a) {
@@ -370,16 +373,21 @@ static int CellControl_GetAllowedActions(int creature_type, bool is_ranged,
 
     switch (creature_type) {
     case eCreature::FIRST_AID_TENT:
-        push(AA_MANUAL);
+        // 对齐弩车：有急救术 → 手动（默认）+ 急救；无 → 仅急救治疗。
+        if (has_first_aid)
+            push(AA_MANUAL);
         push(AA_FIRST_AID);
         break;
     case eCreature::CATAPULT:
+        // 投石车不做攻城目标自动化：仅手动 / 防御。
         push(AA_MANUAL);
-        push(AA_CATAPULT);
+        push(AA_DEFEND);
         break;
     case eCreature::BALLISTA:
     case eCreature::ARROW_TOWER:
-        push(AA_MANUAL);
+        // 有炮术：可选手动（默认）+ 远程攻击；无炮术：仅远程攻击。
+        if (has_artillery)
+            push(AA_MANUAL);
         push(AA_RANGED_ATTACK);
         break;
     case eCreature::AMMO_CART:
@@ -406,7 +414,6 @@ static bool CellControl_ActionNeedsTarget(AutoActionKind action)
     case AA_MELEE_ATTACK:
     case AA_RANGED_ATTACK:
     case AA_FIRST_AID:
-    case AA_CATAPULT:
         return true;
     default:
         return false;
@@ -433,10 +440,6 @@ static bool CellControl_ActionShowsFallback(int creature_type, AutoActionKind ac
 static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
 {
     AutoTargetRule t = {};
-    t.fixedSide = -1;
-    t.fixedSlot = -1;
-    t.fixedCreatureId = -1;
-    t.fixedHex = -1;
     t.meleeStandHex = -1;
     t.meleeAttackHex = -1;
     for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) t.moveWaypoints[i] = -1;
@@ -447,18 +450,18 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
 
     switch (action) {
     case AA_MOVE:
-        // 循环移动：两个全战场路径点（复用 meleeStandHex/meleeAttackHex）
+        // 循环移动：路径点列表；不走选择器菜单。
         t.kind = AT_POSITION;
         t.side = ATS_ENEMY;
-        t.selector = SEL_FIXED;
+        t.selector = SEL_RANDOM;
         t.meleeStandHex = -1;
         t.meleeAttackHex = -1;
         break;
     case AA_MELEE_ATTACK:
-        // 循环近战：最多 MELEE_PAIR_CAPACITY 组站立格 + 攻击格（模拟点击）
+        // 循环近战：站立格 + 攻击格；不走选择器菜单。
         t.kind = AT_POSITION;
         t.side = ATS_ENEMY;
-        t.selector = SEL_FIXED;
+        t.selector = SEL_RANDOM;
         t.meleeStandHex = -1;
         t.meleeAttackHex = -1;
         break;
@@ -470,12 +473,7 @@ static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
     case AA_FIRST_AID:
         t.kind = AT_STACK;
         t.side = ATS_OWN;
-        t.selector = SEL_MOST_WOUNDED;
-        break;
-    case AA_CATAPULT:
-        t.kind = AT_POSITION;
-        t.side = ATS_ENEMY;
-        t.selector = SEL_SEQUENTIAL;
+        t.selector = SEL_WOUND_VALUE; // 急救默认失血数值最大
         break;
     default:
         t.kind = AT_NONE;
@@ -491,16 +489,20 @@ static int CellControl_GetAllowedSelectors(AutoActionKind action, AutoTargetKind
     AutoTargetSelector out_sels[SEL_COUNT]);
 
 // 行动改变时规范化规则
-static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged)
+static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type,
+    bool is_ranged, bool has_artillery, bool has_first_aid)
 {
     if (!rule) return;
 
     AutoActionKind allowed[AA_COUNT] = {};
-    const int n = CellControl_GetAllowedActions(creature_type, is_ranged, allowed);
+    const int n = CellControl_GetAllowedActions(creature_type, is_ranged,
+        has_artillery, has_first_aid, allowed);
     bool ok = false;
     for (int i = 0; i < n; ++i) {
         if (allowed[i] == rule->action) { ok = true; break; }
     }
+    // 非法行动吸附到允许集首项：
+    // 弩车/箭塔：有炮术首项=手动，无=远程；帐篷：有急救术首项=手动，无=急救。
     if (!ok)
         rule->action = (n > 0) ? allowed[0] : AA_MANUAL;
 
@@ -522,30 +524,21 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bo
     case AA_MELEE_ATTACK:
         rule->target.kind = AT_POSITION;
         rule->target.side = ATS_ENEMY;
-        rule->target.selector = SEL_FIXED;
+        rule->target.selector = SEL_RANDOM;
         CellControl_NormalizeMeleePairs(&rule->target);
         break;
     case AA_RANGED_ATTACK:
         rule->target.kind = AT_STACK;
         rule->target.side = ATS_ENEMY;
-        if (rule->target.selector == SEL_MOST_WOUNDED)
-            rule->target.selector = SEL_RANDOM;
         break;
     case AA_FIRST_AID:
         rule->target.kind = AT_STACK;
         rule->target.side = ATS_OWN;
         break;
-    case AA_CATAPULT:
-        rule->target.kind = AT_POSITION;
-        if (rule->target.selector != SEL_FIXED
-            && rule->target.selector != SEL_SEQUENTIAL
-            && rule->target.selector != SEL_RANDOM)
-            rule->target.selector = SEL_SEQUENTIAL;
-        break;
     case AA_MOVE:
-        // 循环移动：两个全战场路径点（复用 meleeStandHex/meleeAttackHex）
+        // 循环移动：路径点列表，不走选择器菜单。
         rule->target.kind = AT_POSITION;
-        rule->target.selector = SEL_FIXED;
+        rule->target.selector = SEL_RANDOM;
         if (rule->target.meleeStandHex < 1 || rule->target.meleeStandHex > 185)
             rule->target.meleeStandHex = -1;
         if (rule->target.meleeAttackHex < 1 || rule->target.meleeAttackHex > 185)
@@ -555,7 +548,7 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type, bo
         break;
     }
 
-    // 收敛选择器到当前允许集合（近战/移动固定 SEL_FIXED 已在上面单独设定）。
+    // 收敛选择器到当前允许集合（近战/移动不显示选择器菜单）。
     if (!CellControl_ActionUsesTwoHex(rule->action)) {
         AutoTargetSelector sels[SEL_COUNT] = {};
         const int sn = CellControl_GetAllowedSelectors(rule->action,
@@ -581,16 +574,20 @@ static int CellControl_GetAllowedSelectors(AutoActionKind action, AutoTargetKind
     };
 
     if (CellControl_ActionUsesTwoHex(action)) {
-        // 近战（站立格+攻击格）、循环移动（两个路径点）：不用选择器菜单
-        push(SEL_FIXED);
+        // 近战 / 循环移动：不用选择器菜单
         return n;
     }
-    // 统一简化选择器：无 / 远程高速优先 / 数量最多 / 随机
-    // （目标是减少重复操作，不接管全部 AI 决策）
-    push(SEL_NONE);
+    if (action == AA_FIRST_AID) {
+        // 急救：失血数值 / 失血比例 / 随机（候选仅己方伤员）
+        push(SEL_WOUND_VALUE);
+        push(SEL_WOUND_RATIO);
+        push(SEL_RANDOM);
+        return n;
+    }
+    // 远程等：随机 / 远程高速优先 / 数量最多
+    push(SEL_RANDOM);
     push(SEL_RANGED_SPEED);
     push(SEL_COUNT_HIGH);
-    push(SEL_RANDOM);
     return n;
 }
 
@@ -604,8 +601,6 @@ static const char* CellControl_FixedSideHint(AutoActionKind action)
         return nullptr; // 远程攻击不显示固定说明
     case AA_FIRST_AID:
         return "己方伤员";
-    case AA_CATAPULT:
-        return "城墙位置";
     case AA_MOVE:
         return nullptr; // 用阵营下拉
     default:
@@ -660,7 +655,7 @@ static void CellControl_SetData(CellControl* ctrl, const CellData* data)
     if (!ctrl->data.is_ranged)
         ctrl->data.is_ranged = CellControl_IsRangedType(ctrl->data.creature_type);
     CellControl_NormalizeRule(&ctrl->data.rule, ctrl->data.creature_type,
-        ctrl->data.is_ranged);
+        ctrl->data.is_ranged, ctrl->data.has_artillery, ctrl->data.has_first_aid);
     CellControl_EnsureMeleeDefaults(ctrl);
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
@@ -1204,7 +1199,8 @@ static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
 
     AutoActionKind allowed[AA_COUNT] = {};
     const int n = CellControl_GetAllowedActions(ctrl->data.creature_type,
-        ctrl->data.is_ranged, allowed);
+        ctrl->data.is_ranged, ctrl->data.has_artillery, ctrl->data.has_first_aid,
+        allowed);
     for (int i = 0; i < n; ++i) {
         const AutoActionKind a = allowed[i];
         const char* label = (a < AA_COUNT && g_action_labels[a]) ? g_action_labels[a] : "---";
@@ -1405,7 +1401,8 @@ static int CellControl_GetExpandedItemCount(CellControl* ctrl)
     case CEX_ACTION: {
         AutoActionKind allowed[AA_COUNT] = {};
         return CellControl_GetAllowedActions(ctrl->data.creature_type,
-            ctrl->data.is_ranged, allowed);
+            ctrl->data.is_ranged, ctrl->data.has_artillery,
+            ctrl->data.has_first_aid, allowed);
     }
     case CEX_SELECTOR: {
         AutoTargetSelector allowed[SEL_COUNT] = {};
@@ -1721,13 +1718,15 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 if (ctrl->expanded == CEX_ACTION) {
                     AutoActionKind allowed[AA_COUNT] = {};
                     const int n = CellControl_GetAllowedActions(ctrl->data.creature_type,
-                        ctrl->data.is_ranged, allowed);
+                        ctrl->data.is_ranged, ctrl->data.has_artillery,
+                        ctrl->data.has_first_aid, allowed);
                     if (idx < n) {
                         ctrl->data.rule.action = allowed[idx];
                         ctrl->data.rule.target =
                             CellControl_DefaultTargetForAction(ctrl->data.rule.action);
                         CellControl_NormalizeRule(&ctrl->data.rule, ctrl->data.creature_type,
-                            ctrl->data.is_ranged);
+                            ctrl->data.is_ranged, ctrl->data.has_artillery,
+                            ctrl->data.has_first_aid);
                         CellControl_EnsureMeleeDefaults(ctrl);
                     }
                 } else if (ctrl->expanded == CEX_SELECTOR) {

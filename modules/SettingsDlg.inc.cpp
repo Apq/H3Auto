@@ -60,11 +60,10 @@ static const int GRID_FRAME_Y = 72;
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
-    "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗", "投石车攻击",
+    "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗",
 };
 static const char* DEFAULT_SELECTOR_LABELS[SEL_COUNT] = {
-    "指定目标", "随机", "顺序", "最近", "最远",
-    "远程高速优先", "数量最多", "数量最少", "伤最重", "无",
+    "随机", "远程高速优先", "数量最多", "失血比例", "失血数值",
 };
 
 // 运行时标签
@@ -2242,11 +2241,8 @@ static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Her
     case eCreature::CATAPULT:
         // 投石车仅在英雄掌握弹道术时显示。
         return hero && hero->secSkill[eSecondary::BALLISTICS] > 0;
-    case eCreature::FIRST_AID_TENT:
-        // 急救帐篷仅在英雄掌握急救术时显示。
-        return hero && hero->secSkill[eSecondary::FIRST_AID] > 0;
     default:
-        // 弩车、箭塔、普通部队全部保留。
+        // 急救帐篷对齐弩车：始终可进面板；弩车/箭塔/普通部队全部保留。
         return true;
     }
 }
@@ -2317,7 +2313,8 @@ static void LoadSelectedProfileIntoCells_()
         if (slot < 0 || slot >= MAX_STACKS) continue;
         s_p.items[i].rule = s_p.draft_rules[profile][slot];
         CellControl_NormalizeRule(&s_p.items[i].rule, s_p.items[i].creature_type,
-            s_p.items[i].is_ranged);
+            s_p.items[i].is_ranged, s_p.items[i].has_artillery,
+            s_p.items[i].has_first_aid);
     }
     RebindVisibleCells_();
 }
@@ -2401,7 +2398,13 @@ void OpenSettingsPanel_()
                 cd.rule = s_p.draft_rules[s_p.selected_profile][i];
                 const bool is_ranged = StackIsRanged_(stack);
                 cd.is_ranged = is_ranged;
-                CellControl_NormalizeRule(&cd.rule, cd.creature_type, is_ranged);
+                // 炮术/急救术：分别决定弩车·箭塔 / 帐篷是否可选手动。
+                cd.has_artillery = hero
+                    && hero->secSkill[eSecondary::ARTILLERY] > 0;
+                cd.has_first_aid = hero
+                    && hero->secSkill[eSecondary::FIRST_AID] > 0;
+                CellControl_NormalizeRule(&cd.rule, cd.creature_type, is_ranged,
+                    cd.has_artillery, cd.has_first_aid);
                 s_p.items[s_p.count] = cd;
                 ++s_p.count;
             }

@@ -9,7 +9,6 @@ enum AutoActionKind : uint8_t {
     AA_MELEE_ATTACK,      // 循环近战（枚举值固定为 4）
     AA_RANGED_ATTACK,     // 远程攻击
     AA_FIRST_AID,         // 急救帐篷疗伤
-    AA_CATAPULT,          // 投石车攻击城墙
     AA_COUNT
 };
 
@@ -27,17 +26,13 @@ enum AutoTargetSide : uint8_t {
     ATS_COUNT
 };
 
+// 选择器按行动分流；近战/移动不走选择器菜单。
 enum AutoTargetSelector : uint8_t {
-    SEL_FIXED = 0,        // 指定部队或指定位置
-    SEL_RANDOM,           // 随机
-    SEL_SEQUENTIAL,       // 顺序轮换
-    SEL_NEAREST,          // 最近
-    SEL_FARTHEST,         // 最远
-    SEL_RANGED_SPEED,     // 远程优先 + 高速
-    SEL_COUNT_HIGH,       // 数量最多
-    SEL_COUNT_LOW,        // 数量最少
-    SEL_MOST_WOUNDED,     // 损失生命最多（帐篷）
-    SEL_NONE,             // 无：不按选择器挑目标（不需要目标/不自动挑）
+    SEL_RANDOM = 0,       // 随机（远程/急救共用）
+    SEL_RANGED_SPEED,     // 远程：远程优先 + 高速
+    SEL_COUNT_HIGH,       // 远程：数量最多
+    SEL_WOUND_RATIO,      // 急救：失血比例最高
+    SEL_WOUND_VALUE,      // 急救：失血数值最大
     SEL_COUNT
 };
 
@@ -53,10 +48,6 @@ struct AutoTargetRule {
     AutoTargetKind kind;
     AutoTargetSide side;
     AutoTargetSelector selector;
-    int8_t  fixedSide;         // 固定部队：0/1，-1=未设
-    int8_t  fixedSlot;         // 固定部队：0..20，-1=未设
-    int16_t fixedCreatureId;   // 跨战斗指纹；-1=未设
-    int16_t fixedHex;          // 固定位置：原版 hex 0..186，-1=未设
 
     // 近战专用：模拟玩家“站到 standHex，再点 attackHex”。
     // attackHex 上有敌人（头格或双格尾格都算）时才提交近战。
@@ -94,10 +85,6 @@ static AutoStackRule MakeDefaultRule_()
     r.target.kind = AT_NONE;
     r.target.side = ATS_ENEMY;
     r.target.selector = SEL_RANDOM;
-    r.target.fixedSide = -1;
-    r.target.fixedSlot = -1;
-    r.target.fixedCreatureId = -1;
-    r.target.fixedHex = -1;
     r.target.meleeStandHex = -1;
     r.target.meleeAttackHex = -1;
     for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) r.target.moveWaypoints[i] = -1;
