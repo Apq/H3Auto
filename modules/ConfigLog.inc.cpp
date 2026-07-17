@@ -110,6 +110,20 @@ int g_active_profile = 0;
 // 当前生效方案（运行时视图）
 AutoStackRule g_active_rules[21] = {};
 
+// 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
+// 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
+void ClearConfirmedProfiles()
+{
+    const AutoStackRule def = MakeDefaultRule_();
+    for (int p = 0; p < 5; ++p) {
+        for (int s = 0; s < 21; ++s)
+            g_profiles[p][s] = def;
+    }
+    g_active_profile = 0;
+    for (int s = 0; s < 21; ++s)
+        g_active_rules[s] = def;
+}
+
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
     int  toggle_manual_vk;     // F11：本场自动/全手动切换

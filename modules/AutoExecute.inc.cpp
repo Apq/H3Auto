@@ -4,6 +4,7 @@
 static void WriteLog(const char* fmt, ...);
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21]);
+extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
@@ -527,6 +528,34 @@ void ResetAutoState()
     // 跟踪表是“当前战斗绑定”，进程重置时清空。
     ClearStackTracking_();
     WriteLog("Auto state reset; confirmed strategies preserved, tracking cleared.");
+}
+
+// 玩家点结果窗「确定/接受」：清空 5 套方案 + 运行时状态。
+// 「取消/重打」不得调用本函数。
+void OnBattleResultAccepted()
+{
+    ClearConfirmedProfiles();
+    ResetAutoState();
+    WriteLog("[Life] battle result accepted: profiles+runtime cleared");
+}
+
+// 取消重打后战场回来：若仍有生效规则则重新绑定跟踪表。
+void EnsureStackTrackingBound()
+{
+    if (g_track_active) {
+        UpdateStackTracking_();
+        return;
+    }
+    bool any = false;
+    for (int i = 0; i < 21; ++i) {
+        if (g_active_rules[i].action != AA_MANUAL
+            || g_active_rules[i].spellSlotCount > 0) {
+            any = true;
+            break;
+        }
+    }
+    if (any)
+        BindStackTrackingFromBattle_();
 }
 
 static void ClearSpellWait_()

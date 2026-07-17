@@ -6,6 +6,9 @@
 #define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
 #define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
 
+extern void OnBattleResultAccepted();
+extern void EnsureStackTrackingBound();
+
 // ========================================================================
 // 第一部分：数据声明
 // ========================================================================
@@ -287,8 +290,14 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
 // 真正的战斗窗口。0x0063A5E4 是战斗底下仍保留的冒险地图窗口。
 static const UINT s_combat_dialog_vtable = 0x0063D528;
+// 原版战斗结果窗 CPResult 虚表（FUN_0046fe20 构造）
+static const UINT s_cpresult_dialog_vtable = 0x0063D46C;
 // BattleUI 底栏 ICM004.def：点击分支切换 H3CombatManager::autoCombat。
 static const INT32 s_autofight_button_id = 0x7D4;
+// 结果窗「确定/接受」按钮 id（iOkay.def，FUN_0046fe20 / FUN_004716e0）
+static const INT32 s_cpresult_ok_id = 0x7802;
+// HD ReplayableQB 追加的「取消/重打」按钮 id（iCANCEL.def）
+static const INT32 s_cpresult_cancel_id = 0x1FB;
 // 战斗中弹出过设置面板
 static bool s_panel_popup_done = false;
 // 是否检测到 BattleUI 上层的自动战斗右键说明框
@@ -297,6 +306,10 @@ static bool s_saw_explanation_dlg_in_battle = false;
 static bool s_autofight_right_press_armed = false;
 // BattleUI 连续缺失帧数，避免对话框切换的瞬时空帧误判为战斗结束
 static int s_battle_ui_missing_frames = 0;
+// 结果窗生命周期：见过结果窗后，取消重打保留设置；接受才清除。
+static bool s_saw_cpresult = false;
+static bool s_result_accept_armed = false;
+static bool s_result_cancel_armed = false;
 
 // 前向声明
 static void OpenSettingsPanel_();
@@ -1793,14 +1806,130 @@ static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui)
 }
 
 // ========================================================================
-// 第四部分：检测"自动战斗"对话框关闭
+// 第四部分：检测"自动战斗"对话框关闭 + 结果窗生命周期
 // ========================================================================
 // 状态机：firstDlg 是底层战斗界面，lastDlg 才是当前最上层对话框。
 // 流程：BattleUI 存在 + lastDlg=自动战斗说明框 → lastDlg 回到 BattleUI → 弹窗。
 //
+// 设置生命周期：
+// - 看到 CPResult 结果窗 → 标记 s_saw_cpresult
+// - 结果窗上点「确定」(0x7802) 后结果窗消失 → 清除 5 套方案
+// - 结果窗上点「取消/重打」(0x1FB) 后 BattleUI 回来 → 保留方案并重绑跟踪
+// - 无取消按钮的纯原版结果窗：只能点确定，消失即接受
+//
+static H3BaseDlg* FindDialogByVtableDeep_(UINT vtable)
+{
+    H3BaseDlg* found = FindDialogByVtable_(vtable);
+    if (found) return found;
+    if (o_WndMgr && o_WndMgr->lastDlg && *(UINT*)o_WndMgr->lastDlg == vtable)
+        return o_WndMgr->lastDlg;
+    return nullptr;
+}
+
+static INT32 GetDlgItemUnderCursor_(H3BaseDlg* dlg)
+{
+    if (!dlg) return -1;
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+
+    // 先按绝对坐标扫 dlgItems（后命中覆盖前命中，近似取上层）。
+    __try {
+        // H3BaseDlg::dlgItems 在 +0x30（见 H3API H3BaseDlg）。
+        auto& items = *reinterpret_cast<H3Vector<H3DlgItem*>*>(
+            reinterpret_cast<BYTE*>(dlg) + 0x30);
+        INT32 hit = -1;
+        for (H3DlgItem** it = items.begin(); it != items.end(); ++it) {
+            H3DlgItem* item = *it;
+            if (!item || !item->IsVisible()) continue;
+            const INT32 x = item->GetAbsoluteX();
+            const INT32 y = item->GetAbsoluteY();
+            if (cursor.x >= x && cursor.x < x + item->GetWidth()
+                && cursor.y >= y && cursor.y < y + item->GetHeight())
+            {
+                hit = item->GetID();
+            }
+        }
+        if (hit != -1) return hit;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    H3Msg msg = {};
+    msg.position = cursor;
+    H3DlgItem* item = dlg->ItemAtPosition(msg);
+    return item ? item->GetID() : -1;
+}
+
+static void CheckBattleResultLifecycle_()
+{
+    if (!o_WndMgr) return;
+
+    H3BaseDlg* result_dlg = FindDialogByVtableDeep_(s_cpresult_dialog_vtable);
+    H3BaseDlg* combat_dlg = FindDialogByVtable_(s_combat_dialog_vtable);
+    const bool result_visible = result_dlg != nullptr;
+    const bool battle_ui_exists = combat_dlg != nullptr;
+
+    if (result_visible) {
+        if (!s_saw_cpresult) {
+            s_saw_cpresult = true;
+            s_result_accept_armed = false;
+            s_result_cancel_armed = false;
+            WriteLog("[Life] CPResult 结果窗出现，等待接受/取消重打。");
+        }
+
+        // 边沿：在结果窗上按下鼠标左键时记录命中按钮。
+        const bool ldown = IsGameMouseInputActive_()
+            && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        if (ldown) {
+            const INT32 id = GetDlgItemUnderCursor_(result_dlg);
+            if (id == s_cpresult_ok_id) {
+                if (!s_result_accept_armed)
+                    WriteLog("[Life] 结果窗命中确定/接受 id=0x%X。", id);
+                s_result_accept_armed = true;
+                s_result_cancel_armed = false;
+            } else if (id == s_cpresult_cancel_id) {
+                if (!s_result_cancel_armed)
+                    WriteLog("[Life] 结果窗命中取消/重打 id=0x%X。", id);
+                s_result_cancel_armed = true;
+                s_result_accept_armed = false;
+            }
+        }
+        return;
+    }
+
+    // 结果窗刚消失。
+    if (!s_saw_cpresult) return;
+
+    if (s_result_cancel_armed && battle_ui_exists) {
+        WriteLog("[Life] 取消/重打：保留 5 套方案并重绑跟踪。");
+        s_saw_cpresult = false;
+        s_result_accept_armed = false;
+        s_result_cancel_armed = false;
+        s_panel_popup_done = false;
+        EnsureStackTrackingBound();
+        return;
+    }
+
+    if (s_result_accept_armed || !s_result_cancel_armed) {
+        // 点了确定，或原版无取消按钮时默认视为接受。
+        WriteLog("[Life] 接受战斗结果：清除设置。 accept=%d cancel=%d battle_ui=%d",
+            s_result_accept_armed ? 1 : 0,
+            s_result_cancel_armed ? 1 : 0,
+            battle_ui_exists ? 1 : 0);
+        s_saw_cpresult = false;
+        s_result_accept_armed = false;
+        s_result_cancel_armed = false;
+        s_panel_popup_done = false;
+        OnBattleResultAccepted();
+        return;
+    }
+
+    // 取消已按但 BattleUI 尚未回来：等下一帧。
+}
+
 static void CheckAutoFightDialogClosed()
 {
     if (!o_WndMgr) return;
+
+    // 先处理结果窗生命周期（与自动战斗说明框互不依赖）。
+    CheckBattleResultLifecycle_();
 
     H3BaseDlg* first = o_WndMgr->firstDlg;
     H3BaseDlg* last = o_WndMgr->lastDlg;
@@ -1839,6 +1968,7 @@ static void CheckAutoFightDialogClosed()
     }
 
     if (battle_ui_exists) {
+        s_battle_ui_missing_frames = 0;
     } else if (++s_battle_ui_missing_frames >= 3) {
         s_saw_explanation_dlg_in_battle = false;
         s_autofight_right_press_armed = false;
