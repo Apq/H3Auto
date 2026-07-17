@@ -47,6 +47,11 @@ static const int PROFILE_BTNS_W = PROFILE_COUNT * PROFILE_BTN_W
     + (PROFILE_COUNT - 1) * PROFILE_BTN_GAP;
 static const int PROFILE_BTN_X = (PANEL_W - PROFILE_BTNS_W) / 2;
 
+// 右上角帮助按钮（点击弹使用说明模态框）
+static const int HELP_BTN_SIZE = 24;
+static const int HELP_BTN_X = PANEL_W - HELP_BTN_SIZE - 20; // 再左收 1px
+static const int HELP_BTN_Y = 20; // 再下收 2px
+
 // 网格金框恢复旧尺寸 624×342，框住 3 行卡片 + 右侧滚动条。
 static const int GRID_FRAME_W = 624;
 static const int GRID_FRAME_H = 342;
@@ -159,9 +164,11 @@ static Patch* s_hd_msgproc_patch = nullptr;
 static void CommitAndCloseSettingsPanel_();
 static void EndSpellPick_();
 static bool CommitSpellSlotPick_(int slot_value);
+static void DrawPanelToBuffer_();
 // 循环施法录入状态需在键盘钩子前声明。
 static int s_spell_pick_cell = -1;
 static int s_spell_pick_slot = -1;
+static bool s_help_modal_open = false;
 static HHOOK s_kb_hook = nullptr;
 
 // 设置面板存活期间（含隐藏拾取态）拦截 0-9/小键盘，避免原版快捷施法抢键。
@@ -185,14 +192,18 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
     if (code == HC_ACTION && s_p.active && !(lParam & 0x80000000)) // keydown only
     {
         if (wParam == VK_ESCAPE) {
-            if (s_spell_pick_cell >= 0)
+            if (s_help_modal_open) {
+                s_help_modal_open = false;
+                DrawPanelToBuffer_();
+            } else if (s_spell_pick_cell >= 0)
                 EndSpellPick_();
             else if (!s_panel_hidden_for_pick)
                 CloseSettingsPanel();
             return 1;  // swallow
         }
-        // 快捷键模态框打开时：Enter 不提交设置面板，仅吞掉。
-        if (wParam == VK_RETURN && !s_panel_hidden_for_pick && s_spell_pick_cell < 0) {
+        // 帮助/快捷键模态框打开时：Enter 不提交设置面板，仅吞掉。
+        if (wParam == VK_RETURN && !s_panel_hidden_for_pick
+            && s_spell_pick_cell < 0 && !s_help_modal_open) {
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
         }
@@ -1940,6 +1951,97 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 // 第六部分：绘制
 // ========================================================================
 
+static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    if (out_x) *out_x = HELP_BTN_X;
+    if (out_y) *out_y = HELP_BTN_Y;
+    if (out_w) *out_w = HELP_BTN_SIZE;
+    if (out_h) *out_h = HELP_BTN_SIZE;
+}
+
+static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    const int w = 480;
+    const int h = 280;
+    if (out_x) *out_x = (PANEL_W - w) / 2;
+    if (out_y) *out_y = (PANEL_H - h) / 2;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+}
+
+static void GetHelpModalCloseRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+    const int bw = 92;
+    const int bh = 26;
+    if (out_x) *out_x = x + (w - bw) / 2;
+    if (out_y) *out_y = y + h - bh - 14;
+    if (out_w) *out_w = bw;
+    if (out_h) *out_h = bh;
+}
+
+static void DrawHelpButton_(H3LoadedPcx16* destination)
+{
+    if (!destination) return;
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpButtonRect_(&x, &y, &w, &h);
+    const bool pressed = s_p.pressed_button == 3;
+    Fill(destination, x, y, w, h, pressed ? 90 : 62, pressed ? 58 : 40, pressed ? 28 : 18);
+    destination->DrawFrame(x, y, w, h, (BYTE)232, (BYTE)196, (BYTE)96);
+    destination->DrawFrame(x + 1, y + 1, w - 2, h - 2, (BYTE)112, (BYTE)82, (BYTE)36);
+    DrawTxt(destination, GetPanelFont(), "?",
+        x, y - 1, w, h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+}
+
+static void DrawHelpModal_(H3LoadedPcx16* scr)
+{
+    if (!scr || !s_help_modal_open) return;
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+
+    // 遮暗整张设置面板，形成明确模态层。
+    for (int yy = 0; yy < PANEL_H; yy += 2)
+        Fill(scr, 0, yy, PANEL_W, 1, 22, 18, 14);
+
+    Fill(scr, x, y, w, h, 48, 32, 18);
+    scr->DrawFrame(x, y, w, h, (BYTE)232, (BYTE)196, (BYTE)96);
+    scr->DrawFrame(x + 2, y + 2, w - 4, h - 4, (BYTE)112, (BYTE)82, (BYTE)36);
+
+    H3Font* title_font = GetPanelFont();
+    H3Font* small_font = GetSmallFont();
+    DrawTxt(scr, title_font, "使用说明",
+        x + 16, y + 12, w - 32, 26,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+
+    // 极简 6 条 + 大行距，避免密麻。
+    static const char* kHelpLines[] = {
+        "打开设置窗口：右键点击“自动战斗”",
+        "方案：5 套本场有效，确定才保存",
+        "施法/近战/移动：点 ＋ 后按提示设置",
+        "删除：槽位上右键",
+        "热键：F11 全手动 · 左Ctrl 单次接管",
+        "设置有效期：取消重打保留，接受结果清除",
+    };
+    const int line_h = 28;
+    int ty = y + 50;
+    for (int i = 0; i < (int)(sizeof(kHelpLines) / sizeof(kHelpLines[0])); ++i) {
+        DrawTxt(scr, small_font, kHelpLines[i],
+            x + 18, ty, w - 36, line_h,
+            (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        ty += line_h;
+    }
+
+    int bx = 0, by = 0, bw = 0, bh = 0;
+    GetHelpModalCloseRect_(&bx, &by, &bw, &bh);
+    Fill(scr, bx, by, bw, bh, 74, 50, 27);
+    scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
+    DrawTxt(scr, small_font, "关闭",
+        bx, by, bw, bh, (INT32)eTextColor::WHITE,
+        eTextAlignment::MIDDLE_CENTER);
+}
+
 static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 360;
@@ -2020,6 +2122,7 @@ static void DrawPanelToBuffer_()
     DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "打铁设置",
         px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
+    DrawHelpButton_(scr);
     DrawProfileButtons_(scr);
 
     // 下拉悬停高亮由 WH_MOUSE 钩子即时更新到 s_p.hover_cell/hover_idx，
@@ -2070,9 +2173,11 @@ static void DrawPanelToBuffer_()
 
     DrawPanelButtons_(scr);
 
-    // 循环施法快捷键录入模态框：最后绘制，盖住整张设置面板。
+    // 模态层最后绘制，盖住整张设置面板。
     if (s_spell_pick_cell >= 0)
         DrawSpellKeyModal_(scr);
+    if (s_help_modal_open)
+        DrawHelpModal_(scr);
 
     // Match H3BattleValueInfo's ranged panel: one composite copy to the real
     // DirectDraw backbuffer, then invalidate only the panel region.
@@ -2245,6 +2350,7 @@ void OpenSettingsPanel_()
     s_move_pick_wp = -1;
     s_spell_pick_cell = -1;
     s_spell_pick_slot = -1;
+    s_help_modal_open = false;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -2346,6 +2452,7 @@ void CloseSettingsPanel()
     s_move_pick_wp = -1;
     s_spell_pick_cell = -1;
     s_spell_pick_slot = -1;
+    s_help_modal_open = false;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -2501,6 +2608,19 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     const int max_row = PanelMaxScrollRow_();
     const int button_size = PanelScrollButtonSize_();
 
+    // 帮助模态框打开时：吞掉所有底层点击，仅允许点关闭。
+    if (s_help_modal_open) {
+        if (raw_command == 16) {
+            int bx = 0, by = 0, bw = 0, bh = 0;
+            GetHelpModalCloseRect_(&bx, &by, &bw, &bh);
+            if (PointInRect_(px, py, bx, by, bw, bh)) {
+                s_help_modal_open = false;
+                DrawPanelToBuffer_();
+            }
+        }
+        return;
+    }
+
     // 快捷键录入模态框打开时：吞掉所有底层点击，仅允许点取消。
     if (s_spell_pick_cell >= 0) {
         if (raw_command == 16) {
@@ -2565,6 +2685,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         int button = 0;
         if (PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)) button = 1;
         else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
+        else if (PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y, HELP_BTN_SIZE, HELP_BTN_SIZE))
+            button = 3;
         if (button != 0) {
             s_p.pressed_button = button;
             DrawPanelToBuffer_();
@@ -2630,6 +2752,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 s_p.cells[s_spell_pick_cell].spell_pick_request = 0;
                             s_spell_pick_slot = ctrl->spell_pick_request - 1;
                             s_spell_pick_cell = i;
+                            s_help_modal_open = false;
                             // 收起所有下拉，避免模态框下方还有展开层。
                             for (int k = 0; k < CELL_COUNT; ++k) {
                                 s_p.cells[k].expanded = CEX_NONE;
@@ -2682,20 +2805,35 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
             : pressed == 2
                 ? PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)
-                : false;
+                : pressed == 3
+                    ? PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y,
+                        HELP_BTN_SIZE, HELP_BTN_SIZE)
+                    : false;
         const bool redraw = pressed != 0 || s_p.scroll_button_pressed != 0
             || s_p.scroll_dragging;
         s_p.pressed_button = 0;
         s_p.scroll_button_pressed = 0;
         s_p.scroll_dragging = false;
-        if (redraw) DrawPanelToBuffer_();
         if (activate) {
-            if (pressed == 1)
+            if (pressed == 1) {
                 CommitAndCloseSettingsPanel_();
-            else
+            } else if (pressed == 2) {
                 CloseSettingsPanel();
+            } else if (pressed == 3) {
+                // 打开帮助前收起下拉，避免模态层下还有展开列表。
+                for (int k = 0; k < CELL_COUNT; ++k) {
+                    s_p.cells[k].expanded = CEX_NONE;
+                    s_p.cells[k].dirty = true;
+                }
+                s_help_modal_open = true;
+                WriteLog("[Panel] 打开帮助说明模态框");
+                DrawPanelToBuffer_();
+            }
             return;
         }
+        if (redraw) DrawPanelToBuffer_();
+        if (pressed != 0)
+            return;
 
         // 优先处理展开的下拉：防止选中点击穿透到下方格子
         if (HandleExpandedDropdownClick_(px, py, 8))
