@@ -26,18 +26,21 @@ struct _BattleStack_ {
     char _pad0[0x34];
     int  creature_id;
     int  hex_ix;
-    int  def_group_ix;      // 阵营：0=下方（玩家），1=上方（敌方）
-    int  def_frame_ix;
+    int  animation_ix;
+    int  animation_frame_ix;
     char _pad44[0x4C - 0x44];
     int  count_current;     // 当前数量
     int  count_before_attack;
     char _pad54[0x58 - 0x54];
     int  lost_hp;
-    int  army_slot_ix;      // 在己方 army[21] 中的槽位索引
+    int  source_army_slot;  // 原英雄军队槽 0..6；不是战场 stack[side][21] 下标
     int  count_at_start;    // 战斗开始时数量
     char _pad64[0x74 - 0x64];
     _CreatureInfoCompat creature;
-    char _padDC[0x194 - 0xDC];
+    char _padDC[0xF4 - 0xDC];
+    int  def_group_ix;      // 0xF4：真实所属侧，0=攻击方，1=防守方
+    int  army_slot_ix;      // 0xF8：在 battle.stack[side][21] 中的下标
+    char _padFC[0x194 - 0xFC];
     int  active_spell_count;
     int  active_spell_duration[81];
     int  active_spell_level[81];

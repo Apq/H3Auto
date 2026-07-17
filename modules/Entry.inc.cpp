@@ -5,6 +5,7 @@ extern void ResetAutoState();
 extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
 extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
+extern int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags);
 extern void LoadLabels_(const char* ini_path);
 
 // ---- Plugin start ----
@@ -25,6 +26,11 @@ static void StartPlugin()
     // 改返回“自动执行”，复用原版 AI 执行、动画、回合推进。
     _PI->WriteHiHook(0x4744D0, SPLICE_, THISCALL_, HH_ShouldAutoExecute);
     WriteLog("HiHook 0x4744D0 registered.");
+
+    // HiHook: 原版动作执行入口。单次接管时，在玩家真正提交的动作进入
+    // 执行链后结束锁定，恢复后续部队自动执行。
+    _PI->WriteHiHook(0x4786B0, SPLICE_, THISCALL_, HH_OnBattleActionExecute);
+    WriteLog("HiHook 0x4786B0 registered.");
 
     ResetAutoState();
     WriteLog("打铁助手: plugin enabled.");

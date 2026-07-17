@@ -57,9 +57,6 @@ static const int GRID_FRAME_Y = 72;
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
     "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗", "投石车攻击",
 };
-static const char* DEFAULT_SIDE_LABELS[ATS_COUNT] = {
-    "自己", "敌方", "双方",
-};
 static const char* DEFAULT_SELECTOR_LABELS[SEL_COUNT] = {
     "指定目标", "随机", "顺序", "最近", "最远",
     "远程高速优先", "数量最多", "数量最少", "伤最重", "无",
@@ -67,7 +64,6 @@ static const char* DEFAULT_SELECTOR_LABELS[SEL_COUNT] = {
 
 // 运行时标签
 const char* g_action_labels[AA_COUNT] = {};
-const char* g_side_labels[ATS_COUNT] = {};
 const char* g_selector_labels[SEL_COUNT] = {};
 static char g_panel_title[64] = {};
 static bool g_labels_loaded = false;
@@ -93,12 +89,9 @@ static void LoadLabels_(const char* ini_path)
     if (g_labels_loaded) return;
     g_labels_loaded = true;
     static char storage_action[AA_COUNT][64] = {};
-    static char storage_side[ATS_COUNT][64] = {};
     static char storage_selector[SEL_COUNT][64] = {};
     LoadLabelArray_("Actions", DEFAULT_ACTION_LABELS, g_action_labels,
         storage_action, AA_COUNT, ini_path);
-    LoadLabelArray_("Sides", DEFAULT_SIDE_LABELS, g_side_labels,
-        storage_side, ATS_COUNT, ini_path);
     LoadLabelArray_("Selectors", DEFAULT_SELECTOR_LABELS, g_selector_labels,
         storage_selector, SEL_COUNT, ini_path);
     WriteLog("[Panel] 标签已从 %s 加载。", ini_path);
@@ -1868,7 +1861,7 @@ static void CheckAutoFightDialogClosed()
 // 第五部分：LoHook
 // ========================================================================
 
-extern bool TryAutoExecuteActiveStack();
+extern bool TryAutoExecuteActiveStack(bool allow_unit_action);
 
 INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 {
@@ -1892,7 +1885,7 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
         // 循环施法是两阶段状态机：必须每帧观察 heroCasted/法力变化，
         // 再决定推进游标并提交部队主动作，不能只依赖偶发战斗消息。
         __try {
-            TryAutoExecuteActiveStack();
+            TryAutoExecuteActiveStack(false);
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return EXEC_DEFAULT;
@@ -1938,7 +1931,7 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
     // 面板未打开：尝试主动提交当前单位动作（防御/远程/近战等）。
     // 只写 battle->action，不跳过原函数；原函数看到 action!=0 会走执行路径。
     __try {
-        TryAutoExecuteActiveStack();
+        TryAutoExecuteActiveStack(true);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return EXEC_DEFAULT;
 }

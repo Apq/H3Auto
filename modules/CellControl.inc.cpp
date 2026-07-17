@@ -91,14 +91,12 @@ static const int CC_DROPDOWN_ITEM_H = 18;
 
 // 标签（由 SettingsDlg 注入）
 extern const char* g_action_labels[AA_COUNT];
-extern const char* g_side_labels[ATS_COUNT];
 extern const char* g_selector_labels[SEL_COUNT];
 
 // 展开中的下拉类型
 enum CellExpandKind {
     CEX_NONE = 0,
     CEX_ACTION,
-    CEX_SIDE,
     CEX_SELECTOR,
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
@@ -117,7 +115,6 @@ struct CellControl
     CellExpandKind   expanded;
     int              hover_item;      // -1 = 无
     bool             action_pressed;
-    bool             side_pressed;
     bool             selector_pressed;
     bool             dirty;
     bool             has_data;
@@ -597,13 +594,6 @@ static int CellControl_GetAllowedSelectors(AutoActionKind action, AutoTargetKind
     return n;
 }
 
-// 目标第二行：阵营（仅部分行动需要）。移动改用两格路径点，不再用阵营下拉。
-static bool CellControl_ShowsSideRow(AutoActionKind action)
-{
-    (void)action;
-    return false; // 阵营下拉已停用（移动=两格路径点，攻击/急救阵营固定）
-}
-
 // 目标第二行标签（阵营固定时显示说明）
 static const char* CellControl_FixedSideHint(AutoActionKind action)
 {
@@ -693,14 +683,13 @@ static RECT CellControl_GetCellRect(int cell_panel_x, int cell_panel_y)
 static int CellControl_GetExpandedItemCount(CellControl* ctrl);
 
 // 三小列布局下每个下拉所在小列 X（相对格子）。
-// 行动/站立 = 小列2；选择器/阵营/攻击 = 小列3。
+// 行动/站立 = 小列2；选择器/攻击 = 小列3。
 static int CellControl_GetExpandListLeftX(CellControl* ctrl)
 {
     if (!ctrl) return CC_COL2_X;
     switch (ctrl->expanded) {
     case CEX_ACTION:   return CC_COL2_X;
     case CEX_STAND:    return CC_COL3_X;
-    case CEX_SIDE:     return CC_COL3_X;
     case CEX_SELECTOR: return CC_COL3_X;
     case CEX_ATTACK:   return CC_COL3_X;
     default:           return CC_COL2_X;
@@ -717,7 +706,7 @@ static int CellControl_GetExpandListWidth(CellControl* ctrl)
 }
 
 // 当前展开列表的局部 Y（列表顶部，相对格子）= 其所在行下边缘。
-// 循环施法=顶行；行动/选择器=中行；阵营=下行。
+// 循环施法=顶行；行动/选择器=中行；攻击=下行。
 static int CellControl_GetExpandListTopY(CellControl* ctrl)
 {
     if (!ctrl) return CC_TOP_Y + CC_ROW_H;
@@ -726,7 +715,6 @@ static int CellControl_GetExpandListTopY(CellControl* ctrl)
     case CEX_SELECTOR: return CC_TOP_Y + CC_ROW_H;
     case CEX_STAND:    return CC_TOP_Y + CC_ROW_H;
     case CEX_ATTACK:   return CC_BOT_Y + CC_ROW_H;
-    case CEX_SIDE:     return CC_BOT_Y + CC_ROW_H;
     case CEX_SPELL:    return CC_SPELL_Y + CC_ROW_H;
     default:           return CC_TOP_Y + CC_ROW_H;
     }
@@ -1061,28 +1049,15 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             CellControl_DrawArrow(scr, CC_COL3_X + CC_COL_W - 14,
                 CC_TOP_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SELECTOR);
 
-            // 阵营 / 固定说明：小列3下行
-            if (CellControl_ShowsSideRow(rule.action)) {
-                const char* side_label =
-                    (rule.target.side < ATS_COUNT && g_side_labels[rule.target.side])
-                    ? g_side_labels[rule.target.side] : "---";
-                CellControl_DrawButtonBg(scr, CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H,
-                    ctrl->side_pressed, false);
-                CellControl_DrawText(scr, fntS, side_label,
-                    CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 20, CC_ROW_H,
-                    (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_LEFT);
-                CellControl_DrawArrow(scr, CC_COL3_X + CC_COL_W - 14,
-                    CC_BOT_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_SIDE);
-            } else {
-                const char* hint = CellControl_FixedSideHint(rule.action);
-                if (hint) {
-                    Fill(scr, CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H, 48, 36, 20);
-                    scr->DrawFrame(CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H,
-                        (BYTE)120, (BYTE)96, (BYTE)48);
-                    CellControl_DrawText(scr, fntS, hint,
-                        CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 8, CC_ROW_H,
-                        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-                }
+            // 固定目标说明：小列3下行
+            const char* hint = CellControl_FixedSideHint(rule.action);
+            if (hint) {
+                Fill(scr, CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H, 48, 36, 20);
+                scr->DrawFrame(CC_COL3_X, CC_BOT_Y, CC_COL_W, CC_ROW_H,
+                    (BYTE)120, (BYTE)96, (BYTE)48);
+                CellControl_DrawText(scr, fntS, hint,
+                    CC_COL3_X + 4, CC_BOT_Y, CC_COL_W - 8, CC_ROW_H,
+                    (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
             }
         }
     }
@@ -1237,27 +1212,6 @@ static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
             cell_panel_x, cell_panel_y,
             a == ctrl->data.rule.action, i == hover_idx, false,
             CC_TOP_Y + CC_ROW_H, CC_COL2_X, CC_COL2_W);
-    }
-}
-
-// 展开阵营列表（仅移动）
-static void CellControl_DrawSideDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
-    int cell_panel_x, int cell_panel_y, int hover_idx)
-{
-    if (!ctrl || ctrl->expanded != CEX_SIDE || !scr) return;
-    if (!CellControl_ShowsSideRow(ctrl->data.rule.action)) return;
-    H3Font* fntS = GetSmallFont();
-    if (!fntS) return;
-
-    // 移动：己方 / 敌方（作为靠近锚点）
-    const AutoTargetSide sides[2] = { ATS_OWN, ATS_ENEMY };
-    for (int i = 0; i < 2; ++i) {
-        const AutoTargetSide s = sides[i];
-        const char* label = (s < ATS_COUNT && g_side_labels[s]) ? g_side_labels[s] : "---";
-        CellControl_DrawDropdownItem(scr, fntS, label, i,
-            cell_panel_x, cell_panel_y,
-            s == ctrl->data.rule.target.side, i == hover_idx, true,
-            CC_BOT_Y + CC_ROW_H, CC_COL3_X);
     }
 }
 
@@ -1429,9 +1383,6 @@ static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
     case CEX_SPELL:
         CellControl_DrawSpellDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
         break;
-    case CEX_SIDE:
-        CellControl_DrawSideDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
-        break;
     case CEX_SELECTOR:
         CellControl_DrawSelectorDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
         break;
@@ -1456,8 +1407,6 @@ static int CellControl_GetExpandedItemCount(CellControl* ctrl)
         return CellControl_GetAllowedActions(ctrl->data.creature_type,
             ctrl->data.is_ranged, allowed);
     }
-    case CEX_SIDE:
-        return CellControl_ShowsSideRow(ctrl->data.rule.action) ? 2 : 0;
     case CEX_SELECTOR: {
         AutoTargetSelector allowed[SEL_COUNT] = {};
         return CellControl_GetAllowedSelectors(ctrl->data.rule.action,
@@ -1485,7 +1434,6 @@ enum CellHitArea
     CELL_HIT_NONE = 0,
     CELL_HIT_ICON,
     CELL_HIT_ACTION,
-    CELL_HIT_SIDE,
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
@@ -1572,10 +1520,6 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
             // 选择器：小列3上行
             if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y, CC_COL3_W))
                 return CELL_HIT_SELECTOR;
-            // 阵营：小列3下行（仅移动）
-            if (CellControl_ShowsSideRow(ctrl->data.rule.action)
-                && ctrl->expanded != CEX_SIDE && in_box(CC_COL3_X, CC_BOT_Y, CC_COL3_W))
-                return CELL_HIT_SIDE;
         }
     }
 
@@ -1669,14 +1613,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         if (hit == CELL_HIT_ACTION) {
             ctrl->expanded = (ctrl->expanded == CEX_ACTION) ? CEX_NONE : CEX_ACTION;
             ctrl->action_pressed = true;
-            ctrl->hover_item = -1;
-            ctrl->spell_pick_request = 0;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit == CELL_HIT_SIDE) {
-            ctrl->expanded = (ctrl->expanded == CEX_SIDE) ? CEX_NONE : CEX_SIDE;
-            ctrl->side_pressed = true;
             ctrl->hover_item = -1;
             ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
@@ -1794,12 +1730,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                             ctrl->data.is_ranged);
                         CellControl_EnsureMeleeDefaults(ctrl);
                     }
-                } else if (ctrl->expanded == CEX_SIDE) {
-                    const AutoTargetSide sides[2] = { ATS_OWN, ATS_ENEMY };
-                    if (idx < 2) {
-                        ctrl->data.rule.target.side = sides[idx];
-                        ctrl->data.rule.target.kind = AT_STACK; // 靠近部队
-                    }
                 } else if (ctrl->expanded == CEX_SELECTOR) {
                     AutoTargetSelector allowed[SEL_COUNT] = {};
                     const int n = CellControl_GetAllowedSelectors(ctrl->data.rule.action,
@@ -1830,14 +1760,12 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->expanded = CEX_NONE;
                 ctrl->dd_scroll = 0;
                 ctrl->action_pressed = false;
-                ctrl->side_pressed = false;
                 ctrl->selector_pressed = false;
                 ctrl->dirty = true;
                 return true;
             }
         }
         ctrl->action_pressed = false;
-        ctrl->side_pressed = false;
         ctrl->selector_pressed = false;
         ctrl->dirty = true;
     }

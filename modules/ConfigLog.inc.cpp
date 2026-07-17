@@ -125,6 +125,8 @@ AutoStackRule g_active_rules[21] = {};
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
+    int  toggle_manual_vk;     // F11：本场自动/全手动切换
+    int  one_shot_manual_vk;   // 左 Ctrl：单次接管当前/下一支部队
 } cfg;
 
 static char g_ini_path[MAX_PATH];
@@ -302,14 +304,62 @@ static int ClampInt(int value, int min_value, int max_value)
 
 static void WriteLog(const char* fmt, ...);  // 前向声明
 
+static int ParseHotkeyVk_(const char* text, int default_vk)
+{
+    if (!text) return default_vk;
+    char buf[64] = {};
+    strncpy(buf, text, sizeof(buf) - 1);
+    char* s = TrimAscii(buf);
+    if (!s || !*s) return default_vk;
+
+    // 支持直接数字虚拟键码，例如 122=F11。0x7B。122。
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        char* end = nullptr;
+        const long v = strtol(s, &end, 16);
+        if (end && end != s && v > 0 && v < 256) return (int)v;
+    }
+    bool all_digit = true;
+    for (const char* p = s; *p; ++p) {
+        if (*p < '0' || *p > '9') { all_digit = false; break; }
+    }
+    if (all_digit) {
+        const int v = atoi(s);
+        if (v > 0 && v < 256) return v;
+    }
+
+    // 常用名称：F1..F12 / LControl / RControl / Control / Ctrl。
+    if (_stricmp(s, "LControl") == 0 || _stricmp(s, "LCtrl") == 0
+        || _stricmp(s, "LeftControl") == 0 || _stricmp(s, "LeftCtrl") == 0)
+        return VK_LCONTROL;
+    if (_stricmp(s, "RControl") == 0 || _stricmp(s, "RCtrl") == 0
+        || _stricmp(s, "RightControl") == 0 || _stricmp(s, "RightCtrl") == 0)
+        return VK_RCONTROL;
+    if (_stricmp(s, "Control") == 0 || _stricmp(s, "Ctrl") == 0)
+        return VK_CONTROL;
+    if ((s[0] == 'F' || s[0] == 'f') && s[1] >= '1' && s[1] <= '9') {
+        int n = atoi(s + 1);
+        if (n >= 1 && n <= 12) return VK_F1 + (n - 1);
+    }
+    return default_vk;
+}
+
 static void ReadConfig()
 {
     const char* f = g_ini_path;
     cfg.disable_on_start = GetPrivateProfileIntA("General", "DisableOnStart", 0, f);
-
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
 
-    WriteLog("配置加载：DisableOnStart=%d", cfg.disable_on_start);
+    char toggle_buf[64] = {};
+    char oneshot_buf[64] = {};
+    GetPrivateProfileStringA("Hotkeys", "ToggleManual", "F11",
+        toggle_buf, sizeof(toggle_buf), f);
+    GetPrivateProfileStringA("Hotkeys", "OneShotManual", "LControl",
+        oneshot_buf, sizeof(oneshot_buf), f);
+    cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F11);
+    cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, VK_LCONTROL);
+
+    WriteLog("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X",
+        cfg.disable_on_start, cfg.toggle_manual_vk, cfg.one_shot_manual_vk);
 }
 
 // ========== 日志输出 ==========
