@@ -831,29 +831,28 @@ static bool IsWarMachineCid_(int cid)
         || cid == WM_ARROW_TOWER;
 }
 
-// 失血数值 = 阵亡单位满血 + 当前顶层单位已损 HP。
-static int WoundValueOf_(_BattleStack_* t)
+// 失血计算与候选评分归纯策略核心，避免单元测试和游戏执行器各算一遍。
+static H3AutoPolicy::TargetCandidate TargetCandidateOf_(_BattleStack_* t)
 {
-    if (!t) return 0;
-    const int hp = (t->creature.hit_points > 0) ? t->creature.hit_points : 1;
-    int dead = t->count_at_start - t->count_current;
-    if (dead < 0) dead = 0;
-    int lost = t->lost_hp;
-    if (lost < 0) lost = 0;
-    return dead * hp + lost;
+    H3AutoPolicy::TargetCandidate c = {};
+    if (!t) return c;
+    c.count_current = t->count_current;
+    c.count_at_start = t->count_at_start;
+    c.hit_points = t->creature.hit_points;
+    c.lost_hp = t->lost_hp;
+    c.shots = t->creature.shots;
+    c.speed = t->creature.speed;
+    return c;
 }
 
-// 失血比例比较键：wound * 10000 / total_max_hp，便于整数比较。
+static int WoundValueOf_(_BattleStack_* t)
+{
+    return t ? H3AutoPolicy::WoundValue(TargetCandidateOf_(t)) : 0;
+}
+
 static int WoundRatioKey_(_BattleStack_* t)
 {
-    if (!t) return 0;
-    const int hp = (t->creature.hit_points > 0) ? t->creature.hit_points : 1;
-    int start = t->count_at_start;
-    if (start <= 0) start = t->count_current;
-    if (start <= 0) return 0;
-    const int total = start * hp;
-    if (total <= 0) return 0;
-    return (int)(((__int64)WoundValueOf_(t) * 10000) / total);
+    return t ? H3AutoPolicy::WoundRatioKey(TargetCandidateOf_(t)) : 0;
 }
 
 // 通用部队选择：side_filter = 0己方 / 1敌方 / 2双方；require_wounded 用于急救。
@@ -883,58 +882,13 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     }
     if (count <= 0) return nullptr;
 
-    switch (rule.target.selector) {
-    case SEL_COUNT_HIGH: {
-        _BattleStack_* best = candidates[0];
-        for (int i = 1; i < count; ++i)
-            if (candidates[i]->count_current > best->count_current)
-                best = candidates[i];
-        return best;
-    }
-    case SEL_RANGED_SPEED: {
-        // 远程优先 → 速度降序。射手（shots>0）排在近战前；同类按 speed 高者优先。
-        _BattleStack_* best = candidates[0];
-        int best_ranged = (best->creature.shots > 0) ? 1 : 0;
-        int best_speed = best->creature.speed;
-        for (int i = 1; i < count; ++i) {
-            int r = (candidates[i]->creature.shots > 0) ? 1 : 0;
-            int s = candidates[i]->creature.speed;
-            if (r > best_ranged || (r == best_ranged && s > best_speed)) {
-                best = candidates[i];
-                best_ranged = r;
-                best_speed = s;
-            }
-        }
-        return best;
-    }
-    case SEL_WOUND_VALUE: {
-        _BattleStack_* best = candidates[0];
-        int best_v = WoundValueOf_(best);
-        for (int i = 1; i < count; ++i) {
-            const int v = WoundValueOf_(candidates[i]);
-            if (v > best_v) {
-                best = candidates[i];
-                best_v = v;
-            }
-        }
-        return best;
-    }
-    case SEL_WOUND_RATIO: {
-        _BattleStack_* best = candidates[0];
-        int best_r = WoundRatioKey_(best);
-        for (int i = 1; i < count; ++i) {
-            const int r = WoundRatioKey_(candidates[i]);
-            if (r > best_r) {
-                best = candidates[i];
-                best_r = r;
-            }
-        }
-        return best;
-    }
-    case SEL_RANDOM:
-    default:
-        return candidates[rand() % count];
-    }
+    H3AutoPolicy::TargetCandidate scored[42] = {};
+    for (int i = 0; i < count; ++i)
+        scored[i] = TargetCandidateOf_(candidates[i]);
+    const int selected = H3AutoPolicy::SelectTargetIndex(
+        scored, count, rule.target.selector,
+        static_cast<uint32_t>(rand()));
+    return selected >= 0 ? candidates[selected] : nullptr;
 }
 
 // 解析位置目标：用部队目标的位置作锚点（循环移动旧单目标兜底）。

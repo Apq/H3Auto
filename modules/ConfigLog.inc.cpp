@@ -1,108 +1,11 @@
 // ========== 配置与策略枚举 ==========
-// 新模型：行动策略与目标策略正交；见 H3Note/H3Auto行动与目标策略实现方案.md
-
-enum AutoActionKind : uint8_t {
-    AA_MANUAL = 0,        // 手动（不干预）
-    AA_DEFEND,            // 防御
-    AA_WAIT,              // 等待
-    AA_MOVE,              // 移动
-    AA_MELEE_ATTACK,      // 循环近战（枚举值固定为 4）
-    AA_RANGED_ATTACK,     // 远程攻击
-    AA_FIRST_AID,         // 急救帐篷疗伤
-    AA_COUNT
-};
-
-enum AutoTargetKind : uint8_t {
-    AT_NONE = 0,          // 无目标
-    AT_STACK,             // 部队目标
-    AT_POSITION,          // 战场位置目标
-    AT_COUNT
-};
-
-enum AutoTargetSide : uint8_t {
-    ATS_OWN = 0,          // 己方
-    ATS_ENEMY,            // 敌方
-    ATS_EITHER,           // 双方均可（执行前仍受兼容矩阵约束）
-    ATS_COUNT
-};
-
-// 选择器按行动分流；近战/移动不走选择器菜单。
-enum AutoTargetSelector : uint8_t {
-    SEL_RANDOM = 0,       // 随机（远程/急救共用）
-    SEL_RANGED_SPEED,     // 远程：远程优先 + 高速
-    SEL_COUNT_HIGH,       // 远程：数量最多
-    SEL_WOUND_RATIO,      // 急救：失血比例最高
-    SEL_WOUND_VALUE,      // 急救：失血数值最大
-    SEL_COUNT
-};
-
-// 容量按第三小列宽度（≈368）与槽位文本宽度反算：
-//  循环施法单数字 → 槽宽约 34，一行 10 个；
-//  循环移动 A01 → 槽宽约 43，每行 8 个，两行 16 个；
-//  循环近战 A01→B02 → 槽宽约 71，每行 5 组，两行 10 组。
-static const int MELEE_PAIR_CAPACITY = 10;
-static const int MOVE_WAYPOINT_CAPACITY = 16;
-static const int SPELL_SLOT_CAPACITY = 10;
-
-struct AutoTargetRule {
-    AutoTargetKind kind;
-    AutoTargetSide side;
-    AutoTargetSelector selector;
-
-    // 近战专用：模拟玩家“站到 standHex，再点 attackHex”。
-    // attackHex 上有敌人（头格或双格尾格都算）时才提交近战。
-    int16_t meleeStandHex;     // 站立/接近格，-1=未设
-    int16_t meleeAttackHex;    // 攻击点击格，-1=未设
-
-    // 循环移动专用：有序路径点列表，逐点巡逻循环（末点回首点）。
-    // 从战场直接点选追加；-1=空槽。
-    int16_t moveWaypoints[MOVE_WAYPOINT_CAPACITY]; // 路径点，原版 hex 1..185，-1=空
-    int8_t  moveWaypointCount; // 有效点数 0..MOVE_WAYPOINT_CAPACITY
-
-    // 循环近战专用：最多 MELEE_PAIR_CAPACITY 组“站立位 + 攻击位”。
-    // 保留上面的 meleeStandHex/meleeAttackHex 作为旧规则兼容镜像；
-    // 新 UI 和执行端均以本序列为准。
-    int16_t meleeStandHexes[MELEE_PAIR_CAPACITY];
-    int16_t meleeAttackHexes[MELEE_PAIR_CAPACITY];
-    int8_t  meleePairCount;    // 有效组合数 0..MELEE_PAIR_CAPACITY
-};
-
-struct AutoStackRule {
-    AutoActionKind action;
-    AutoTargetRule target;
-    bool allowDefendFallback;  // 允许降级为防御（仅普通部队）
-    bool quickCastFirst;       // 兼容字段：spellSlotCount>0 时为 true
-    int8_t spellSlot;          // 兼容镜像：等于 spellSlots[0]（1-9/0）
-    // 行动前循环施法：按顺序轮换快捷键 1-9/0，单行最多 SPELL_SLOT_CAPACITY 槽。
-    int8_t spellSlots[SPELL_SLOT_CAPACITY];
-    int8_t spellSlotCount;     // 有效槽位数 0..SPELL_SLOT_CAPACITY
-};
+// 纯策略核心同时被生产代码与 tests/PolicyCoreTests.cpp 使用。
+#include "PolicyCore.hpp"
 
 static AutoStackRule MakeDefaultRule_()
 {
-    AutoStackRule r = {};
-    r.action = AA_MANUAL;
-    r.target.kind = AT_NONE;
-    r.target.side = ATS_ENEMY;
-    r.target.selector = SEL_RANDOM;
-    r.target.meleeStandHex = -1;
-    r.target.meleeAttackHex = -1;
-    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) r.target.moveWaypoints[i] = -1;
-    r.target.moveWaypointCount = 0;
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
-        r.target.meleeStandHexes[i] = -1;
-        r.target.meleeAttackHexes[i] = -1;
-    }
-    r.target.meleePairCount = 0;
-    r.allowDefendFallback = false;
-    r.quickCastFirst = false;
-    r.spellSlot = 1;
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        r.spellSlots[i] = -1;
-    r.spellSlotCount = 0;
-    return r;
+    return H3AutoPolicy::MakeDefaultRule();
 }
-
 // 五套仅驻留内存的已确认方案；默认全为手动。
 AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;

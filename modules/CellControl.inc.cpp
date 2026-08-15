@@ -140,11 +140,7 @@ struct CellControl
 
 static bool CellControl_IsWarMachineType(int creature_type)
 {
-    return creature_type == eCreature::CATAPULT
-        || creature_type == eCreature::BALLISTA
-        || creature_type == eCreature::FIRST_AID_TENT
-        || creature_type == eCreature::AMMO_CART
-        || creature_type == eCreature::ARROW_TOWER;
+    return H3AutoPolicy::IsWarMachineType(creature_type);
 }
 
 static bool CellControl_IsRangedType(int creature_type)
@@ -233,41 +229,7 @@ static bool CellControl_HexAdjacent(int a, int b)
 // 规范化循环施法序列：压紧有效快捷键、迁移旧单槽、同步兼容镜像。
 static void CellControl_NormalizeSpellSlots(AutoStackRule* rule)
 {
-    if (!rule) return;
-
-    auto is_valid_slot = [](int slot) -> bool {
-        return slot == 0 || (slot >= 1 && slot <= 9);
-    };
-
-    int8_t slots[SPELL_SLOT_CAPACITY];
-    int count = 0;
-    int requested = rule->spellSlotCount;
-    if (requested < 0) requested = 0;
-    if (requested > SPELL_SLOT_CAPACITY) requested = SPELL_SLOT_CAPACITY;
-    for (int i = 0; i < requested; ++i) {
-        const int slot = rule->spellSlots[i];
-        if (!is_valid_slot(slot)) continue;
-        slots[count++] = static_cast<int8_t>(slot);
-    }
-
-    // 旧版只保存单槽 spellSlot + quickCastFirst：迁移为序列第 0 项。
-    if (count == 0 && rule->quickCastFirst && is_valid_slot(rule->spellSlot)) {
-        slots[0] = rule->spellSlot;
-        count = 1;
-    }
-
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        rule->spellSlots[i] = (i < count) ? slots[i] : static_cast<int8_t>(-1);
-    rule->spellSlotCount = static_cast<int8_t>(count);
-    if (count <= 0) {
-        rule->quickCastFirst = false;
-        // 保持默认镜像，便于旧逻辑读取。
-        if (!is_valid_slot(rule->spellSlot))
-            rule->spellSlot = 1;
-    } else {
-        rule->quickCastFirst = true;
-        rule->spellSlot = rule->spellSlots[0];
-    }
+    H3AutoPolicy::NormalizeSpellSlots(rule);
 }
 
 // 规范化循环近战序列：压紧有效组合、迁移旧的单组字段、同步兼容镜像。
@@ -366,58 +328,14 @@ static int CellControl_AllHexes(int out[165])
 static int CellControl_GetAllowedActions(int creature_type, bool is_ranged,
     bool has_artillery, bool has_first_aid, AutoActionKind out_actions[AA_COUNT])
 {
-    int n = 0;
-    auto push = [&](AutoActionKind a) {
-        if (n < AA_COUNT) out_actions[n++] = a;
-    };
-
-    switch (creature_type) {
-    case eCreature::FIRST_AID_TENT:
-        // 对齐弩车：有急救术 → 手动（默认）+ 急救；无 → 仅急救治疗。
-        if (has_first_aid)
-            push(AA_MANUAL);
-        push(AA_FIRST_AID);
-        break;
-    case eCreature::CATAPULT:
-        // 投石车不做攻城目标自动化：仅手动 / 防御。
-        push(AA_MANUAL);
-        push(AA_DEFEND);
-        break;
-    case eCreature::BALLISTA:
-    case eCreature::ARROW_TOWER:
-        // 有炮术：可选手动（默认）+ 远程攻击；无炮术：仅远程攻击。
-        if (has_artillery)
-            push(AA_MANUAL);
-        push(AA_RANGED_ATTACK);
-        break;
-    case eCreature::AMMO_CART:
-        // 不应进入面板
-        push(AA_MANUAL);
-        break;
-    default:
-        push(AA_MANUAL);
-        push(AA_DEFEND);
-        push(AA_MOVE);
-        push(AA_MELEE_ATTACK);
-        if (is_ranged)
-            push(AA_RANGED_ATTACK);
-        break;
-    }
-    return n;
+    return H3AutoPolicy::GetAllowedActions(creature_type, is_ranged,
+        has_artillery, has_first_aid, out_actions);
 }
 
 // 行动是否需要目标区
 static bool CellControl_ActionNeedsTarget(AutoActionKind action)
 {
-    switch (action) {
-    case AA_MOVE:
-    case AA_MELEE_ATTACK:
-    case AA_RANGED_ATTACK:
-    case AA_FIRST_AID:
-        return true;
-    default:
-        return false;
-    }
+    return H3AutoPolicy::ActionNeedsTarget(action);
 }
 
 // 行动是否使用「两格」UI（站立/攻击 或 位置1/位置2）。
@@ -425,63 +343,19 @@ static bool CellControl_ActionNeedsTarget(AutoActionKind action)
 // 循环移动改用独立的路径点列表 UI（moveWaypoints），不走两格逻辑。
 static bool CellControl_ActionUsesTwoHex(AutoActionKind action)
 {
-    return action == AA_MELEE_ATTACK;
+    return H3AutoPolicy::ActionUsesTwoHex(action);
 }
 
 // 行动是否显示降级复选框（仅普通部队的主动策略）
 static bool CellControl_ActionShowsFallback(int creature_type, AutoActionKind action)
 {
-    if (CellControl_IsWarMachineType(creature_type))
-        return false;
-    return action != AA_MANUAL && action != AA_DEFEND && action != AA_WAIT;
+    return H3AutoPolicy::ActionShowsFallback(creature_type, action);
 }
 
 // 行动默认目标规则
 static AutoTargetRule CellControl_DefaultTargetForAction(AutoActionKind action)
 {
-    AutoTargetRule t = {};
-    t.meleeStandHex = -1;
-    t.meleeAttackHex = -1;
-    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i) t.moveWaypoints[i] = -1;
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
-        t.meleeStandHexes[i] = -1;
-        t.meleeAttackHexes[i] = -1;
-    }
-
-    switch (action) {
-    case AA_MOVE:
-        // 循环移动：路径点列表；不走选择器菜单。
-        t.kind = AT_POSITION;
-        t.side = ATS_ENEMY;
-        t.selector = SEL_RANDOM;
-        t.meleeStandHex = -1;
-        t.meleeAttackHex = -1;
-        break;
-    case AA_MELEE_ATTACK:
-        // 循环近战：站立格 + 攻击格；不走选择器菜单。
-        t.kind = AT_POSITION;
-        t.side = ATS_ENEMY;
-        t.selector = SEL_RANDOM;
-        t.meleeStandHex = -1;
-        t.meleeAttackHex = -1;
-        break;
-    case AA_RANGED_ATTACK:
-        t.kind = AT_STACK;
-        t.side = ATS_ENEMY;
-        t.selector = SEL_RANDOM;
-        break;
-    case AA_FIRST_AID:
-        t.kind = AT_STACK;
-        t.side = ATS_OWN;
-        t.selector = SEL_WOUND_VALUE; // 急救默认失血数值最大
-        break;
-    default:
-        t.kind = AT_NONE;
-        t.side = ATS_ENEMY;
-        t.selector = SEL_RANDOM;
-        break;
-    }
-    return t;
+    return H3AutoPolicy::DefaultTargetForAction(action);
 }
 
 // 前向声明：选择器可选集（实现见后）
@@ -494,101 +368,26 @@ static void CellControl_NormalizeRule(AutoStackRule* rule, int creature_type,
 {
     if (!rule) return;
 
-    AutoActionKind allowed[AA_COUNT] = {};
-    const int n = CellControl_GetAllowedActions(creature_type, is_ranged,
-        has_artillery, has_first_aid, allowed);
-    bool ok = false;
-    for (int i = 0; i < n; ++i) {
-        if (allowed[i] == rule->action) { ok = true; break; }
-    }
-    // 非法行动吸附到允许集首项：
-    // 弩车/箭塔：有炮术首项=手动，无=远程；帐篷：有急救术首项=手动，无=急救。
-    if (!ok)
-        rule->action = (n > 0) ? allowed[0] : AA_MANUAL;
+    // 行动分支、目标侧、选择器顺序和旧施法槽兼容由纯核心统一实现。
+    H3AutoPolicy::NormalizeRule(rule, creature_type, is_ranged,
+        has_artillery, has_first_aid);
 
-    // 循环施法与行动策略正交：即使当前行动是手动/防御，也要完成旧单槽迁移。
-    CellControl_NormalizeSpellSlots(rule);
-
-    if (!CellControl_ActionNeedsTarget(rule->action)) {
-        rule->target = CellControl_DefaultTargetForAction(AA_MANUAL);
-        rule->allowDefendFallback = false;
-        return;
-    }
-
-    // 目标默认值：若当前目标不合法则重置
-    const AutoTargetRule def = CellControl_DefaultTargetForAction(rule->action);
-    if (rule->target.kind == AT_NONE)
-        rule->target = def;
-
-    switch (rule->action) {
-    case AA_MELEE_ATTACK:
-        rule->target.kind = AT_POSITION;
-        rule->target.side = ATS_ENEMY;
-        rule->target.selector = SEL_RANDOM;
+    // 游戏 UI 专用几何数据仍在这里校验。
+    if (rule->action == AA_MELEE_ATTACK)
         CellControl_NormalizeMeleePairs(&rule->target);
-        break;
-    case AA_RANGED_ATTACK:
-        rule->target.kind = AT_STACK;
-        rule->target.side = ATS_ENEMY;
-        break;
-    case AA_FIRST_AID:
-        rule->target.kind = AT_STACK;
-        rule->target.side = ATS_OWN;
-        break;
-    case AA_MOVE:
-        // 循环移动：路径点列表，不走选择器菜单。
-        rule->target.kind = AT_POSITION;
-        rule->target.selector = SEL_RANDOM;
+    else if (rule->action == AA_MOVE) {
         if (rule->target.meleeStandHex < 1 || rule->target.meleeStandHex > 185)
             rule->target.meleeStandHex = -1;
         if (rule->target.meleeAttackHex < 1 || rule->target.meleeAttackHex > 185)
             rule->target.meleeAttackHex = -1;
-        break;
-    default:
-        break;
     }
-
-    // 收敛选择器到当前允许集合（近战/移动不显示选择器菜单）。
-    if (!CellControl_ActionUsesTwoHex(rule->action)) {
-        AutoTargetSelector sels[SEL_COUNT] = {};
-        const int sn = CellControl_GetAllowedSelectors(rule->action,
-            rule->target.kind, sels);
-        bool sel_ok = false;
-        for (int i = 0; i < sn; ++i)
-            if (sels[i] == rule->target.selector) { sel_ok = true; break; }
-        if (!sel_ok && sn > 0)
-            rule->target.selector = sels[0];
-    }
-
-    if (!CellControl_ActionShowsFallback(creature_type, rule->action))
-        rule->allowDefendFallback = false;
 }
 
 // 填充选择器选项
 static int CellControl_GetAllowedSelectors(AutoActionKind action, AutoTargetKind kind,
     AutoTargetSelector out_sels[SEL_COUNT])
 {
-    int n = 0;
-    auto push = [&](AutoTargetSelector s) {
-        if (n < SEL_COUNT) out_sels[n++] = s;
-    };
-
-    if (CellControl_ActionUsesTwoHex(action)) {
-        // 近战 / 循环移动：不用选择器菜单
-        return n;
-    }
-    if (action == AA_FIRST_AID) {
-        // 急救：失血数值 / 失血比例 / 随机（候选仅己方伤员）
-        push(SEL_WOUND_VALUE);
-        push(SEL_WOUND_RATIO);
-        push(SEL_RANDOM);
-        return n;
-    }
-    // 远程等：随机 / 远程高速优先 / 数量最多
-    push(SEL_RANDOM);
-    push(SEL_RANGED_SPEED);
-    push(SEL_COUNT_HIGH);
-    return n;
+    return H3AutoPolicy::GetAllowedSelectors(action, kind, out_sels);
 }
 
 // 目标第二行标签（阵营固定时显示说明）

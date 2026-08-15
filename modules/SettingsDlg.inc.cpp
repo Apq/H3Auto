@@ -307,6 +307,7 @@ static bool s_autofight_right_press_armed = false;
 // BattleUI 连续缺失帧数，避免对话框切换的瞬时空帧误判为战斗结束
 static int s_battle_ui_missing_frames = 0;
 // 结果窗生命周期：见过结果窗后，取消重打保留设置；接受才清除。
+static H3AutoPolicy::ResultLifecycleState s_result_lifecycle = {};
 static bool s_saw_cpresult = false;
 static bool s_result_accept_armed = false;
 static bool s_result_cancel_armed = false;
@@ -1869,6 +1870,8 @@ static void CheckBattleResultLifecycle_()
     if (result_visible) {
         if (!s_saw_cpresult) {
             s_saw_cpresult = true;
+            H3AutoPolicy::ApplyResultLifecycle(
+                &s_result_lifecycle, H3AutoPolicy::RESULT_SHOWN);
             s_result_accept_armed = false;
             s_result_cancel_armed = false;
             WriteLog("[Life] CPResult 结果窗出现，等待接受/取消重打。");
@@ -1884,11 +1887,15 @@ static void CheckBattleResultLifecycle_()
                     WriteLog("[Life] 结果窗命中确定/接受 id=0x%X。", id);
                 s_result_accept_armed = true;
                 s_result_cancel_armed = false;
+                H3AutoPolicy::ApplyResultLifecycle(
+                    &s_result_lifecycle, H3AutoPolicy::RESULT_ACCEPT_CLICKED);
             } else if (id == s_cpresult_cancel_id) {
                 if (!s_result_cancel_armed)
                     WriteLog("[Life] 结果窗命中取消/重打 id=0x%X。", id);
                 s_result_cancel_armed = true;
                 s_result_accept_armed = false;
+                H3AutoPolicy::ApplyResultLifecycle(
+                    &s_result_lifecycle, H3AutoPolicy::RESULT_CANCEL_CLICKED);
             }
         }
         return;
@@ -1897,7 +1904,13 @@ static void CheckBattleResultLifecycle_()
     // 结果窗刚消失。
     if (!s_saw_cpresult) return;
 
-    if (s_result_cancel_armed && battle_ui_exists) {
+    const H3AutoPolicy::ResultLifecycleAction lifecycle_action =
+        H3AutoPolicy::ApplyResultLifecycle(
+            &s_result_lifecycle,
+            battle_ui_exists ? H3AutoPolicy::RESULT_CLOSED_WITH_BATTLE_UI
+                             : H3AutoPolicy::RESULT_CLOSED_WITHOUT_BATTLE_UI);
+
+    if (lifecycle_action == H3AutoPolicy::RESULT_KEEP_AND_REBIND) {
         WriteLog("[Life] 取消/重打：保留 5 套方案并重绑跟踪。");
         s_saw_cpresult = false;
         s_result_accept_armed = false;
@@ -1907,7 +1920,7 @@ static void CheckBattleResultLifecycle_()
         return;
     }
 
-    if (s_result_accept_armed || !s_result_cancel_armed) {
+    if (lifecycle_action == H3AutoPolicy::RESULT_CLEAR_SETTINGS) {
         // 点了确定，或原版无取消按钮时默认视为接受。
         WriteLog("[Life] 接受战斗结果：清除设置。 accept=%d cancel=%d battle_ui=%d",
             s_result_accept_armed ? 1 : 0,
@@ -2361,20 +2374,10 @@ static void HidePanelForPick_()
 
 static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Hero* hero)
 {
-    if (stack.numberAlive <= 0)
-        return false;
-
-    switch (stack.type) {
-    case eCreature::AMMO_CART:
-        // 弹药车永远排除。
-        return false;
-    case eCreature::CATAPULT:
-        // 投石车仅在英雄掌握弹道术时显示。
-        return hero && hero->secSkill[eSecondary::BALLISTICS] > 0;
-    default:
-        // 急救帐篷对齐弩车：始终可进面板；弩车/箭塔/普通部队全部保留。
-        return true;
-    }
+    const bool has_ballistics = hero
+        && hero->secSkill[eSecondary::BALLISTICS] > 0;
+    return H3AutoPolicy::IsConfigurablePanelStack(
+        stack.type, stack.numberAlive, has_ballistics);
 }
 
 static bool StackIsRanged_(const H3CombatCreature& stack)

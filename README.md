@@ -27,6 +27,17 @@
 
 输出：`Release\H3Auto.dll`
 
+## 单元测试
+
+纯策略核心位于 `modules/PolicyCore.hpp`，生产插件和 `tests/PolicyCoreTests.cpp` 共用，不依赖游戏进程。
+
+```powershell
+.\tests\build-tests.ps1
+.\Release\tests\PolicyCoreTests.exe
+```
+
+覆盖：战争机器技能分支、面板准入、远程/急救独立选择器、候选评分、非法行动规范化、旧施法槽兼容、结果窗接受/取消生命周期。
+
 ## 部署
 
 ```powershell

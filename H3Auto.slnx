@@ -4,4 +4,5 @@
     <Platform Name="Win32" />
   </Configurations>
   <Project Path="H3Auto.vcxproj" Id="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" />
+  <Project Path="tests\PolicyCoreTests.vcxproj" Id="B2C3D4E5-F607-890A-BCDE-F12345678901" />
 </Solution>
