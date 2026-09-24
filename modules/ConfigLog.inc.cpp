@@ -7,6 +7,7 @@ static AutoStackRule MakeDefaultRule_()
     return H3AutoPolicy::MakeDefaultRule();
 }
 // 五套仅驻留内存的已确认方案；默认全为手动。
+// 首动保活字段（protectEnable/protectRatioX100）在 AutoStackRule 内随方案走。
 AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;
 

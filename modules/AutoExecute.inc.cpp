@@ -50,6 +50,8 @@ static struct {
 struct StackTrackEntry {
     bool  bound;         // 本场是否已绑定
     bool  alive;         // 当前是否存活
+    H3AutoPolicy::StableStackIdentity identity; // 跨重打配置身份
+    int   attempt_id;    // 本次战场初始化代次
     int   side;          // 0/1
     int   slot;          // 0..20
     int   creature_id;   // 绑定身份
@@ -64,6 +66,10 @@ struct StackTrackEntry {
 static StackTrackEntry g_stack_track[21] = {};
 static int  g_track_side = -1;
 static bool g_track_active = false;
+static int  g_battle_attempt_id = 0;
+static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
+// 首动保活：已判定过的战斗回合号（-1=尚未判定本回合）。
+static int  g_protect_checked_turn = -1;
 
 static int ResolveHumanSide_(_BattleMgr_* mgr)
 {
@@ -87,6 +93,37 @@ static void ClearStackTracking_()
     g_track_active = false;
 }
 
+static void BuildStableIdentitiesFromBattle_(_BattleMgr_* mgr, int side,
+    H3AutoPolicy::StableStackIdentity out[21])
+{
+    if (!out) return;
+    memset(out, 0, sizeof(H3AutoPolicy::StableStackIdentity) * 21);
+    if (!mgr || side < 0 || side > 1) return;
+
+    int occurrences[5] = {};
+    for (int i = 0; i < 21; ++i) {
+        _BattleStack_* s = &mgr->stack[side][i];
+        if (s->creature_id < 0) continue;
+        if (s->count_at_start <= 0 && s->count_current <= 0) continue;
+
+        int occurrence = 0;
+        if (H3AutoPolicy::IsWarMachineType(s->creature_id)) {
+            int kind = 0;
+            switch (s->creature_id) {
+            case H3AutoPolicy::CREATURE_CATAPULT:       kind = 0; break;
+            case H3AutoPolicy::CREATURE_BALLISTA:       kind = 1; break;
+            case H3AutoPolicy::CREATURE_FIRST_AID_TENT: kind = 2; break;
+            case H3AutoPolicy::CREATURE_AMMO_CART:      kind = 3; break;
+            case H3AutoPolicy::CREATURE_ARROW_TOWER:    kind = 4; break;
+            default: break;
+            }
+            occurrence = occurrences[kind]++;
+        }
+        out[i] = H3AutoPolicy::MakeStableStackIdentity(side,
+            s->source_army_slot, s->creature_id, occurrence);
+    }
+}
+
 // 从当前战场绑定人类侧所有“开战时存在”的部队身份。
 static void BindStackTrackingFromBattle_()
 {
@@ -103,6 +140,9 @@ static void BindStackTrackingFromBattle_()
         return;
     }
 
+    H3AutoPolicy::StableStackIdentity current_identities[21] = {};
+    BuildStableIdentitiesFromBattle_(mgr, side, current_identities);
+
     int bound = 0;
     int configured_action = 0;
     int configured_spell = 0;
@@ -111,9 +151,12 @@ static void BindStackTrackingFromBattle_()
         // 本场从未上场的空槽跳过。
         if (s->count_at_start <= 0 && s->count_current <= 0) continue;
         if (s->creature_id < 0) continue;
+        if (current_identities[i].kind == H3AutoPolicy::STACK_ID_NONE) continue;
 
         StackTrackEntry& t = g_stack_track[i];
         t.bound = true;
+        t.identity = current_identities[i];
+        t.attempt_id = g_battle_attempt_id;
         t.side = side;
         t.slot = i;
         t.creature_id = s->creature_id;
@@ -130,8 +173,9 @@ static void BindStackTrackingFromBattle_()
         if (g_active_rules[i].spellSlotCount > 0)
             ++configured_spell;
 
-        WriteLog("[Track] bind slot=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d spells=%d first=%d",
-            i, t.creature_id, t.hex, t.alive ? 1 : 0,
+        WriteLog("[Track] bind attempt=%d slot=%d source=%d idkind=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d spells=%d first=%d",
+            t.attempt_id, i, s->source_army_slot, (int)t.identity.kind,
+            t.creature_id, t.hex, t.alive ? 1 : 0,
             t.count_alive, t.count_start, (int)g_active_rules[i].action,
             (int)g_active_rules[i].spellSlotCount,
             (g_active_rules[i].spellSlotCount > 0)
@@ -152,12 +196,17 @@ static void UpdateStackTracking_()
     _BattleMgr_* mgr = o_BattleMgr;
     if (!mgr) return;
 
+    H3AutoPolicy::StableStackIdentity current_identities[21] = {};
+    BuildStableIdentitiesFromBattle_(mgr, g_track_side, current_identities);
+
     for (int i = 0; i < 21; ++i) {
         StackTrackEntry& t = g_stack_track[i];
         if (!t.bound) continue;
 
         _BattleStack_* s = &mgr->stack[t.side][i];
-        if (s->creature_id != t.creature_id) {
+        if (t.attempt_id != g_battle_attempt_id
+            || !H3AutoPolicy::StableStackIdentityEquals(
+                t.identity, current_identities[i])) {
             // 槽位被复用/清空：本绑定失效。
             if (t.alive) {
                 WriteLog("[Track] identity lost slot=%d expect=0x%X got=0x%X",
@@ -203,8 +252,13 @@ static bool ActiveStackMatchesTrack_(_BattleStack_* self)
     if (idx < 0 || idx >= 21) return false;
     const StackTrackEntry& t = g_stack_track[idx];
     if (!t.bound || !t.alive) return false;
+    if (t.attempt_id != g_battle_attempt_id) return false;
     if (self->def_group_ix != t.side) return false;
-    if (self->creature_id != t.creature_id) return false;
+    H3AutoPolicy::StableStackIdentity current_identities[21] = {};
+    BuildStableIdentitiesFromBattle_(o_BattleMgr, t.side, current_identities);
+    if (!H3AutoPolicy::StableStackIdentityEquals(
+            t.identity, current_identities[idx]))
+        return false;
     if (self->count_current <= 0) return false;
     return true;
 }
@@ -520,6 +574,7 @@ void ResetAutoState()
     g_auto_state.spell_casted_before = 0;
     g_auto_state.spell_waiting = false;
     g_auto_state.battle_manual = false;
+    g_protect_checked_turn = -1;   // 战斗状态重置后重新判定首动保活
     ClearOneShotManual_();
     g_auto_state.prev_toggle_down = false;
     g_auto_state.prev_oneshot_down = false;
@@ -539,23 +594,38 @@ void OnBattleResultAccepted()
     WriteLog("[Life] battle result accepted: profiles+runtime cleared");
 }
 
-// 取消重打后战场回来：若仍有生效规则则重新绑定跟踪表。
+// 取消重打后战场回来：按稳定身份重排方案、清空本轮状态并强制重绑。
 void EnsureStackTrackingBound()
 {
-    if (g_track_active) {
-        UpdateStackTracking_();
-        return;
-    }
-    bool any = false;
-    for (int i = 0; i < 21; ++i) {
-        if (g_active_rules[i].action != AA_MANUAL
-            || g_active_rules[i].spellSlotCount > 0) {
-            any = true;
-            break;
+    _BattleMgr_* mgr = o_BattleMgr;
+    const int side = ResolveHumanSide_(mgr);
+    if (!mgr || side < 0 || side > 1) return;
+
+    H3AutoPolicy::StableStackIdentity current_identities[21] = {};
+    int previous_slot_for_current[21] = {};
+    BuildStableIdentitiesFromBattle_(mgr, side, current_identities);
+    H3AutoPolicy::BuildStableStackSlotRemap(g_rule_identities, 21,
+        current_identities, 21, previous_slot_for_current);
+
+    AutoStackRule remapped[5][21] = {};
+    const AutoStackRule default_rule = H3AutoPolicy::MakeDefaultRule();
+    for (int p = 0; p < 5; ++p) {
+        for (int current_slot = 0; current_slot < 21; ++current_slot) {
+            const int previous_slot = previous_slot_for_current[current_slot];
+            remapped[p][current_slot] = previous_slot >= 0
+                ? g_profiles[p][previous_slot] : default_rule;
         }
     }
-    if (any)
-        BindStackTrackingFromBattle_();
+    memcpy(g_profiles, remapped, sizeof(g_profiles));
+    memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
+    memcpy(g_rule_identities, current_identities, sizeof(g_rule_identities));
+    // 首动保活字段在 AutoStackRule 内，随槽位规则整体重排，无单独处理。
+
+    ++g_battle_attempt_id;
+    ResetAutoState();
+    BindStackTrackingFromBattle_();
+    WriteLog("[Life] retry rebound attempt=%d side=%d with stable identity remap",
+        g_battle_attempt_id, side);
 }
 
 static void ClearSpellWait_()
@@ -708,6 +778,108 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
     return hero->spell_points;
 }
 
+// ==== 首动保活（§3.1.1） ====
+// 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历勾选了
+// 首动保活的己方部队，当前总血量严格低于 可恢复量×(倍率/100) 的取血量
+// 最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，直接 CastSpell 施放。
+// 每回合只判一次（成败不重试）；部队意外全灭不触发；英雄本回合已施法
+// 跳过；不占快捷施法、不推进任何部队的循环施法游标。
+
+// 设置面板提交后调用：作废已判定标记，当前/下一回合重新判定。
+void SyncActiveProtect()
+{
+    if (g_protect_checked_turn != -1) {
+        g_protect_checked_turn = -1;
+        WriteLog("[Protect] settings committed; player turn re-checks");
+    }
+}
+
+// 战斗回合号：H3CombatManager::turn（tacticsPhase 之后，H3API.hpp:19445）。
+// _BattleMgr_（Compat）没有该字段，须走 H3CombatManager::Get()。
+static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
+{
+    if (!mgr) return -1;
+    __try {
+        if (H3CombatManager* cm = H3CombatManager::Get())
+            return cm->turn;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return -1;
+}
+
+static bool TryProtectCast_(_BattleMgr_* mgr)
+{
+    const int turn = GetCurrentBattleTurn_(mgr);
+    if (turn < 0) return false;
+    if (turn == g_protect_checked_turn) return false;
+    g_protect_checked_turn = turn;          // 本回合只判这一次
+
+    const int side = ResolveHumanSide_(mgr);
+    if (side < 0 || side > 1) return false;
+    if (GetHeroCasted_(mgr, side)) {
+        WriteLog("[Protect] turn=%d hero already casted; skip", turn);
+        return false;
+    }
+
+    H3CombatManager* cm = H3CombatManager::Get();
+    if (!cm) return false;
+    H3Hero* hero = reinterpret_cast<H3Hero*>(mgr->hero[side]);
+    if (!hero) return false;
+    // 复活/聚灵固定耗魔 10（SoD，不随等级变化）。
+    if (GetHeroMana_(mgr, side) < 10) {
+        WriteLog("[Protect] turn=%d mana<10; skip", turn);
+        return false;
+    }
+    const int spell_power = cm->heroSpellPower[side];
+
+    // 遍历勾选槽，取满足条件且当前总血量最低的一支。
+    int best_slot = -1, best_remaining = 0, best_spell = 0, best_exp = 0;
+    for (int slot = 0; slot < 21; ++slot) {
+        const AutoStackRule& rule = g_active_rules[slot];
+        if (!rule.protectEnable) continue;
+
+        const StackTrackEntry& te = g_stack_track[slot];
+        if (!te.bound || !te.alive || te.side != side) continue;
+        _BattleStack_* st = &mgr->stack[side][slot];
+        if (!st || st->count_current <= 0) continue;   // 意外全灭不触发
+
+        // 总血量口径与急救“失血数值”互为倒数：存活数×满血 − 顶层已损。
+        // 满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
+        H3AutoPolicy::TargetCandidate cand = {};
+        cand.count_current = st->count_current;
+        cand.count_at_start = st->count_at_start;
+        cand.hit_points     = st->creature.hit_points;
+        cand.lost_hp        = st->lost_hp;
+        const int remaining = H3AutoPolicy::StackRemainingHp(cand);
+
+        // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
+        const int spell_id = P_CreatureInformation[st->creature_id].undead
+            ? 39 : 38;
+        const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
+        if (expertise <= 0) continue;                   // 没学该法术
+        const int restorable =
+            H3AutoPolicy::ResurrectionRestoreHp(expertise, spell_power);
+
+        if (!H3AutoPolicy::ProtectShouldCast(true, rule.protectRatioX100,
+                restorable, st->count_current, remaining))
+            continue;
+        if (best_slot < 0 || remaining < best_remaining) {
+            best_slot = slot;
+            best_remaining = remaining;
+            best_spell = spell_id;
+            best_exp = expertise;
+        }
+    }
+    if (best_slot < 0) return false;
+
+    _BattleStack_* st = &mgr->stack[side][best_slot];
+    WriteLog("[Protect] turn=%d slot=%d cid=0x%X hp=%d spell=%d exp=%d; casting",
+        turn, best_slot, st->creature_id, best_remaining, best_spell, best_exp);
+    // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
+    cm->CastSpell(best_spell, st->hex_ix, 0, -1, best_exp, spell_power);
+    return true;
+}
+
+
 static int GetHeroCasted_(_BattleMgr_* mgr, int side)
 {
     if (!mgr || side < 0 || side > 1) return 0;
@@ -778,6 +950,14 @@ static bool HeroHasSkill(_BattleMgr_* mgr, int skill_index)
     return hero->second_skill[skill_index] > 0;
 }
 
+static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
+{
+    return H3AutoPolicy::CanYieldFailedActionToPlayer(creature_id,
+        HeroHasSkill(mgr, SK_BALLISTICS),
+        HeroHasSkill(mgr, SK_ARTILLERY),
+        HeroHasSkill(mgr, SK_FIRST_AID));
+}
+
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21])
 {
@@ -786,6 +966,9 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21])
     memcpy(g_profiles, rules, sizeof(g_profiles));
     g_active_profile = active_profile;
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
+    const int side = ResolveHumanSide_(o_BattleMgr);
+    BuildStableIdentitiesFromBattle_(o_BattleMgr, side, g_rule_identities);
+    if (g_battle_attempt_id <= 0) g_battle_attempt_id = 1;
     int spell_rules = 0;
     int action_rules = 0;
     for (int i = 0; i < 21; ++i) {
@@ -944,10 +1127,40 @@ static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStack
     return true;
 }
 
+// 判断原版是否认为当前活动部队可以走到目标 hex。
+// FUN_00475DC0 是战场鼠标悬停时使用的原版判定：它会按当前活动部队、
+// 障碍物、双格体型和本回合移动力计算目标状态，并刷新 accessibleSquares2。
+// 返回 1/2 表示普通移动光标；其它值（尤其 0）都视为本次不能移动。
+// 这里宁可放弃自动动作，也不能把一个已知不可达的目标写入 action。
+static bool IsMoveTargetReachable_(_BattleMgr_* mgr, _BattleStack_* self, int hex)
+{
+    if (!mgr || !self || hex < 1 || hex > 185) return false;
+
+    __try {
+        H3CombatManager* cm = H3CombatManager::Get();
+        if (!cm) return false;
+        // 原版判定函数从 manager->activeStack 取当前部队，不能拿它去
+        // 验证另一支部队，否则会把别人的可达性误套到当前配置上。
+        if (cm->activeStack != reinterpret_cast<H3CombatCreature*>(self))
+            return false;
+
+        const int move_type = THISCALL_2(int, 0x475DC0, mgr, hex);
+        const int access = static_cast<int>(cm->accessibleSquares2[hex]);
+        const bool reachable = (move_type == 1 || move_type == 2)
+            && (access & 2) != 0; // eSquareAccess::CAN_REACH
+        WriteLog("[Auto] move reachability slot=%d hex=%d type=%d reachable=%d access=%d",
+            self->army_slot_ix, hex, move_type, reachable ? 1 : 0, access);
+        return reachable;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Auto] move reachability exception slot=%d hex=%d",
+            self->army_slot_ix, hex);
+        return false;
+    }
+}
+
 // 提交移动：action=2, actionTarget=目标 hex。
 // 循环移动：按 moveWaypoints 有序巡逻，逐点走向下一个路径点，到达后推进游标（末点回首点）。
 // 无路径点时回退到旧的单目标移动（固定位置 / 靠近目标部队）。
-// 注：可达性未做完整原版寻路校验。
 static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule, StackTrackEntry& runtime)
 {
@@ -962,7 +1175,8 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     }
 
     if (n > 0) {
-        // 规范化运行时游标。
+        // 规范化运行时游标，但先只使用局部候选值；只有动作成功写入后才提交，
+        // 这样“站在当前点、下一点不可达”时不会提前推进移动游标。
         int cur = runtime.move_cursor;
         if (cur < 0 || cur >= n) cur = 0;
 
@@ -975,12 +1189,17 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
             cur = (cur + 1) % n;
             ++guard;
         }
-        runtime.move_cursor = cur;
 
         int hex = wps[cur];
         if (hex == self->hex_ix) return false; // 所有点都在脚下
+        if (!IsMoveTargetReachable_(mgr, self, hex)) {
+            WriteLog("[Auto] WALK target unreachable slot=%d hex=%d cursor=%d/%d; no cursor advance",
+                self->army_slot_ix, hex, cur, n);
+            return false;
+        }
         if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
             return false;
+        runtime.move_cursor = cur;
         WriteLog("[Auto] submit WALK(patrol) slot=%d -> hex=%d cursor=%d/%d",
             self->army_slot_ix, hex, cur, n);
         return true;
@@ -990,6 +1209,11 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     int hex = ResolvePositionTarget_(mgr, self, rule);
     if (hex < 1 || hex > 185) return false;
     if (hex == self->hex_ix) return false;
+    if (!IsMoveTargetReachable_(mgr, self, hex)) {
+        WriteLog("[Auto] WALK target unreachable slot=%d hex=%d; player/fallback path",
+            self->army_slot_ix, hex);
+        return false;
+    }
     if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
         return false;
     WriteLog("[Auto] submit WALK slot=%d -> hex=%d",
@@ -1266,6 +1490,14 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         WriteLog("[Auto] action consumed wake slot=%d action=%d",
             self->army_slot_ix, mgr->action);
         g_auto_state.action_wake_stack = nullptr;
+    } else if (!rule.allowDefendFallback
+        && CanYieldFailedActionToPlayer_(mgr, self->creature_id)) {
+        // 不允许降级且配置动作无法落地：本回合停止插件重试，保留原版
+        // 人工输入路径。战争机器须先通过对应技能资格判断。
+        g_auto_state.last_handled_stack = self;
+        g_auto_state.action_wake_stack = nullptr;
+        WriteLog("[Auto] configured action failed; yield to player slot=%d cid=0x%X action=%d",
+            self->army_slot_ix, self->creature_id, (int)rule.action);
     }
     return ok;
 }
@@ -1396,6 +1628,9 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         return orig;            // 非“交给玩家”路径：不介入
     __try {
         PollControlHotkeys_(This);
+        // 每回合第一次控制权交给玩家（含本插件接管）：判一次回合首动施法。
+        // 仅在 orig==0 路径判：蛊惑/敌方回合本就不交玩家，语义自动满足。
+        TryProtectCast_(This);
         if (This && This->active_stack) {
             if (g_auto_state.last_handled_stack
                 && g_auto_state.last_handled_stack != This->active_stack)

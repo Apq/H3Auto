@@ -18,8 +18,8 @@ static const int PANEL_H    = 480;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
 static const int CELL_W     = 568; // 横向占满金框宽（右侧留滚动条）
-// 金框恢复旧尺寸 624×342；上下各留 8px 内边距后，
-// SCROLL_H = 342-16 = 326 = CELL_H + 2*(CELL_H-2) → CELL_H = 110。
+// 卡片恢复旧版高度 110：金框 624×342，底边 y=414，表格上方不再留设置行。
+// SCROLL_H = CELL_H + 2*(CELL_H-2) = 110 + 2*108 = 326。
 static const int CELL_H     = 110;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
@@ -55,7 +55,7 @@ static const int HELP_BTN_SIZE = 24;
 static const int HELP_BTN_X = PANEL_W - HELP_BTN_SIZE - 20; // 再左收 1px
 static const int HELP_BTN_Y = 20; // 再下收 2px
 
-// 网格金框恢复旧尺寸 624×342，框住 3 行卡片 + 右侧滚动条。
+// 网格金框：宽 624，高 342（底边 y=414）。
 static const int GRID_FRAME_W = 624;
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 29;
@@ -118,7 +118,11 @@ static struct Panel {
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS];
     int selected_profile;
     int pressed_profile;
-    int count;                 // 可配置部队总数（可大于可见行）
+    // 卡片内「首动保活」倍率录入状态（per-cell）
+    int  ratio_edit_cell;     // 录入中的可见卡片索引，-1=无
+    char ratio_buf[16];       // 录入串（十进制，支持小数）
+    int  ratio_blink;         // 录入光标闪烁计数
+    int   count;                 // 可配置部队总数（可大于可见行）
     CellData items[MAX_STACKS]; // 全部部队快照；可见行从这里按 scroll_row 绑定
     int scroll_row;
     bool scroll_dragging;
@@ -173,6 +177,14 @@ static int s_spell_pick_slot = -1;
 static bool s_help_modal_open = false;
 static HHOOK s_kb_hook = nullptr;
 
+// ===== 首动保活：卡片内倍率录入 =====
+// 编辑对象是当前方案草稿里该部队的 protectRatioX100（定点，1%=100）。
+// 录入串十进制支持小数；提交时夹到 0..1000000（0..10000.00%）。
+static void RatioEditStart_(int cell_ix);
+static void RatioEditDigit_(int key);   // >=0 数字；-1 退格；-2 小数点
+static void RatioEditCommit_();
+static void RatioEditCancel_();
+
 // 设置面板存活期间（含隐藏拾取态）拦截 0-9/小键盘，避免原版快捷施法抢键。
 static bool IsDigitKey_(WPARAM vk)
 {
@@ -197,7 +209,9 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             if (s_help_modal_open) {
                 s_help_modal_open = false;
                 DrawPanelToBuffer_();
-            } else if (s_spell_pick_cell >= 0)
+            } else if (s_p.ratio_edit_cell >= 0)
+                RatioEditCancel_();
+            else if (s_spell_pick_cell >= 0)
                 EndSpellPick_();
             else if (!s_panel_hidden_for_pick)
                 CloseSettingsPanel();
@@ -206,12 +220,29 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         // 帮助/快捷键模态框打开时：Enter 不提交设置面板，仅吞掉。
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && s_spell_pick_cell < 0 && !s_help_modal_open) {
-            CommitAndCloseSettingsPanel_();
+            if (s_p.ratio_edit_cell >= 0) RatioEditCommit_();
+            else CommitAndCloseSettingsPanel_();
             return 1;  // swallow
         }
         if (wParam == VK_RETURN) return 1;
+        // 倍率录入中：数字/小数点/退格由我们消费。
+        if (s_p.ratio_edit_cell >= 0) {
+            const int d = DigitFromVk_(wParam);
+            if (IsDigitKey_(wParam)) {
+                if (d >= 0) RatioEditDigit_(d);
+                return 1;
+            }
+            if (wParam == VK_BACK) {
+                RatioEditDigit_(-1);
+                return 1;
+            }
+            if (wParam == VK_OEM_PERIOD || wParam == VK_DECIMAL) {
+                RatioEditDigit_(-2);    // 小数点
+                return 1;
+            }
+        }
         if (IsDigitKey_(wParam)) {
-            // 循环施法录入中：数字键由我们消费；其它时候也吞掉，防止快捷施法。
+            // 录入中：数字键由我们消费；其它时候也吞掉，防止快捷施法。
             if (s_spell_pick_cell >= 0) {
                 const int d = DigitFromVk_(wParam);
                 if (d >= 0) CommitSpellSlotPick_(d);
@@ -311,6 +342,10 @@ static H3AutoPolicy::ResultLifecycleState s_result_lifecycle = {};
 static bool s_saw_cpresult = false;
 static bool s_result_accept_armed = false;
 static bool s_result_cancel_armed = false;
+// 未命中按钮时，结果窗消失后先给 BattleUI 留出恢复时间，避免取消重打
+// 的过渡空窗被当成接受结果。
+static DWORD s_result_closed_since = 0;
+static const DWORD RESULT_CLOSE_GRACE_MS = 1500;
 
 // 前向声明
 static void OpenSettingsPanel_();
@@ -475,10 +510,11 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
         && (raw_command == 4 || raw_command == 8 || raw_command == 16
             || raw_command == 64
             || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP))) {
-        // Item vProcessMsg receives the pre-translation mouse packet:
-        // command is WM-derived and coordinates are stored at +4/+8.
+        // H3Msg 的鼠标坐标在 position[0x10]/position[0x14]，不是
+        // subtype[0x04]/itemId[0x08]。后两者是按钮子类型和 item id；
+        // 误用它们会让右键删除命中错误的卡片/槽位，尤其表现为末尾槽删不掉。
         HandlePanelMouseMessage_(raw_command,
-            static_cast<int>(msg.subtype), msg.itemId);
+            static_cast<int>(msg.position.x), static_cast<int>(msg.position.y));
     }
     return panel_was_active ? msg.StopProcessing() : 0;
 }
@@ -1614,6 +1650,92 @@ static bool CommitSpellSlotPick_(int slot_value)
     return true;
 }
 
+// ===== 首动保活：卡片内倍率录入（per-cell） =====
+
+// 可见卡片索引 → 当前方案草稿规则（找不到返回 nullptr）。
+static AutoStackRule* RatioEditRule_(int cell_ix)
+{
+    if (!s_p.active || cell_ix < 0 || cell_ix >= CELL_COUNT) return nullptr;
+    CellControl* ctrl = &s_p.cells[cell_ix];
+    if (!ctrl->has_data) return nullptr;
+    const int slot = ctrl->data.army_slot_ix;
+    if (slot < 0 || slot >= MAX_STACKS) return nullptr;
+    if (s_p.selected_profile < 0 || s_p.selected_profile >= PROFILE_COUNT)
+        return nullptr;
+    return &s_p.draft_rules[s_p.selected_profile][slot];
+}
+
+static void RatioEditStart_(int cell_ix)
+{
+    AutoStackRule* rule = RatioEditRule_(cell_ix);
+    if (!rule) return;
+    if (s_p.ratio_edit_cell >= 0 && s_p.ratio_edit_cell != cell_ix)
+        RatioEditCommit_();
+    s_p.ratio_edit_cell = cell_ix;
+    _snprintf(s_p.ratio_buf, sizeof(s_p.ratio_buf), "%g",
+        rule->protectRatioX100 / 100.0);
+    s_p.ratio_buf[sizeof(s_p.ratio_buf) - 1] = 0;
+    DrawPanelToBuffer_();
+    WriteLog("[Panel] 倍率录入开始 cell=%d", cell_ix);
+}
+
+// key：>=0 数字；-1 退格；-2 小数点。
+static void RatioEditDigit_(int key)
+{
+    if (s_p.ratio_edit_cell < 0) return;
+    const int len = (int)strlen(s_p.ratio_buf);
+    if (key == -1) {
+        if (len > 0) s_p.ratio_buf[len - 1] = 0;
+    } else if (key == -2) {
+        if (!strchr(s_p.ratio_buf, '.') && len < (int)sizeof(s_p.ratio_buf) - 2) {
+            s_p.ratio_buf[len] = '.';
+            s_p.ratio_buf[len + 1] = 0;
+        }
+    } else if (key >= 0 && key <= 9) {
+        if (len < 9) {  // 足够表达 10000.00
+            s_p.ratio_buf[len] = (char)('0' + key);
+            s_p.ratio_buf[len + 1] = 0;
+        }
+    }
+    DrawPanelToBuffer_();
+}
+
+// 录入串 → X100 夹范围写回草稿与可见卡片；空串回默认 100。
+static void RatioEditCommit_()
+{
+    if (s_p.ratio_edit_cell < 0) return;
+    AutoStackRule* rule = RatioEditRule_(s_p.ratio_edit_cell);
+    if (rule) {
+        int x100 = PROTECT_RATIO_DEFAULT_X100;
+        if (s_p.ratio_buf[0] != 0) {
+            const double v = atof(s_p.ratio_buf);
+            if (v >= 0.0) {
+                x100 = (int)(v * 100.0 + 0.5);
+                if (x100 < PROTECT_RATIO_MIN_X100) x100 = PROTECT_RATIO_MIN_X100;
+                if (x100 > PROTECT_RATIO_MAX_X100) x100 = PROTECT_RATIO_MAX_X100;
+            }
+        }
+        rule->protectRatioX100 = x100;
+        CellControl* ctrl = &s_p.cells[s_p.ratio_edit_cell];
+        ctrl->data.rule.protectRatioX100 = x100;
+        ctrl->dirty = true;
+        WriteLog("[Panel] 倍率录入提交 cell=%d ratio_x100=%d",
+            s_p.ratio_edit_cell, x100);
+    }
+    s_p.ratio_edit_cell = -1;
+    s_p.ratio_buf[0] = 0;
+    DrawPanelToBuffer_();
+}
+
+static void RatioEditCancel_()
+{
+    if (s_p.ratio_edit_cell < 0) return;
+    WriteLog("[Panel] 倍率录入取消 cell=%d", s_p.ratio_edit_cell);
+    s_p.ratio_edit_cell = -1;
+    s_p.ratio_buf[0] = 0;
+    DrawPanelToBuffer_();
+}
+
 // 结束近战选格：恢复面板输入/绘制（屏障始终保留，无需重装）。
 static void EndMeleePick_()
 {
@@ -1868,6 +1990,7 @@ static void CheckBattleResultLifecycle_()
     const bool battle_ui_exists = combat_dlg != nullptr;
 
     if (result_visible) {
+        s_result_closed_since = 0;
         if (!s_saw_cpresult) {
             s_saw_cpresult = true;
             H3AutoPolicy::ApplyResultLifecycle(
@@ -1904,6 +2027,16 @@ static void CheckBattleResultLifecycle_()
     // 结果窗刚消失。
     if (!s_saw_cpresult) return;
 
+    if (battle_ui_exists) {
+        s_result_closed_since = 0;
+    } else if (!s_result_accept_armed && !s_result_cancel_armed) {
+        const DWORD now = GetTickCount();
+        if (s_result_closed_since == 0)
+            s_result_closed_since = now;
+        if (now - s_result_closed_since < RESULT_CLOSE_GRACE_MS)
+            return;
+    }
+
     const H3AutoPolicy::ResultLifecycleAction lifecycle_action =
         H3AutoPolicy::ApplyResultLifecycle(
             &s_result_lifecycle,
@@ -1915,6 +2048,7 @@ static void CheckBattleResultLifecycle_()
         s_saw_cpresult = false;
         s_result_accept_armed = false;
         s_result_cancel_armed = false;
+        s_result_closed_since = 0;
         s_panel_popup_done = false;
         EnsureStackTrackingBound();
         return;
@@ -1929,6 +2063,7 @@ static void CheckBattleResultLifecycle_()
         s_saw_cpresult = false;
         s_result_accept_armed = false;
         s_result_cancel_armed = false;
+        s_result_closed_since = 0;
         s_panel_popup_done = false;
         OnBattleResultAccepted();
         return;
@@ -2104,7 +2239,7 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 280;
+    const int h = 308;
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -2157,11 +2292,12 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         x + 16, y + 12, w - 32, 26,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 
-    // 极简 6 条 + 大行距，避免密麻。
+    // 极简 7 条 + 大行距，避免密麻。
     static const char* kHelpLines[] = {
         "打开设置窗口：右键点击“自动战斗”",
         "方案：5 套本场有效，确定才保存",
         "施法/近战/移动：点 ＋ 后按提示设置",
+        "首动保活：卡片勾选，血量低自动复活/聚灵",
         "删除：槽位上右键",
         "热键：F11 全手动 · 左Ctrl 单次接管",
         "设置有效期：取消重打保留，接受结果清除",
@@ -2208,6 +2344,7 @@ static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int*
 
 static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
 {
+    // 循环施法录入（s_spell_pick_cell）模态框。
     if (!scr || s_spell_pick_cell < 0) return;
     int x = 0, y = 0, w = 0, h = 0;
     GetSpellKeyModalRect_(&x, &y, &w, &h);
@@ -2224,11 +2361,12 @@ static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
     H3Font* title_font = GetPanelFont();
     H3Font* small_font = GetSmallFont();
     char slot_text[64] = {};
-    _snprintf(slot_text, sizeof(slot_text), "正在设置循环施法第 %d 槽",
-        s_spell_pick_slot + 1);
-    DrawTxt(scr, title_font, "设置快捷施法键",
+    DrawTxt(scr, title_font, "\xe8\xae\xbe\xe7\xbd\xae\xe5\xbf\xab\xe6\x8d\xb7\xe6\x96\xbd\xe6\xb3\x95\xe9\x94\xae", // 设置快捷施法键
         x + 16, y + 14, w - 32, 28,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+    _snprintf(slot_text, sizeof(slot_text),
+        "\xe6\xad\xa3\xe5\x9c\xa8\xe8\xae\xbe\xe7\xbd\xae\xe5\xbe\xaa\xe7\x8e\xaf\xe6\x96\xbd\xe6\xb3\x95\xe7\xac\xac %d \xe6\xa7\xbd", // 正在设置循环施法第 %d 槽
+        s_spell_pick_slot + 1);
     DrawTxt(scr, small_font, slot_text,
         x + 16, y + 48, w - 32, 20,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
@@ -2273,11 +2411,16 @@ static void DrawPanelToBuffer_()
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
 
-    // 第一趟：画所有格子本体
+    // 第一趟：画所有格子本体（倍率录入中的卡片注入录入串显示）
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;
         CellControl* ctrl = &s_p.cells[i];
+        const bool editing = (s_p.ratio_edit_cell == i);
+        // 录入串指针不变、内容每键都变；不标脏会一直贴旧卡片缓存。
+        if (editing || ctrl->protect_edit_text)
+            ctrl->dirty = true;
+        ctrl->protect_edit_text = editing ? s_p.ratio_buf : nullptr;
         if (ctrl->dirty || !ctrl->buffer)
             CellControl_DrawCollapsed(ctrl);
         if (ctrl->buffer && ctrl->buffer->buffer) {
@@ -2497,6 +2640,8 @@ void OpenSettingsPanel_()
     s_p.hover_idx = -1;
     s_p.pressed_button = 0;
     s_p.pressed_profile = -1;
+    s_p.ratio_edit_cell = -1;
+    s_p.ratio_buf[0] = 0;
     s_p.selected_profile = g_active_profile;
     if (s_p.selected_profile < 0 || s_p.selected_profile >= PROFILE_COUNT)
         s_p.selected_profile = 0;
@@ -2568,8 +2713,12 @@ static void CommitAndCloseSettingsPanel_()
     if (!s_p.active) return;
 
     // 保存当前表格到当前方案副本，再一次性提交全部5套。
+    // 首动保活字段在 AutoStackRule 内，随 draft_rules 一起提交。
+    if (s_p.ratio_edit_cell >= 0)
+        RatioEditCommit_();
     SaveCurrentCellsToDraft_();
     CommitProfiles(s_p.selected_profile, s_p.draft_rules);
+    SyncActiveProtect();
     CloseSettingsPanel();
 }
 
@@ -2588,6 +2737,8 @@ void CloseSettingsPanel()
     s_move_pick_wp = -1;
     s_spell_pick_cell = -1;
     s_spell_pick_slot = -1;
+    s_p.ratio_edit_cell = -1;
+    s_p.ratio_buf[0] = 0;
     s_help_modal_open = false;
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
@@ -2924,6 +3075,27 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     }
 
     if (raw_command == 16) {
+        // 松开点在倍率框外：提交当前录入。点在框内由卡片的录入请求接管。
+        if (s_p.ratio_edit_cell >= 0) {
+            bool on_ratio = false;
+            const int first_item = s_p.scroll_row * COLS;
+            for (int i = 0; i < CELL_COUNT; ++i) {
+                const int item_index = first_item + i;
+                if (item_index >= s_p.count) break;
+                RECT cRc = CellRect(i);
+                if (!PointInRect_(px, py, cRc.left, cRc.top, CELL_W, CELL_H))
+                    continue;
+                const int lx = px - cRc.left;
+                const int ly = py - cRc.top;
+                if (ly >= CC_PROTECT_Y && ly < CC_PROTECT_Y + CC_ROW_H
+                    && lx >= CC_PROTECT_RATIO_X
+                    && lx < CC_PROTECT_RATIO_X + CC_PROTECT_RATIO_W)
+                    on_ratio = true;
+            }
+            if (!on_ratio)
+                RatioEditCommit_();
+        }
+
         const int pressed_profile = s_p.pressed_profile;
         s_p.pressed_profile = -1;
         if (pressed_profile >= 0 && pressed_profile < PROFILE_COUNT) {
@@ -3038,6 +3210,16 @@ static void HandlePanelInput_()
         previous_page_up_down = page_up_down;
         previous_page_down_down = page_down_down;
         return;
+    }
+
+    // 倍率录入的按键由 WH_KEYBOARD 钩子消费；这里只轮询卡片的录入请求。
+    // 轮询再处理数字键会和钩子各记一次，每个键变成两位。
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        if (s_p.cells[i].ratio_edit_request) {
+            s_p.cells[i].ratio_edit_request = 0;
+            if (i != s_p.ratio_edit_cell)
+                RatioEditStart_(i);
+        }
     }
 
     for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;

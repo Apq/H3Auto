@@ -39,7 +39,7 @@ struct CellData
 // ========================================================================
 
 static const int CC_CELL_W    = 568;
-// 金框 342 内刚好 3 行：CELL_H = (342-16+4)/3 = 110（上下各 8px 内边距）。
+// 卡片恢复旧版高度 110：表格上方不再放整行设置，首动保活行移入卡片底部。
 static const int CC_CELL_H    = 110;
 
 // 图标贴左上角。卡片金边约 2px，再留 3px 空隙 → 内容起点约 5。
@@ -53,7 +53,7 @@ static const int CC_ICON_FRAME_H = 66;
 
 static const int CC_LABEL_H  = 11;
 
-// 一行一格（宽格 568×110）横排布局：
+// 一行一格（宽格 568×99）横排布局：
 //   图标列（位置左下/数量右下） | 第二小列（仅够「行动前循环施法:」+ 行动/降级）
 //   | 第三小列（循环施法槽 + 选择器/近战/移动，吃掉剩余宽度）
 // 第二小列左缘贴图标金框右缘，留 4px 间距。
@@ -64,11 +64,24 @@ static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈192
 static const int CC_COL3_RIGHT = 560; // 卡片右内边距
 static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈368
 static const int CC_ROW_H    = 22;
-// 顶部循环施法行；原行动/目标两行整体下移，行间距略拉开适配 110 高。
-static const int CC_SPELL_Y  = 6;
-static const int CC_TOP_Y    = 36;  // 中行（行动/选择器/路径槽）
-static const int CC_BOT_Y    = 66;  // 下行（降级/阵营/路径槽）
+// 顶部循环施法行；行动/目标两行居中，底部加首动保活行，适配 110 高。
+static const int CC_SPELL_Y  = 5;
+static const int CC_TOP_Y    = 30;  // 中行（行动/选择器/路径槽）
+static const int CC_BOT_Y    = 54;  // 下行（降级/阵营/路径槽）
+static const int CC_PROTECT_Y = 78; // 底部行：首动保活（§8.7）
 static const int CC_CHECKBOX_H = 14;
+
+// 首动保活行布局（第三小列内）：复选框在文字前面，倍率数字框后缀 %。
+static const int CC_PROTECT_CB_X     = CC_COL3_X;          // 复选框
+static const int CC_PROTECT_CB_BOX   = 10;
+static const int CC_PROTECT_LABEL_X  = CC_COL3_X + 14;     // 「首动保活」
+static const int CC_PROTECT_LABEL_W  = 68;
+static const int CC_PROTECT_RLBL_X   = CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W + 8; // 「倍率」
+static const int CC_PROTECT_RLBL_W   = 34;
+static const int CC_PROTECT_RATIO_X  = CC_PROTECT_RLBL_X + CC_PROTECT_RLBL_W + 2;   // 数字框
+static const int CC_PROTECT_RATIO_W  = 60;
+static const int CC_PROTECT_PCT_X    = CC_PROTECT_RATIO_X + CC_PROTECT_RATIO_W + 4; // 「%」
+static const int CC_PROTECT_PCT_W    = 14;
 // 循环施法：标签占第二小列；槽位从第三小列起。
 // 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
@@ -130,6 +143,10 @@ struct CellControl
     // 循环施法录入请求：0=无，1..SPELL_SLOT_CAPACITY=待按数字键的槽索引+1。
     // 面板保持打开，仅支持按 1-9/0 写入同一数字（不再点选快捷施法栏）。
     int              spell_pick_request;
+    // 首动保活倍率录入请求：0=无，1=请求进入录入态（SettingsDlg 轮询接管键盘）。
+    int              ratio_edit_request;
+    // 录入中由 SettingsDlg 注入的显示串（十进制小数）；nullptr=显示规则当前值。
+    const char*      protect_edit_text;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 };
@@ -278,13 +295,7 @@ static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
 // 删除循环施法序列中的第 index 项并压紧。
 static bool CellControl_RemoveSpellSlot(AutoStackRule* rule, int index)
 {
-    if (!rule || index < 0 || index >= rule->spellSlotCount) return false;
-    for (int i = index; i + 1 < rule->spellSlotCount; ++i)
-        rule->spellSlots[i] = rule->spellSlots[i + 1];
-    rule->spellSlots[rule->spellSlotCount - 1] = -1;
-    --rule->spellSlotCount;
-    CellControl_NormalizeSpellSlots(rule);
-    return true;
+    return H3AutoPolicy::RemoveSpellSlot(rule, index);
 }
 
 // 删除循环移动路径点中的第 index 项并压紧。
@@ -425,6 +436,8 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->melee_pair_pick_request = 0;
     ctrl->move_path_pick_request = 0;
     ctrl->spell_pick_request = 0;
+    ctrl->ratio_edit_request = 0;
+    ctrl->protect_edit_text = nullptr;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -910,6 +923,61 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         }
     }
 
+    // ---- 底部行：首动保活（复选框在文字前面，倍率数字框后缀 %） ----
+    {
+        const bool enabled = rule.protectEnable != 0;
+
+        // 复选框（画法与「允许降级为防御」一致）
+        const int cb_x = CC_PROTECT_CB_X;
+        const int cb_y = CC_PROTECT_Y + (CC_ROW_H - CC_PROTECT_CB_BOX) / 2;
+        const int cb_box = CC_PROTECT_CB_BOX;
+        Fill(scr, cb_x, cb_y, cb_box, cb_box, 40, 28, 12);
+        scr->DrawFrame(cb_x, cb_y, cb_box, cb_box,
+            (BYTE)184, (BYTE)139, (BYTE)62);
+        if (enabled) {
+            Fill(scr, cb_x + 2, cb_y + 4, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 3, cb_y + 5, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 4, cb_y + 6, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 5, cb_y + 5, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 6, cb_y + 4, 2, 2, 235, 205, 116);
+            Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
+        }
+
+        CellControl_DrawText(scr, fntS, "首动保活",
+            CC_PROTECT_LABEL_X, CC_PROTECT_Y, CC_PROTECT_LABEL_W, CC_ROW_H,
+            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
+            eTextAlignment::MIDDLE_LEFT);
+
+        CellControl_DrawText(scr, fntS, "倍率",
+            CC_PROTECT_RLBL_X, CC_PROTECT_Y, CC_PROTECT_RLBL_W, CC_ROW_H,
+            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
+            eTextAlignment::MIDDLE_LEFT);
+
+        // 倍率数字框：录入中金色高亮；未勾选置灰不可点。
+        const bool editing = ctrl->protect_edit_text != nullptr;
+        CellControl_DrawButtonBg(scr, CC_PROTECT_RATIO_X, CC_PROTECT_Y,
+            CC_PROTECT_RATIO_W, CC_ROW_H, editing, false);
+        char ratio_buf[20] = {};
+        if (editing)
+            _snprintf(ratio_buf, sizeof(ratio_buf), "%s",
+                ctrl->protect_edit_text ? ctrl->protect_edit_text : "");
+        else if (rule.protectRatioX100 > 0)
+            _snprintf(ratio_buf, sizeof(ratio_buf), "%g",
+                rule.protectRatioX100 / 100.0);
+        else
+            _snprintf(ratio_buf, sizeof(ratio_buf), "0");
+        CellControl_DrawText(scr, fntS, ratio_buf,
+            CC_PROTECT_RATIO_X + 2, CC_PROTECT_Y, CC_PROTECT_RATIO_W - 4,
+            CC_ROW_H,
+            (INT32)(enabled ? eTextColor::GOLD : eTextColor::GRAY),
+            eTextAlignment::MIDDLE_CENTER);
+
+        CellControl_DrawText(scr, fntS, "%",
+            CC_PROTECT_PCT_X, CC_PROTECT_Y, CC_PROTECT_PCT_W, CC_ROW_H,
+            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
+            eTextAlignment::MIDDLE_LEFT);
+    }
+
     // ---- 位置/数量：第一小列左下角向上排（位置在下、数量在上），明确左对齐 ----
     // 放在图标列下方/旁侧左缘，避免宽列 + TextDraw 看起来像右对齐。
     const int meta_x = CC_ICON_X;
@@ -1233,6 +1301,8 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
+    CELL_HIT_PROTECT_CHECKBOX, // 首动保活复选框
+    CELL_HIT_PROTECT_RATIO,    // 首动保活倍率框
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
@@ -1341,6 +1411,17 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         }
     }
 
+    // 底部首动保活行：复选框恒可点；倍率框仅勾选后可点（录入请求转 SettingsDlg）。
+    if (local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H) {
+        if (local_x >= CC_PROTECT_CB_X
+            && local_x < CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W)
+            return CELL_HIT_PROTECT_CHECKBOX;
+        if (ctrl->data.rule.protectEnable
+            && local_x >= CC_PROTECT_RATIO_X
+            && local_x < CC_PROTECT_RATIO_X + CC_PROTECT_RATIO_W)
+            return CELL_HIT_PROTECT_RATIO;
+    }
+
     if (local_x >= CC_ICON_X && local_x < CC_ICON_X + CC_ICON_W
         && local_y >= CC_ICON_Y && local_y < CC_ICON_Y + CC_ICON_H + CC_LABEL_H)
         return CELL_HIT_ICON;
@@ -1429,6 +1510,22 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
+        if (hit == CELL_HIT_PROTECT_CHECKBOX) {
+            ctrl->data.rule.protectEnable =
+                ctrl->data.rule.protectEnable ? 0 : 1;
+            if (!ctrl->data.rule.protectEnable)
+                ctrl->ratio_edit_request = 0;
+            ctrl->expanded = CEX_NONE;
+            ctrl->dirty = true;
+            return true;
+        }
+        if (hit == CELL_HIT_PROTECT_RATIO) {
+            ctrl->expanded = CEX_NONE;
+            ctrl->spell_pick_request = 0;
+            ctrl->ratio_edit_request = 1;   // SettingsDlg 轮询接管键盘录入
+            ctrl->dirty = true;
+            return true;
+        }
         if (hit >= CELL_HIT_MELEE_PAIR_BASE
             && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY) {
             // 组合设置始终连续拾取：先站立格，再相邻攻击格。
@@ -1476,6 +1573,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         ctrl->spell_pick_request = 0;
         ctrl->move_path_pick_request = 0;
         ctrl->melee_pair_pick_request = 0;
+        ctrl->ratio_edit_request = 0;   // 右键不恢复默认，仅退出录入请求
 
         if (hit >= CELL_HIT_SPELL_BASE
             && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {

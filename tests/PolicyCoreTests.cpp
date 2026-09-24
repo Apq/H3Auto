@@ -166,6 +166,8 @@ void TestResultLifecycle()
         "result shown waits");
     Check(ApplyResultLifecycle(&state, RESULT_CANCEL_CLICKED) == RESULT_WAIT,
         "cancel click waits for result close");
+    Check(ApplyResultLifecycle(&state, RESULT_CLOSED_WITHOUT_BATTLE_UI)
+        == RESULT_WAIT, "cancel transition does not clear settings");
     Check(ApplyResultLifecycle(&state, RESULT_CLOSED_WITH_BATTLE_UI)
         == RESULT_KEEP_AND_REBIND, "cancel keeps settings and rebinds");
 
@@ -177,9 +179,75 @@ void TestResultLifecycle()
         == RESULT_CLEAR_SETTINGS, "accept clears settings");
 
     Check(ApplyResultLifecycle(&state, RESULT_SHOWN) == RESULT_WAIT,
+        "accept with transient battle UI starts");
+    Check(ApplyResultLifecycle(&state, RESULT_ACCEPT_CLICKED) == RESULT_WAIT,
+        "accept with transient battle UI is armed");
+    Check(ApplyResultLifecycle(&state, RESULT_CLOSED_WITH_BATTLE_UI)
+        == RESULT_CLEAR_SETTINGS, "explicit accept overrides transient battle UI");
+
+    Check(ApplyResultLifecycle(&state, RESULT_SHOWN) == RESULT_WAIT,
         "plain result shown waits");
     Check(ApplyResultLifecycle(&state, RESULT_CLOSED_WITHOUT_BATTLE_UI)
         == RESULT_CLEAR_SETTINGS, "plain result close clears settings");
+
+    Check(ApplyResultLifecycle(&state, RESULT_SHOWN) == RESULT_WAIT,
+        "retry without captured click starts");
+    Check(ApplyResultLifecycle(&state, RESULT_CLOSED_WITH_BATTLE_UI)
+        == RESULT_KEEP_AND_REBIND, "battle UI return identifies retry");
+}
+
+void TestStableStackIdentity()
+{
+    const StableStackIdentity army0 = MakeStableStackIdentity(0, 0, 10, 0);
+    const StableStackIdentity army6 = MakeStableStackIdentity(0, 6, 10, 0);
+    const StableStackIdentity ballista = MakeStableStackIdentity(
+        0, -1, CREATURE_BALLISTA, 0);
+    const StableStackIdentity tower1 = MakeStableStackIdentity(
+        0, -1, CREATURE_ARROW_TOWER, 1);
+    const StableStackIdentity summon = MakeStableStackIdentity(0, -1, 10, 0);
+
+    Check(army0.kind == STACK_ID_ARMY_SLOT && army0.value == 0,
+        "ordinary stack identity uses source army slot");
+    Check(!StableStackIdentityEquals(army0, army6),
+        "same creature in different army slots stays distinct");
+    Check(ballista.kind == STACK_ID_WAR_MACHINE,
+        "war machine identity uses machine kind");
+    Check(tower1.occurrence == 1,
+        "duplicate war machines use occurrence");
+    Check(summon.kind == STACK_ID_NONE,
+        "summon has no cross-attempt identity");
+
+    const StableStackIdentity previous[5] = {
+        army0, ballista, army6, tower1, summon
+    };
+    const StableStackIdentity current[5] = {
+        tower1, army6, summon, army0, ballista
+    };
+    int remap[5] = {};
+    BuildStableStackSlotRemap(previous, 5, current, 5, remap);
+    Check(remap[0] == 3 && remap[1] == 2 && remap[3] == 0
+        && remap[4] == 1, "stable identities remap reordered battle slots");
+    Check(remap[2] == -1, "dynamic stack does not inherit a rule");
+}
+
+void TestFailedActionPlayerHandoffEligibility()
+{
+    Check(CanYieldFailedActionToPlayer(10, false, false, false),
+        "ordinary stack can receive failed configured action");
+    Check(CanYieldFailedActionToPlayer(CREATURE_CATAPULT, true, false, false),
+        "ballistics allows catapult player handoff");
+    Check(!CanYieldFailedActionToPlayer(CREATURE_CATAPULT, false, false, false),
+        "catapult handoff requires ballistics");
+    Check(CanYieldFailedActionToPlayer(CREATURE_BALLISTA, false, true, false),
+        "artillery allows ballista player handoff");
+    Check(CanYieldFailedActionToPlayer(CREATURE_ARROW_TOWER, false, true, false),
+        "artillery allows arrow tower player handoff");
+    Check(!CanYieldFailedActionToPlayer(CREATURE_BALLISTA, false, false, false),
+        "ballista handoff requires artillery");
+    Check(CanYieldFailedActionToPlayer(CREATURE_FIRST_AID_TENT, false, false, true),
+        "first aid allows tent player handoff");
+    Check(!CanYieldFailedActionToPlayer(CREATURE_FIRST_AID_TENT, false, false, false),
+        "tent handoff requires first aid");
 }
 
 void TestLegacySpellSlotCompatibility()
@@ -205,6 +273,65 @@ void TestLegacySpellSlotCompatibility()
     Check(slots.spellSlotCount == 3, "invalid spell slots are removed");
     Check(slots.spellSlots[0] == 1 && slots.spellSlots[1] == 0
         && slots.spellSlots[2] == 4, "spell slots compact in order");
+
+    // 回归：右键删除最后一个槽后不能被旧版兼容镜像复活。
+    AutoStackRule deleted = MakeDefaultRule();
+    deleted.spellSlotCount = 1;
+    deleted.spellSlots[0] = 7;
+    deleted.quickCastFirst = true;
+    deleted.spellSlot = 7;
+    Check(RemoveSpellSlot(&deleted, 0), "remove last spell slot succeeds");
+    Check(deleted.spellSlotCount == 0 && deleted.spellSlots[0] == -1,
+        "deleting last spell slot stays empty");
+    Check(!deleted.quickCastFirst && deleted.spellSlot == 1,
+        "deleting last spell slot clears legacy mirror");
+}
+
+void TestProtect()
+{
+    TargetCandidate angel = {};
+    angel.count_current = 2;
+    angel.hit_points = 200;
+    angel.lost_hp = 30;
+    Check(StackRemainingHp(angel) == 370, "remaining hp subtracts only the damaged top creature");
+
+    TargetCandidate dead = {};
+    dead.count_current = 0;
+    dead.hit_points = 200;
+    dead.lost_hp = 50;
+    Check(StackRemainingHp(dead) == 0, "dead stack has no remaining hp");
+
+    // 可恢复量：基础 50×力量 / 高级 75×力量 / 专家 100×力量。
+    Check(ResurrectionRestoreHp(1, 10) == 500, "basic resurrection restores 50*power");
+    Check(ResurrectionRestoreHp(2, 10) == 750, "advanced resurrection restores 75*power");
+    Check(ResurrectionRestoreHp(3, 10) == 1000, "expert resurrection restores 100*power");
+    Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
+
+    // 阈值：先算倍率/100（浮点），再乘可恢复量。100.00% 存 10000。
+    Check(ProtectThresholdHp(10000, 500) == 500, "ratio 100% keeps restorable hp");
+    Check(ProtectThresholdHp(2500, 500) == 125, "ratio 25% is a quarter");
+    Check(ProtectThresholdHp(3333, 1000) == 333, "ratio 33.33% rounds via truncation");
+
+    // 严格小于阈值触发；未勾选不触发；意外全灭不触发。
+    Check(ProtectShouldCast(true, 10000, 500, 2, 499), "hp strictly below threshold casts");
+    Check(!ProtectShouldCast(true, 10000, 500, 2, 500), "hp equal to threshold does not cast");
+    Check(!ProtectShouldCast(false, 10000, 500, 2, 1), "unchecked protect disables");
+    Check(!ProtectShouldCast(true, 10000, 500, 0, 0), "fully dead stack does not trigger");
+    Check(!ProtectShouldCast(true, 10000, 0, 2, 1), "unlearned spell never triggers");
+
+    // 默认规则：未勾选，倍率 100%。
+    const AutoStackRule def = MakeDefaultRule();
+    Check(def.protectEnable == 0 && def.protectRatioX100 == PROTECT_RATIO_DEFAULT_X100,
+        "default rule has protect off at 100%");
+
+    // 倍率夹范围（0..10000.00%）。
+    AutoStackRule dirty = def;
+    dirty.protectRatioX100 = -5;
+    NormalizeRule(&dirty, 0, false, false, false);
+    Check(dirty.protectRatioX100 == PROTECT_RATIO_MIN_X100, "negative ratio clamps to 0");
+    dirty.protectRatioX100 = 5000000;
+    NormalizeRule(&dirty, 0, false, false, false);
+    Check(dirty.protectRatioX100 == PROTECT_RATIO_MAX_X100, "huge ratio clamps to max");
 }
 
 } // namespace
@@ -218,7 +345,10 @@ int main()
     TestTargetScoring();
     TestTargetNormalization();
     TestResultLifecycle();
+    TestStableStackIdentity();
+    TestFailedActionPlayerHandoffEligibility();
     TestLegacySpellSlotCompatibility();
+    TestProtect();
     std::cout << "PolicyCoreTests: " << g_checks << " checks passed\n";
     return 0;
 }

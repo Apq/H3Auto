@@ -52,6 +52,16 @@ static constexpr int MELEE_PAIR_CAPACITY = 10;
 static constexpr int MOVE_WAYPOINT_CAPACITY = 16;
 static constexpr int SPELL_SLOT_CAPACITY = 10;
 
+// 首动保活（§3.1.1）默认/范围。倍率定点存储：X100，即 100.00% 存 10000。
+static constexpr int PROTECT_RATIO_DEFAULT_X100 = 10000;
+static constexpr int PROTECT_RATIO_MIN_X100 = 0;
+static constexpr int PROTECT_RATIO_MAX_X100 = 1000000; // 10000.00%
+
+inline bool IsQuickSpellDigit(int digit)
+{
+    return digit == 0 || (digit >= 1 && digit <= 9);
+}
+
 struct AutoTargetRule {
     AutoTargetKind kind;
     AutoTargetSide side;
@@ -73,6 +83,10 @@ struct AutoStackRule {
     int8_t spellSlot;
     int8_t spellSlots[SPELL_SLOT_CAPACITY];
     int8_t spellSlotCount;
+
+    // 首动保活（§3.1.1）：挂单支部队，随方案/槽位一起存储与重排。
+    uint8_t protectEnable;      // 0=关闭；1=勾选
+    int32_t protectRatioX100;   // 倍率 %，定点 X100（100.00% 存 10000），范围 0..1000000
 };
 
 inline AutoStackRule MakeDefaultRule()
@@ -98,6 +112,8 @@ inline AutoStackRule MakeDefaultRule()
     for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
         r.spellSlots[i] = -1;
     r.spellSlotCount = 0;
+    r.protectEnable = 0;
+    r.protectRatioX100 = PROTECT_RATIO_DEFAULT_X100;
     return r;
 }
 
@@ -108,6 +124,89 @@ inline bool IsWarMachineType(int creature_type)
         || creature_type == CREATURE_FIRST_AID_TENT
         || creature_type == CREATURE_AMMO_CART
         || creature_type == CREATURE_ARROW_TOWER;
+}
+
+// 配置动作失败时，是否可把当前战争机器交给玩家操作。
+// 普通部队始终可交；战争机器须具备对应技能。无技能时由集成层保持
+// 原有分支，不在纯策略层推断后续行为。
+inline bool CanYieldFailedActionToPlayer(int creature_type,
+    bool has_ballistics, bool has_artillery, bool has_first_aid)
+{
+    switch (creature_type) {
+    case CREATURE_CATAPULT:
+        return has_ballistics;
+    case CREATURE_BALLISTA:
+    case CREATURE_ARROW_TOWER:
+        return has_artillery;
+    case CREATURE_FIRST_AID_TENT:
+        return has_first_aid;
+    case CREATURE_AMMO_CART:
+        return false;
+    default:
+        return true;
+    }
+}
+
+enum StableStackIdentityKind : uint8_t {
+    STACK_ID_NONE = 0,
+    STACK_ID_ARMY_SLOT,
+    STACK_ID_WAR_MACHINE,
+};
+
+struct StableStackIdentity {
+    StableStackIdentityKind kind;
+    int8_t side;
+    int16_t value;
+    int8_t occurrence;
+};
+
+// Original army stacks keep source_army_slot (0..6) across a quick-battle
+// retry. War machines do not have one, so identify them by kind and ordinal.
+// Summons and clones intentionally have no cross-attempt identity.
+inline StableStackIdentity MakeStableStackIdentity(int side,
+    int source_army_slot, int creature_type, int occurrence)
+{
+    StableStackIdentity id = {};
+    id.side = static_cast<int8_t>(side);
+    if (side < 0 || side > 1) return id;
+    if (source_army_slot >= 0 && source_army_slot < 7) {
+        id.kind = STACK_ID_ARMY_SLOT;
+        id.value = static_cast<int16_t>(source_army_slot);
+        return id;
+    }
+    if (IsWarMachineType(creature_type)) {
+        id.kind = STACK_ID_WAR_MACHINE;
+        id.value = static_cast<int16_t>(creature_type);
+        id.occurrence = static_cast<int8_t>(occurrence < 0 ? 0 : occurrence);
+    }
+    return id;
+}
+
+inline bool StableStackIdentityEquals(const StableStackIdentity& a,
+    const StableStackIdentity& b)
+{
+    if (a.kind == STACK_ID_NONE || b.kind == STACK_ID_NONE) return false;
+    return a.kind == b.kind && a.side == b.side && a.value == b.value
+        && a.occurrence == b.occurrence;
+}
+
+// For each current battle slot, return the previous slot holding its rule.
+// Unmatched slots remain -1 and receive defaults in the integration layer.
+inline void BuildStableStackSlotRemap(const StableStackIdentity* previous,
+    int previous_count, const StableStackIdentity* current, int current_count,
+    int* previous_slot_for_current)
+{
+    if (!previous_slot_for_current || current_count <= 0) return;
+    for (int i = 0; i < current_count; ++i) {
+        previous_slot_for_current[i] = -1;
+        if (!current || current[i].kind == STACK_ID_NONE) continue;
+        for (int j = 0; previous && j < previous_count; ++j) {
+            if (StableStackIdentityEquals(previous[j], current[i])) {
+                previous_slot_for_current[i] = j;
+                break;
+            }
+        }
+    }
 }
 
 // 面板准入纯规则：数量大于 0；弹药车永不进入；投石车必须有弹道术。
@@ -163,12 +262,21 @@ inline ResultLifecycleAction ApplyResultLifecycle(
         state->accept_armed = false;
         return RESULT_WAIT;
     }
-    if (event == RESULT_CLOSED_WITH_BATTLE_UI && state->cancel_armed) {
+    if (event == RESULT_CLOSED_WITH_BATTLE_UI && state->accept_armed) {
+        *state = {};
+        return RESULT_CLEAR_SETTINGS;
+    }
+    // Returning BattleUI is the authoritative retry signal when accept was
+    // not explicitly captured. Do not depend on the exact cancel mouse frame.
+    if (event == RESULT_CLOSED_WITH_BATTLE_UI) {
         *state = {};
         return RESULT_KEEP_AND_REBIND;
     }
-    if (event == RESULT_CLOSED_WITHOUT_BATTLE_UI
-        || (event == RESULT_CLOSED_WITH_BATTLE_UI && state->accept_armed)) {
+    // Cancel can close CPResult one or more frames before BattleUI reappears.
+    // Keep waiting instead of clearing profiles during that transition.
+    if (event == RESULT_CLOSED_WITHOUT_BATTLE_UI && state->cancel_armed)
+        return RESULT_WAIT;
+    if (event == RESULT_CLOSED_WITHOUT_BATTLE_UI) {
         *state = {};
         return RESULT_CLEAR_SETTINGS;
     }
@@ -275,6 +383,53 @@ struct TargetCandidate {
     int speed;
 };
 
+inline int StackRemainingHp(const TargetCandidate& candidate)
+{
+    const int hp = candidate.hit_points > 0 ? candidate.hit_points : 1;
+    const int alive = candidate.count_current > 0 ? candidate.count_current : 0;
+    int64_t total = static_cast<int64_t>(alive) * hp;
+    const int lost = candidate.lost_hp > 0 ? candidate.lost_hp : 0;
+    if (lost > 0 && total > lost) total -= lost;
+    else if (lost > 0) total = 0;
+    if (total > 0x7FFFFFFF) total = 0x7FFFFFFF;
+    return static_cast<int>(total);
+}
+
+// 首动保活（§3.1.1）纯判定逻辑。
+// 可恢复量：复活/聚灵按法术等级 基础 50×力量 / 高级 75×力量 / 专家 100×力量。
+inline int ResurrectionRestoreHp(int expertise, int spell_power)
+{
+    if (spell_power <= 0) return 0;
+    int base = 0;
+    if (expertise == 3) base = 100;
+    else if (expertise == 2) base = 75;
+    else if (expertise == 1) base = 50;
+    else return 0;
+    return base * spell_power;
+}
+
+// 触发阈值：先算倍率/100（浮点），再乘可恢复量；夹到 int 范围。
+inline int ProtectThresholdHp(int ratio_x100, int restorable_hp)
+{
+    if (restorable_hp <= 0) return 0;
+    double t = static_cast<double>(restorable_hp)
+        * (static_cast<double>(ratio_x100) / 10000.0);
+    if (t < 0.0) t = 0.0;
+    if (t > 2000000000.0) t = 2000000000.0;
+    return static_cast<int>(t);
+}
+
+// 是否触发：未勾选不触发；已全灭（alive_count<=0）不触发（部队意外
+// 全灭后不再保活）；当前总血量严格小于阈值才触发。
+inline bool ProtectShouldCast(bool enabled, int ratio_x100,
+    int restorable_hp, int alive_count, int remaining_hp)
+{
+    if (!enabled) return false;
+    if (alive_count <= 0) return false;
+    if (remaining_hp < 0) remaining_hp = 0;
+    return remaining_hp < ProtectThresholdHp(ratio_x100, restorable_hp);
+}
+
 inline int WoundValue(const TargetCandidate& candidate)
 {
     const int hp = candidate.hit_points > 0 ? candidate.hit_points : 1;
@@ -379,11 +534,32 @@ inline void NormalizeSpellSlots(AutoStackRule* rule)
     rule->spellSlot = count > 0 ? rule->spellSlots[0] : 1;
 }
 
+// 删除一个已有施法槽并压紧。删除最后一项时清除旧版兼容镜像，
+// 防止 NormalizeSpellSlots 把旧 quickCastFirst + spellSlot 重新迁移回来。
+inline bool RemoveSpellSlot(AutoStackRule* rule, int index)
+{
+    if (!rule || index < 0 || index >= rule->spellSlotCount) return false;
+    for (int i = index; i + 1 < rule->spellSlotCount; ++i)
+        rule->spellSlots[i] = rule->spellSlots[i + 1];
+    rule->spellSlots[rule->spellSlotCount - 1] = -1;
+    --rule->spellSlotCount;
+    if (rule->spellSlotCount == 0)
+        rule->quickCastFirst = false;
+    NormalizeSpellSlots(rule);
+    return true;
+}
+
 // 纯策略部分的规范化；近战槽位/移动坐标的几何校验仍由 CellControl 负责。
 inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged,
     bool has_artillery, bool has_first_aid)
 {
     if (!rule) return;
+    // 首动保活倍率夹范围（定点 X100）；放函数开头，避开下方 early return。
+    if (rule->protectRatioX100 < PROTECT_RATIO_MIN_X100)
+        rule->protectRatioX100 = PROTECT_RATIO_MIN_X100;
+    if (rule->protectRatioX100 > PROTECT_RATIO_MAX_X100)
+        rule->protectRatioX100 = PROTECT_RATIO_MAX_X100;
+
     AutoActionKind allowed[AA_COUNT] = {};
     const int n = GetAllowedActions(creature_type, is_ranged,
         has_artillery, has_first_aid, allowed);
@@ -469,3 +645,6 @@ using H3AutoPolicy::SEL_COUNT;
 using H3AutoPolicy::MELEE_PAIR_CAPACITY;
 using H3AutoPolicy::MOVE_WAYPOINT_CAPACITY;
 using H3AutoPolicy::SPELL_SLOT_CAPACITY;
+using H3AutoPolicy::PROTECT_RATIO_DEFAULT_X100;
+using H3AutoPolicy::PROTECT_RATIO_MIN_X100;
+using H3AutoPolicy::PROTECT_RATIO_MAX_X100;
