@@ -459,6 +459,28 @@ inline int SelectProtectTargetIndex(const TargetCandidate* candidates, int count
     return best;
 }
 
+// 自动停止（§3.1.2）。按本场掉血外推敌方还要几回合全灭。
+// 返回值 < 0 表示现在不能停：阈值为 0、还没有基线、没掉过血。
+// 否则返回预计剩余回合（向上取整）。
+inline int ProjectEnemyTurnsLeft(int threshold, int baseline_hp,
+    int current_hp, int elapsed_turns)
+{
+    if (threshold <= 0) return -1;
+    if (baseline_hp <= 0 || current_hp <= 0 || elapsed_turns <= 0) return -1;
+    const int damage = baseline_hp - current_hp;
+    if (damage <= 0) return -1;
+    const int64_t product = static_cast<int64_t>(current_hp) * elapsed_turns;
+    return static_cast<int>((product + damage - 1) / damage);
+}
+
+inline bool AutoStopShouldYield(int threshold, int baseline_hp,
+    int current_hp, int elapsed_turns)
+{
+    const int left = ProjectEnemyTurnsLeft(threshold, baseline_hp,
+        current_hp, elapsed_turns);
+    return left >= 0 && left <= threshold;
+}
+
 // 返回候选下标；平分时保留先出现者，与原执行器行为一致。
 // random_value 由生产侧传入 rand()，测试侧可传固定值。
 inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
@@ -498,6 +520,204 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
         if (better) best = i;
     }
     return best;
+}
+
+// 5 套方案的磁盘存档（加载/保存按钮）。
+// 纯编解码：一行文本 "H3AP1 <方案1策略> ... <方案5策略> <105×规则>"，
+// 规则按方案优先、槽位其次排列，每条 34 个十进制整数。
+// 存档只承载规则本身，不含生物身份（身份重排由运行时稳定身份完成）。
+// 文本在 5 个策略之后还有 5 个自动停止回合（0..99）。
+// 旧档没有这 5 个数时按默认 10 读入。
+static constexpr int PROFILE_STORE_COUNT = 5;
+static constexpr int PROFILE_STORE_SLOTS = 21;
+static constexpr int PROFILE_STORE_RULE_FIELDS = 34;
+static constexpr int PROFILE_STORE_LEGACY_INTS =
+    PROFILE_STORE_COUNT + PROFILE_STORE_COUNT * PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
+static constexpr int PROFILE_STORE_INTS =
+    PROFILE_STORE_LEGACY_INTS + PROFILE_STORE_COUNT;
+static constexpr int DEFAULT_STOP_TURNS = 10;
+
+inline void EncodeRuleInts(const AutoStackRule& rule, int* out)
+{
+    int n = 0;
+    out[n++] = static_cast<int>(rule.action);
+    out[n++] = static_cast<int>(rule.target.kind);
+    out[n++] = static_cast<int>(rule.target.side);
+    out[n++] = static_cast<int>(rule.target.selector);
+    out[n++] = rule.target.meleeStandHex;
+    out[n++] = rule.target.meleeAttackHex;
+    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
+        out[n++] = rule.target.moveWaypoints[i];
+    out[n++] = rule.target.moveWaypointCount;
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
+        out[n++] = rule.target.meleeStandHexes[i];
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
+        out[n++] = rule.target.meleeAttackHexes[i];
+    out[n++] = rule.target.meleePairCount;
+    out[n++] = rule.allowDefendFallback ? 1 : 0;
+    out[n++] = rule.quickCastFirst ? 1 : 0;
+    out[n++] = rule.spellSlot;
+    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
+        out[n++] = rule.spellSlots[i];
+    out[n++] = rule.spellSlotCount;
+    out[n++] = rule.protectEnable ? 1 : 0;
+}
+
+inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
+{
+    if (!in || !rule) return false;
+    AutoStackRule r = MakeDefaultRule();
+    int n = 0;
+    r.action = static_cast<AutoActionKind>(in[n++]);
+    r.target.kind = static_cast<AutoTargetKind>(in[n++]);
+    r.target.side = static_cast<AutoTargetSide>(in[n++]);
+    r.target.selector = static_cast<AutoTargetSelector>(in[n++]);
+    r.target.meleeStandHex = static_cast<int16_t>(in[n++]);
+    r.target.meleeAttackHex = static_cast<int16_t>(in[n++]);
+    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
+        r.target.moveWaypoints[i] = static_cast<int16_t>(in[n++]);
+    r.target.moveWaypointCount = static_cast<int8_t>(in[n++]);
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
+        r.target.meleeStandHexes[i] = static_cast<int16_t>(in[n++]);
+    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
+        r.target.meleeAttackHexes[i] = static_cast<int16_t>(in[n++]);
+    r.target.meleePairCount = static_cast<int8_t>(in[n++]);
+    r.allowDefendFallback = in[n++] != 0;
+    r.quickCastFirst = in[n++] != 0;
+    r.spellSlot = static_cast<int8_t>(in[n++]);
+    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
+        r.spellSlots[i] = static_cast<int8_t>(in[n++]);
+    r.spellSlotCount = static_cast<int8_t>(in[n++]);
+    r.protectEnable = in[n++] != 0 ? 1 : 0;
+    if (n != PROFILE_STORE_RULE_FIELDS) return false;
+    if (r.action < AA_MANUAL || r.action >= AA_COUNT) return false;
+    if (r.target.kind < AT_NONE || r.target.kind >= AT_COUNT) return false;
+    if (r.target.side < ATS_OWN || r.target.side >= ATS_COUNT) return false;
+    if (r.target.selector < SEL_RANDOM || r.target.selector >= SEL_COUNT) return false;
+    *rule = r;
+    return true;
+}
+
+// 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
+// Decode 只接受以 "H3AP1 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
+    const AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
+    const uint8_t stop_turns[PROFILE_STORE_COUNT],
+    char* buffer, int buffer_size)
+{
+    if (!strategies || !rules || !stop_turns || !buffer || buffer_size <= 0)
+        return -1;
+    int written = 0;
+    auto append = [&](const char* s) -> bool {
+        for (int i = 0; s[i]; ++i) {
+            if (written + 1 >= buffer_size) return false;
+            buffer[written++] = s[i];
+        }
+        return true;
+    };
+    if (!append("H3AP1")) return -1;
+    int* ints = new int[PROFILE_STORE_INTS];
+    int n = 0;
+    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
+        ints[n++] = strategies[p];
+    for (int p = 0; p < PROFILE_STORE_COUNT; ++p) {
+        int turns = stop_turns[p];
+        if (turns < 0) turns = 0;
+        if (turns > 99) turns = 99;
+        ints[n++] = turns;
+    }
+    bool ok = true;
+    for (int p = 0; ok && p < PROFILE_STORE_COUNT; ++p)
+        for (int s = 0; ok && s < PROFILE_STORE_SLOTS; ++s) {
+            __try {
+                EncodeRuleInts(rules[p][s], ints + n);
+            } __except (1) {
+                return -100000 - p * 100 - s;
+            }
+            n += PROFILE_STORE_RULE_FIELDS;
+        }
+    for (int i = 0; ok && i < n; ++i) {
+        char num[16];
+        int v = ints[i];
+        int len = 0;
+        if (v < 0) { num[len++] = '-'; v = -v; }
+        char digits[12];
+        int dlen = 0;
+        do { digits[dlen++] = static_cast<char>('0' + v % 10); v /= 10; }
+        while (v > 0);
+        while (dlen > 0) num[len++] = digits[--dlen];
+        num[len] = 0;
+        if (!append(" ") || !append(num)) ok = false;
+    }
+    delete[] ints;
+    if (!ok) return -1;
+    buffer[written] = 0;
+    return written;
+}
+
+inline bool DecodeProfileStoreText(const char* text,
+    uint8_t strategies[PROFILE_STORE_COUNT],
+    AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
+    uint8_t stop_turns[PROFILE_STORE_COUNT])
+{
+    if (!text || !strategies || !rules || !stop_turns) return false;
+    const char* magic = "H3AP1";
+    for (int i = 0; magic[i]; ++i)
+        if (text[i] != magic[i]) return false;
+    const char* p = text + 5;
+
+    int* ints = new int[PROFILE_STORE_INTS];
+    int count = 0;
+    bool bad = false;
+    while (*p && !bad) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (!*p) break;
+        if (count >= PROFILE_STORE_INTS) { bad = true; break; }
+        int sign = 1;
+        if (*p == '-') { sign = -1; ++p; }
+        if (*p < '0' || *p > '9') { bad = true; break; }
+        int v = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (*p - '0');
+            ++p;
+        }
+        ints[count++] = sign * v;
+    }
+    const bool legacy = count == PROFILE_STORE_LEGACY_INTS;
+    if (bad || (count != PROFILE_STORE_INTS && !legacy)) {
+        delete[] ints;
+        return false;
+    }
+
+    uint8_t decoded_strategy[PROFILE_STORE_COUNT] = {};
+    uint8_t decoded_stop[PROFILE_STORE_COUNT] = {};
+    AutoStackRule decoded[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
+    int n = 0;
+    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
+        if (ints[n] < PS_NONE || ints[n] >= PS_COUNT) { delete[] ints; return false; }
+        decoded_strategy[i] = static_cast<uint8_t>(ints[n++]);
+    }
+    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
+        if (legacy) {
+            decoded_stop[i] = DEFAULT_STOP_TURNS;
+            continue;
+        }
+        if (ints[n] < 0 || ints[n] > 99) { delete[] ints; return false; }
+        decoded_stop[i] = static_cast<uint8_t>(ints[n++]);
+    }
+    for (int i = 0; i < PROFILE_STORE_COUNT; ++i)
+        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
+            if (!DecodeRuleInts(ints + n, &decoded[i][s])) { delete[] ints; return false; }
+            n += PROFILE_STORE_RULE_FIELDS;
+        }
+    delete[] ints;
+    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
+        strategies[i] = decoded_strategy[i];
+        stop_turns[i] = decoded_stop[i];
+        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
+            rules[i][s] = decoded[i][s];
+    }
+    return true;
 }
 
 inline int GetAllowedSelectors(AutoActionKind action, AutoTargetKind /*kind*/,

@@ -8,6 +8,7 @@ extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
 extern int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags);
 extern void LoadLabels_(const char* ini_path);
+extern char g_profiles_path[MAX_PATH];
 
 // ---- Plugin start ----
 static void StartPlugin()
@@ -48,6 +49,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         GetModuleFileNameA(hModule, g_ini_path, MAX_PATH);
         char* dot = strrchr(g_ini_path, '.');
         if (dot) strcpy(dot, ".ini");
+        // 方案存档与 DLL 同目录，固定名 H3Auto.profiles。
+        GetModuleFileNameA(hModule, g_profiles_path, MAX_PATH);
+        char* slash = strrchr(g_profiles_path, (char)92);
+        if (!slash) slash = strrchr(g_profiles_path, '/');
+        if (slash) strcpy(slash + 1, "H3Auto.profiles");
+        else strcpy(g_profiles_path, "H3Auto.profiles");
         wchar_t ini_path_w[MAX_PATH];
         MultiByteToWideChar(CP_ACP, 0, g_ini_path, -1, ini_path_w, MAX_PATH);
         g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);

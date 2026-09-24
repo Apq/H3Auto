@@ -368,6 +368,71 @@ void TestProtect()
     Check(def.protectEnable == 0, "default rule is not in the protect queue");
 }
 
+void TestProfileStoreRoundtrip()
+{
+    uint8_t strategies[PROFILE_STORE_COUNT] = { PS_NONE, PS_ON_DEAD,
+        PS_FIRST_ACTION, PS_LOSS_GT_RESTORE, PS_ON_DEAD };
+    AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
+    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
+        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
+            rules[p][s] = MakeDefaultRule();
+    rules[2][7].action = AA_MELEE_ATTACK;
+    rules[2][7].target.meleeStandHex = 125;
+    rules[2][7].target.meleeAttackHex = 108;
+    rules[2][7].target.moveWaypoints[0] = 42;
+    rules[2][7].target.moveWaypoints[15] = -1;
+    rules[2][7].target.moveWaypointCount = 1;
+    rules[2][7].spellSlots[0] = 3;
+    rules[2][7].spellSlotCount = 1;
+    rules[2][7].protectEnable = 1;
+    rules[2][7].allowDefendFallback = true;
+    rules[4][20].action = AA_RANGED_ATTACK;
+    rules[4][20].target.selector = SEL_RANGED_SPEED;
+    uint8_t stop_turns[PROFILE_STORE_COUNT] = { 10, 0, 25, 99, 7 };
+
+    char text[64 * 1024] = {};
+    const int written = EncodeProfileStoreText(strategies, rules, stop_turns,
+        text, sizeof(text));
+    Check(written > 0, "profile store encodes");
+
+    uint8_t out_strategies[PROFILE_STORE_COUNT] = {};
+    uint8_t out_stop[PROFILE_STORE_COUNT] = {};
+    AutoStackRule out_rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
+    Check(DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
+        "profile store decodes");
+    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
+        Check(out_strategies[p] == strategies[p], "strategy roundtrip");
+    Check(out_rules[2][7].action == AA_MELEE_ATTACK, "rule action roundtrip");
+    Check(out_rules[2][7].target.meleeStandHex == 125, "melee stand roundtrip");
+    Check(out_rules[2][7].target.meleeAttackHex == 108, "melee attack roundtrip");
+    Check(out_rules[2][7].target.moveWaypoints[0] == 42, "waypoint roundtrip");
+    Check(out_rules[2][7].target.moveWaypoints[15] == -1, "empty waypoint roundtrip");
+    Check(out_rules[2][7].target.moveWaypointCount == 1, "waypoint count roundtrip");
+    Check(out_rules[2][7].spellSlots[0] == 3, "spell slot roundtrip");
+    Check(out_rules[2][7].spellSlotCount == 1, "spell count roundtrip");
+    Check(out_rules[2][7].protectEnable == 1, "protect enable roundtrip");
+    Check(out_rules[2][7].allowDefendFallback, "fallback roundtrip");
+    Check(out_rules[4][20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
+    Check(out_rules[4][20].target.selector == SEL_RANGED_SPEED,
+        "last slot selector roundtrip");
+    Check(out_rules[0][0].action == AA_MANUAL, "default slot stays manual");
+    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
+        Check(out_stop[p] == stop_turns[p], "stop turns roundtrip");
+
+    Check(!DecodeProfileStoreText("H3AP1 1 2 3", out_strategies, out_rules,
+            out_stop),
+        "truncated store rejected");
+    text[0] = 'X';
+    Check(!DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
+        "bad magic rejected");
+    Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
+    Check(!AutoStopShouldYield(10, 1000, 900, 1), "slow damage stays running");
+    Check(!AutoStopShouldYield(0, 1000, 1, 9), "zero threshold disables stop");
+    Check(!AutoStopShouldYield(10, 1000, 1000, 5), "no damage does not stop");
+    Check(!AutoStopShouldYield(10, 1000, 1100, 5), "enemy hp gain does not stop");
+    Check(ProjectEnemyTurnsLeft(10, 1000, 100, 9) == 1, "remaining turns round up");
+}
+
 } // namespace
 
 int main()
@@ -383,6 +448,7 @@ int main()
     TestFailedActionPlayerHandoffEligibility();
     TestLegacySpellSlotCompatibility();
     TestProtect();
+    TestProfileStoreRoundtrip();
     std::cout << "PolicyCoreTests: " << g_checks << " checks passed\n";
     return 0;
 }

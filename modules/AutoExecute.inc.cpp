@@ -4,12 +4,13 @@
 static void WriteLog(const char* fmt, ...);
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5]);
+    const uint8_t protect_strategy[5], const uint8_t stop_turns[5]);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
 extern uint8_t g_protect_strategy[5];
+extern uint8_t g_stop_turns[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -72,6 +73,9 @@ static int  g_battle_attempt_id = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
 // 首动保活：已判定过的战斗回合号（-1=尚未判定本回合）。
 static int  g_protect_checked_turn = -1;
+// 自动停止：最近两笔敌方血量。两笔都有效才外推，更早的不参与。
+static int g_enemy_hp_turn[2] = { -1, -1 };
+static int g_enemy_hp_value[2] = {};
 
 static int ResolveHumanSide_(_BattleMgr_* mgr)
 {
@@ -608,6 +612,10 @@ void ResetAutoState()
     // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
     // 只清单次接管与施法等待等运行时数据。
     g_protect_checked_turn = -1;   // 战斗状态重置后重新判定首动保活
+    g_enemy_hp_turn[0] = -1;       // 自动停止的最近两笔取样作废
+    g_enemy_hp_turn[1] = -1;
+    g_enemy_hp_value[0] = 0;
+    g_enemy_hp_value[1] = 0;
     ClearOneShotManual_();
     g_auto_state.kb_toggle_seen = false;
     g_auto_state.kb_oneshot_seen = false;
@@ -859,6 +867,65 @@ static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
     return -1;
 }
 
+// 敌方当前总血量：存活数 × 满血 − 顶层已损。战争机器不计入。
+static int EnemyAliveHp_(_BattleMgr_* mgr)
+{
+    if (!mgr) return 0;
+    const int side = ResolveHumanSide_(mgr);
+    if (side < 0 || side > 1) return 0;
+    const int enemy = 1 - side;
+    int64_t total = 0;
+    for (int i = 0; i < 21; ++i) {
+        _BattleStack_* st = &mgr->stack[enemy][i];
+        if (st->count_current <= 0 || st->count_at_start <= 0) continue;
+        if (H3AutoPolicy::IsWarMachineType(st->creature_id)) continue;
+        H3AutoPolicy::TargetCandidate cand = {};
+        cand.count_current = st->count_current;
+        cand.count_at_start = st->count_at_start;
+        cand.hit_points = st->creature.hit_points;
+        cand.lost_hp = st->lost_hp;
+        total += H3AutoPolicy::StackRemainingHp(cand);
+    }
+    if (total > 0x7FFFFFFF) total = 0x7FFFFFFF;
+    return static_cast<int>(total);
+}
+
+// 预计敌方会在阈值回合内全灭时切到全手动。
+// 只看最近两笔取样的掉血，不用更早的回合。
+static void TryAutoStop_(_BattleMgr_* mgr)
+{
+    if (!mgr || g_auto_state.battle_manual) return;
+    const int profile = g_active_profile;
+    if (profile < 0 || profile >= 5) return;
+    const int threshold = g_stop_turns[profile];
+    if (threshold <= 0) return;
+
+    const int turn = GetCurrentBattleTurn_(mgr);
+    if (turn < 0 || turn == g_enemy_hp_turn[1]) return;
+    const int hp = EnemyAliveHp_(mgr);
+    if (g_enemy_hp_turn[1] >= 0 && hp > g_enemy_hp_value[1]) {
+        g_enemy_hp_turn[0] = -1;
+        g_enemy_hp_value[0] = 0;
+    } else {
+        g_enemy_hp_turn[0] = g_enemy_hp_turn[1];
+        g_enemy_hp_value[0] = g_enemy_hp_value[1];
+    }
+    g_enemy_hp_turn[1] = turn;
+    g_enemy_hp_value[1] = hp;
+    if (g_enemy_hp_turn[0] < 0) return;
+
+    const int elapsed = g_enemy_hp_turn[1] - g_enemy_hp_turn[0];
+    const int left = H3AutoPolicy::ProjectEnemyTurnsLeft(
+        threshold, g_enemy_hp_value[0], hp, elapsed);
+    if (left < 0 || left > threshold) return;
+
+    g_auto_state.battle_manual = true;
+    ClearOneShotManual_();
+    WriteLog("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
+        elapsed, g_enemy_hp_value[0], hp, left, threshold);
+    RefreshControlStatusHint_();
+}
+
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
     const int strategy = g_protect_strategy[g_active_profile];
@@ -957,6 +1024,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         best_spell, best_exp);
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
+    WriteLog("[Protect] cast returned slot=%d", best_slot);
     return true;
 }
 
@@ -1041,13 +1109,18 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5])
+    const uint8_t protect_strategy[5], const uint8_t stop_turns[5])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
     memcpy(g_profiles, rules, sizeof(g_profiles));
-    for (int p = 0; p < 5; ++p)
+    for (int p = 0; p < 5; ++p) {
         g_protect_strategy[p] = protect_strategy ? protect_strategy[p] : 0;
+        int turns = stop_turns ? stop_turns[p] : H3AutoPolicy::DEFAULT_STOP_TURNS;
+        if (turns < 0) turns = 0;
+        if (turns > 99) turns = 99;
+        g_stop_turns[p] = static_cast<uint8_t>(turns);
+    }
     g_active_profile = active_profile;
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     const int side = ResolveHumanSide_(o_BattleMgr);
@@ -1733,6 +1806,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // 部队全灭后 / 损失量大于恢复量为事件型，每次行动都判，
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
+        TryAutoStop_(This);
         if (This && This->active_stack) {
             if (g_auto_state.last_handled_stack
                 && g_auto_state.last_handled_stack != This->active_stack)
@@ -1751,6 +1825,8 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
             return 1;           // 仅战争机器特殊：交回 AI
         // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0（控制权在玩家路径）。
         // 若需代发动作，在 Hook_BattleMsgProc 入口提交。
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
+    }
     return 0;
 }

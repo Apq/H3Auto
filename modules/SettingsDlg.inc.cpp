@@ -56,6 +56,12 @@ static const int HELP_BTN_SIZE = 24;
 static const int HELP_BTN_X = PANEL_W - HELP_BTN_SIZE - 20; // 再左收 1px
 static const int HELP_BTN_Y = 20; // 再下收 2px
 
+// 「读档」「存档」：? 按钮左侧，同高 24，宽 44，间距 6。
+static const int STORE_BTN_W = 44;
+static const int STORE_BTN_GAP = 6;
+static const int SAVE_BTN_X = HELP_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
+static const int LOAD_BTN_X = SAVE_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
+
 // 网格金框：宽 624，高 342（底边 y=436）。
 static const int GRID_FRAME_W = 624;
 static const int GRID_FRAME_H = 342;
@@ -70,6 +76,12 @@ static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」
 static const int PROTECT_DD_X        = GRID_FRAME_X + 80;
 static const int PROTECT_DD_W        = 150;
 static const int PROTECT_DD_ITEM_H   = 18;
+
+// 保活行最右侧：自动停止回合数。点击后用数字键录入。
+static const int STOP_BOX_W = 36;
+static const int STOP_BOX_X = GRID_FRAME_X + GRID_FRAME_W - STOP_BOX_W;
+static const int STOP_LABEL_W = 42;
+static const int STOP_LABEL_X = STOP_BOX_X - 4 - STOP_LABEL_W;
 
 // 保活策略项（顺序同 ProtectStrategy）
 static const char* PROTECT_STRATEGY_LABELS[H3AutoPolicy::PS_COUNT] = {
@@ -132,6 +144,7 @@ static struct Panel {
     int x, y;
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS];
     uint8_t draft_protect_strategy[PROFILE_COUNT]; // 保活策略草稿（方案级）
+    uint8_t draft_stop_turns[PROFILE_COUNT];      // 自动停止回合草稿，0=关闭
     int selected_profile;
     int pressed_profile;
     int count;                 // 可配置部队总数（可大于可见行）
@@ -189,11 +202,16 @@ static int s_spell_pick_slot = -1;
 static bool s_help_modal_open = false;
 static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
 static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
+static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
+static char s_stop_turns_text[4] = {};
 static HHOOK s_kb_hook = nullptr;
 
 // ===== 保活策略下拉（方案级）与数字键拦截 =====
 
 // 设置面板存活期间（含隐藏拾取态）拦截 0-9/小键盘，避免原版快捷施法抢键。
+static void CommitStopTurnsEdit_();
+static void CancelStopTurnsEdit_();
+
 static bool IsDigitKey_(WPARAM vk)
 {
     return (vk >= '0' && vk <= '9')
@@ -217,6 +235,9 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             if (s_help_modal_open) {
                 s_help_modal_open = false;
                 DrawPanelToBuffer_();
+            } else if (s_stop_turns_editing) {
+                CancelStopTurnsEdit_();
+                DrawPanelToBuffer_();
             } else if (s_protect_dd_open) {
                 s_protect_dd_open = false;
                 s_protect_dd_hover = -1;
@@ -226,6 +247,11 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             else if (!s_panel_hidden_for_pick)
                 CloseSettingsPanel();
             return 1;  // swallow
+        }
+        if (wParam == VK_RETURN && s_stop_turns_editing) {
+            CommitStopTurnsEdit_();
+            DrawPanelToBuffer_();
+            return 1;
         }
         // 帮助/快捷键模态或保活下拉展开时：Enter 不提交设置面板，仅吞掉。
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
@@ -237,7 +263,15 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         if (wParam == VK_RETURN) return 1;
         if (IsDigitKey_(wParam)) {
             // 录入中：数字键由我们消费；其它时候也吞掉，防止快捷施法。
-            if (s_spell_pick_cell >= 0) {
+            if (s_stop_turns_editing) {
+                const int d = DigitFromVk_(wParam);
+                const int len = (int)strlen(s_stop_turns_text);
+                if (d >= 0 && len < 2) {
+                    s_stop_turns_text[len] = static_cast<char>('0' + d);
+                    s_stop_turns_text[len + 1] = 0;
+                    DrawPanelToBuffer_();
+                }
+            } else if (s_spell_pick_cell >= 0) {
                 const int d = DigitFromVk_(wParam);
                 if (d >= 0) CommitSpellSlotPick_(d);
             }
@@ -275,6 +309,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
     // 战场拾取的点击捕获已移回 BattleUI 输入屏障处理器
     // BlockBattleItemMessage_（消息坐标转战场 hex），此处只保留
     // 下拉展开时的悬停高亮刷新。
+    __try {
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
         && wParam == WM_MOUSEMOVE)
     {
@@ -309,6 +344,9 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
                 }
             }
         }
+    }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -2159,7 +2197,7 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 308;
+    const int h = 364;
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -2189,6 +2227,23 @@ static void DrawHelpButton_(H3LoadedPcx16* destination)
     destination->DrawFrame(x + 1, y + 1, w - 2, h - 2, (BYTE)112, (BYTE)82, (BYTE)36);
     DrawTxt(destination, GetPanelFont(), "?",
         x, y - 1, w, h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+}
+
+// pressed_button：4=读档，5=存档。
+static void DrawStoreButton_(H3LoadedPcx16* destination, int x, int pressed_id,
+    const char* label)
+{
+    if (!destination) return;
+    const bool pressed = s_p.pressed_button == pressed_id;
+    Fill(destination, x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
+        pressed ? 90 : 62, pressed ? 58 : 40, pressed ? 28 : 18);
+    destination->DrawFrame(x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
+        (BYTE)232, (BYTE)196, (BYTE)96);
+    destination->DrawFrame(x + 1, HELP_BTN_Y + 1, STORE_BTN_W - 2,
+        HELP_BTN_SIZE - 2, (BYTE)112, (BYTE)82, (BYTE)36);
+    DrawTxt(destination, GetSmallFont(), label,
+        x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 }
 
@@ -2222,6 +2277,8 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         "方案：5 套本场有效，确定才保存",
         "施法/近战/移动：点 ＋ 后按提示设置",
         "保活：卡片勾选入队，策略在方案行下方",
+        "停止：敌方预计剩余回合内全灭时交回",
+        "读档/存档：5 套方案写入文件，确定才生效",
         "删除：槽位上右键",
         hotkey_line,
         "设置有效期：取消重打保留，接受结果清除",
@@ -2255,6 +2312,24 @@ static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h
 }
 
 // ===== 保活策略下拉行（方案级，随当前选中方案的草稿） =====
+static void CommitStopTurnsEdit_()
+{
+    int value = 0;
+    for (int i = 0; s_stop_turns_text[i]; ++i)
+        value = value * 10 + (s_stop_turns_text[i] - '0');
+    if (value > 99) value = 99;
+    s_p.draft_stop_turns[s_p.selected_profile] = static_cast<uint8_t>(value);
+    s_stop_turns_editing = false;
+    s_stop_turns_text[0] = 0;
+    WriteLog("[Panel] 停止回合=%d (方案%d)", value, s_p.selected_profile + 1);
+}
+
+static void CancelStopTurnsEdit_()
+{
+    s_stop_turns_editing = false;
+    s_stop_turns_text[0] = 0;
+}
+
 static void GetProtectDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h)
 {
@@ -2291,6 +2366,25 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
     // 金色像素三角箭头，与卡片下拉一致（收起▼/展开▲）
     CellControl_DrawArrow(scr, PROTECT_DD_X + PROTECT_DD_W - 14,
         PROTECT_DD_Y + PROTECT_DD_H / 2 - 2, !s_protect_dd_open);
+
+    DrawTxt(scr, small_font, "停止:",
+        STOP_LABEL_X, PROTECT_DD_Y, STOP_LABEL_W, PROTECT_DD_H,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
+    char num[8] = {};
+    if (s_stop_turns_editing)
+        _snprintf(num, sizeof(num), "%s", s_stop_turns_text);
+    else
+        _snprintf(num, sizeof(num), "%d",
+            (int)s_p.draft_stop_turns[s_p.selected_profile]);
+    Fill(scr, STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
+        s_stop_turns_editing ? 104 : 74,
+        s_stop_turns_editing ? 70 : 52,
+        s_stop_turns_editing ? 28 : 24);
+    scr->DrawFrame(STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
+        (BYTE)210, (BYTE)170, (BYTE)72);
+    DrawTxt(scr, small_font, num[0] ? num : "0",
+        STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 }
 
 // 展开列表：每项单独底色+边框（同卡片下拉暖色主题），
@@ -2396,6 +2490,8 @@ static void DrawPanelToBuffer_()
         px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
     DrawHelpButton_(scr);
+    DrawStoreButton_(scr, LOAD_BTN_X, 4, "读档");
+    DrawStoreButton_(scr, SAVE_BTN_X, 5, "存档");
     DrawProtectStrategyRow_(scr);
     DrawProfileButtons_(scr);
 
@@ -2587,12 +2683,51 @@ static void LoadSelectedProfileIntoCells_()
     RebindVisibleCells_();
 }
 
+// 存档：把当前草稿（含未回写的可见行）写入 DLL 同目录 H3Auto.profiles。
+// 读档：读回 5 套方案草稿并刷新当前方案的卡片。两者都不改生效方案、不暂停。
+static void SaveProfilesToDisk_()
+{
+    WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
+        &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
+    SaveCurrentCellsToDraft_();
+    const bool ok = SaveProfileStore_(s_p.draft_rules,
+        s_p.draft_protect_strategy, s_p.draft_stop_turns);
+    WriteLog("[Panel] 方案%s：%s", ok ? "已存档" : "存档失败", g_profiles_path);
+}
+
+static void LoadProfilesFromDisk_()
+{
+    // 105 条规则约 8KB，堆分配避免游戏线程栈溢出。
+    AutoStackRule (*loaded)[MAX_STACKS] = new AutoStackRule[PROFILE_COUNT][MAX_STACKS]();
+    uint8_t strategies[PROFILE_COUNT] = {};
+    uint8_t stop_turns[PROFILE_COUNT] = {};
+    const bool ok = LoadProfileStore_(loaded, strategies, stop_turns);
+    if (ok) {
+        memcpy(s_p.draft_rules, loaded, sizeof(s_p.draft_rules));
+        memcpy(s_p.draft_protect_strategy, strategies,
+            sizeof(s_p.draft_protect_strategy));
+        memcpy(s_p.draft_stop_turns, stop_turns, sizeof(s_p.draft_stop_turns));
+        s_stop_turns_editing = false;
+        for (int k = 0; k < CELL_COUNT; ++k) {
+            s_p.cells[k].expanded = CEX_NONE;
+            s_p.cells[k].dirty = true;
+        }
+        s_protect_dd_open = false;
+        s_protect_dd_hover = -1;
+        LoadSelectedProfileIntoCells_();
+    }
+    delete[] loaded;
+    WriteLog("[Panel] 方案%s：%s", ok ? "已读档" : "读档失败（文件不存在或损坏）",
+        g_profiles_path);
+}
+
 static void SelectProfile_(int profile)
 {
     if (profile < 0 || profile >= PROFILE_COUNT
         || profile == s_p.selected_profile)
         return;
     SaveCurrentCellsToDraft_();
+    if (s_stop_turns_editing) CommitStopTurnsEdit_();
     s_p.selected_profile = profile;
     s_protect_dd_open = false;   // 策略下拉跟随方案切换，收起重开
     s_protect_dd_hover = -1;
@@ -2642,6 +2777,8 @@ void OpenSettingsPanel_()
     memcpy(s_p.draft_rules, g_profiles, sizeof(s_p.draft_rules));
     memcpy(s_p.draft_protect_strategy, g_protect_strategy,
         sizeof(s_p.draft_protect_strategy));
+    memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
+    s_stop_turns_editing = false;
     for (int i = 0; i < CELL_COUNT; ++i)
         CellControl_Init(&s_p.cells[i]);
 
@@ -2654,6 +2791,7 @@ void OpenSettingsPanel_()
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 
     H3CombatManager* mgr = GetCombatMgr();
+    WriteLog("[Panel] 打开阶段：开始枚举部队");
     if (mgr) {
         // 当前人类玩家侧：优先 currentActiveSide，否则 0。
         int side = 0;
@@ -2685,10 +2823,14 @@ void OpenSettingsPanel_()
         }
     }
     RebindVisibleCells_();
+    WriteLog("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
     InstallBattleInputBlocker_();
+    WriteLog("[Panel] 打开阶段：输入屏障完成");
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
+    WriteLog("[Panel] 打开阶段：开始绘制");
     DrawPanelToBuffer_();
+    WriteLog("[Panel] 打开阶段：绘制完成");
     // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
     const DWORD panel_thread = GetWindowThreadProcessId(
         *reinterpret_cast<HWND*>(0x699650), nullptr);
@@ -2699,7 +2841,8 @@ void OpenSettingsPanel_()
     if (!s_mouse_hook)
         s_mouse_hook = SetWindowsHookExA(WH_MOUSE, PanelMouseHook_, g_hModule,
             panel_thread);
-    WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d)", s_p.count, s_p.x, s_p.y);
+    WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d) s_p=%p",
+        s_p.count, s_p.x, s_p.y, &s_p);
 }
 
 void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer_(); }
@@ -2713,7 +2856,7 @@ static void CommitAndCloseSettingsPanel_()
     // 保活策略是方案级，随 draft_protect_strategy 提交。
     SaveCurrentCellsToDraft_();
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
-        s_p.draft_protect_strategy);
+        s_p.draft_protect_strategy, s_p.draft_stop_turns);
     SyncActiveProtect();
     PauseAutoExecution();
     CloseSettingsPanel();
@@ -2737,6 +2880,7 @@ void CloseSettingsPanel()
     s_help_modal_open = false;
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
+    if (s_stop_turns_editing) CancelStopTurnsEdit_();
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -2758,8 +2902,10 @@ void CloseSettingsPanel()
         s_mouse_hook = nullptr;
     }
     if (s_p.cursor_saved) {
+        // 打开时鼠标停在自动战斗按钮上，保存的是按钮光标；
+        // 关闭后鼠标回到战场，应恢复战场默认光标而不是按钮光标。
         if (H3MouseManager* mouse = H3MouseManager::Get())
-            mouse->SetCursor(s_p.saved_cursor_frame, s_p.saved_cursor_type);
+            mouse->DefaultCursor();
         s_p.cursor_saved = false;
     }
     ReleasePanelComposite_();
@@ -2925,6 +3071,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
+    // 停止回合录入中：点框外提交，点框内忽略。
+    if (s_stop_turns_editing && (raw_command == 8 || raw_command == 16)) {
+        if (!PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
+                STOP_BOX_W, PROTECT_DD_H) && raw_command == 16) {
+            CommitStopTurnsEdit_();
+            DrawPanelToBuffer_();
+        }
+        return;
+    }
+
     // 保活策略下拉展开时：点击项即选中收起，点收起框本身保持展开，
     // 点其他任意处收起（吞掉，不穿透到底层）。
     // 悬停高亮不在此处理：由 WH_MOUSE 钩子的 UpdateDropdownHover_ 即时更新。
@@ -3027,6 +3183,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             DrawPanelToBuffer_();
             return;
         }
+        if (PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
+                STOP_BOX_W, PROTECT_DD_H)) {
+            s_stop_turns_editing = true;
+            s_stop_turns_text[0] = 0;
+            DrawPanelToBuffer_();
+            return;
+        }
 
         for (int i = 0; i < PROFILE_COUNT; ++i) {
             const RECT rc = ProfileButtonRect_(i);
@@ -3043,6 +3206,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
         else if (PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y, HELP_BTN_SIZE, HELP_BTN_SIZE))
             button = 3;
+        else if (PointInRect_(px, py, LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE))
+            button = 4;
+        else if (PointInRect_(px, py, SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE))
+            button = 5;
         if (button != 0) {
             s_p.pressed_button = button;
             DrawPanelToBuffer_();
@@ -3157,14 +3324,20 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         }
 
         const int pressed = s_p.pressed_button;
-        const bool activate = pressed == 1
-            ? PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H)
-            : pressed == 2
-                ? PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)
-                : pressed == 3
-                    ? PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y,
-                        HELP_BTN_SIZE, HELP_BTN_SIZE)
-                    : false;
+        bool activate = false;
+        if (pressed == 1)
+            activate = PointInRect_(px, py, OK_X, BTN_Y, BTN_W, BTN_H);
+        else if (pressed == 2)
+            activate = PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H);
+        else if (pressed == 3)
+            activate = PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y,
+                HELP_BTN_SIZE, HELP_BTN_SIZE);
+        else if (pressed == 4)
+            activate = PointInRect_(px, py, LOAD_BTN_X, HELP_BTN_Y,
+                STORE_BTN_W, HELP_BTN_SIZE);
+        else if (pressed == 5)
+            activate = PointInRect_(px, py, SAVE_BTN_X, HELP_BTN_Y,
+                STORE_BTN_W, HELP_BTN_SIZE);
         const bool redraw = pressed != 0 || s_p.scroll_button_pressed != 0
             || s_p.scroll_dragging;
         s_p.pressed_button = 0;
@@ -3185,6 +3358,12 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 s_protect_dd_hover = -1;
                 s_help_modal_open = true;
                 WriteLog("[Panel] 打开帮助说明模态框");
+                DrawPanelToBuffer_();
+            } else if (pressed == 4) {
+                LoadProfilesFromDisk_();
+                DrawPanelToBuffer_();
+            } else if (pressed == 5) {
+                SaveProfilesToDisk_();
                 DrawPanelToBuffer_();
             }
             return;

@@ -16,6 +16,7 @@ AutoStackRule g_active_rules[21] = {};
 
 // 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
 uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
+uint8_t g_stop_turns[5] = { 10, 10, 10, 10, 10 }; // 自动停止阈值，0=关闭
 
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
@@ -31,6 +32,8 @@ void ClearConfirmedProfiles()
         g_active_rules[s] = def;
     for (int p = 0; p < 5; ++p)
         g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
+    for (int p = 0; p < 5; ++p)
+        g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
 }
 
 static struct Config {
@@ -41,6 +44,7 @@ static struct Config {
 
 static char g_ini_path[MAX_PATH];
 static char g_log_path[MAX_PATH];
+static char g_profiles_path[MAX_PATH];   // 5 套方案存档：DLL 同目录 H3Auto.profiles
 static wchar_t g_log_path_w[MAX_PATH * 2];
 static HMODULE g_hModule = nullptr;
 static bool g_disable_log = false;
@@ -260,6 +264,68 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
         return 'A' + (s[0] & ~0x20) - 'A';
     if (letter_only) return default_vk;
     return default_vk;
+}
+
+// 5 套方案存档：DLL 同目录 H3Auto.profiles（文本一行，格式见 PolicyCore）。
+// 保存/加载的是面板草稿，不改变当前生效方案，也不暂停自动执行。
+// g_profiles_path 定义在 ConfigLog，路径在 Entry 的 DllMain 里初始化。
+
+// 成功返回 true。文件不存在或内容损坏返回 false（草稿保持原样）。
+// SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
+static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
+    const uint8_t strategies[5], const uint8_t stop_turns[5])
+{
+    char* text = new char[64 * 1024];
+    WriteLog("[Panel] 保存：开始编码");
+    const int n = H3AutoPolicy::EncodeProfileStoreText(strategies, rules,
+        stop_turns, text, 64 * 1024);
+    WriteLog("[Panel] 保存：编码完成 n=%d", n);
+    bool ok = false;
+    if (n > 0) {
+        FILE* fp = nullptr;
+        if (fopen_s(&fp, g_profiles_path, "wb") == 0 && fp) {
+            ok = fwrite(text, 1, n, fp) == static_cast<size_t>(n);
+            fclose(fp);
+        }
+    }
+    delete[] text;
+    return ok;
+}
+
+static bool SaveProfileStore_(const AutoStackRule rules[5][21],
+    const uint8_t strategies[5], const uint8_t stop_turns[5])
+{
+    bool ok = false;
+    DWORD code = 0;
+    void* fault = nullptr;
+    __try {
+        ok = SaveProfileStoreRaw_(rules, strategies, stop_turns);
+    } __except (code = GetExceptionCode(),
+                fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
+                EXCEPTION_EXECUTE_HANDLER) {
+        WriteLog("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
+        ok = false;
+    }
+    return ok;
+}
+
+static bool LoadProfileStore_(AutoStackRule rules[5][21],
+    uint8_t strategies[5], uint8_t stop_turns[5])
+{
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, g_profiles_path, "rb") != 0 || !fp) return false;
+    char* text = new char[64 * 1024];
+    const size_t n = fread(text, 1, 64 * 1024 - 1, fp);
+    const int truncated = fgetc(fp) != EOF;
+    fclose(fp);
+    bool ok = false;
+    if (n > 0 && !truncated) {
+        text[n] = 0;
+        ok = H3AutoPolicy::DecodeProfileStoreText(text, strategies, rules,
+            stop_turns);
+    }
+    delete[] text;
+    return ok;
 }
 
 static void ReadConfig()
