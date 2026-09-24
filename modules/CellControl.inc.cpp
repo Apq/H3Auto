@@ -147,6 +147,8 @@ struct CellControl
     int              ratio_edit_request;
     // 录入中由 SettingsDlg 注入的显示串（十进制小数）；nullptr=显示规则当前值。
     const char*      protect_edit_text;
+    // 录入光标可见相位，由 SettingsDlg 每帧更新。
+    bool             protect_edit_caret;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 };
@@ -609,6 +611,19 @@ static void CellControl_FormatMeleePair(char* buf, int bufsize,
     buf[bufsize - 1] = 0;
 }
 
+static int CellControl_TextWidth(H3Font* fnt, const char* text)
+{
+    if (!fnt || !text || !text[0]) return 0;
+    int width = 0;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+        *p; ++p)
+    {
+        const H3Font::FontSpacing& spacing = fnt->width[*p];
+        width += spacing.leftMargin + spacing.span + spacing.rightMargin;
+    }
+    return width;
+}
+
 static void CellControl_DrawText(H3LoadedPcx16* scr, H3Font* fnt,
     const char* text, int x, int y, int w, int h, INT32 color,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
@@ -953,7 +968,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
             eTextAlignment::MIDDLE_LEFT);
 
-        // 倍率数字框：录入中金色高亮；未勾选置灰不可点。
+        // 倍率数字框：录入中金色高亮并在文字末尾显示闪烁光标；未勾选置灰不可点。
         const bool editing = ctrl->protect_edit_text != nullptr;
         CellControl_DrawButtonBg(scr, CC_PROTECT_RATIO_X, CC_PROTECT_Y,
             CC_PROTECT_RATIO_W, CC_ROW_H, editing, false);
@@ -966,11 +981,22 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                 rule.protectRatioX100 / 100.0);
         else
             _snprintf(ratio_buf, sizeof(ratio_buf), "0");
+        const int ratio_text_x = CC_PROTECT_RATIO_X + 4;
+        const int ratio_text_w = CC_PROTECT_RATIO_W - 8;
         CellControl_DrawText(scr, fntS, ratio_buf,
-            CC_PROTECT_RATIO_X + 2, CC_PROTECT_Y, CC_PROTECT_RATIO_W - 4,
+            ratio_text_x, CC_PROTECT_Y, ratio_text_w,
             CC_ROW_H,
             (INT32)(enabled ? eTextColor::GOLD : eTextColor::GRAY),
-            eTextAlignment::MIDDLE_CENTER);
+            editing ? eTextAlignment::MIDDLE_LEFT
+                    : eTextAlignment::MIDDLE_CENTER);
+        if (editing && ctrl->protect_edit_caret) {
+            int caret_x = ratio_text_x + CellControl_TextWidth(fntS, ratio_buf) + 1;
+            const int caret_right = ratio_text_x + ratio_text_w - 2;
+            if (caret_x > caret_right) caret_x = caret_right;
+            const int caret_y = CC_PROTECT_Y + 4;
+            const int caret_h = CC_ROW_H - 8;
+            Fill(scr, caret_x, caret_y, 1, caret_h, 235, 205, 116);
+        }
 
         CellControl_DrawText(scr, fntS, "%",
             CC_PROTECT_PCT_X, CC_PROTECT_Y, CC_PROTECT_PCT_W, CC_ROW_H,

@@ -30,8 +30,8 @@ void ClearConfirmedProfiles()
 
 static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
-    int  toggle_manual_vk;     // F11：本场自动/全手动切换
-    int  one_shot_manual_vk;   // 左 Ctrl：单次接管当前/下一支部队
+    int  toggle_manual_vk;     // F9：本场自动/全手动切换
+    int  one_shot_manual_vk;   // J：单次接管当前/下一支部队
 } cfg;
 
 static char g_ini_path[MAX_PATH];
@@ -209,7 +209,12 @@ static int ClampInt(int value, int min_value, int max_value)
 
 static void WriteLog(const char* fmt, ...);  // 前向声明
 
-static int ParseHotkeyVk_(const char* text, int default_vk)
+static bool IsAllowedOneShotVk_(int vk)
+{
+    return (vk >= 'A' && vk <= 'Z' && vk != 'E');
+}
+
+static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 {
     if (!text) return default_vk;
     char buf[64] = {};
@@ -245,6 +250,10 @@ static int ParseHotkeyVk_(const char* text, int default_vk)
         int n = atoi(s + 1);
         if (n >= 1 && n <= 12) return VK_F1 + (n - 1);
     }
+    if (((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))
+        && s[1] == 0)
+        return 'A' + (s[0] & ~0x20) - 'A';
+    if (letter_only) return default_vk;
     return default_vk;
 }
 
@@ -256,15 +265,41 @@ static void ReadConfig()
 
     char toggle_buf[64] = {};
     char oneshot_buf[64] = {};
-    GetPrivateProfileStringA("Hotkeys", "ToggleManual", "F11",
+    GetPrivateProfileStringA("Hotkeys", "ToggleManual", "F9",
         toggle_buf, sizeof(toggle_buf), f);
-    GetPrivateProfileStringA("Hotkeys", "OneShotManual", "LControl",
+    GetPrivateProfileStringA("Hotkeys", "OneShotManual", "J",
         oneshot_buf, sizeof(oneshot_buf), f);
-    cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F11);
-    cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, VK_LCONTROL);
+    cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F9, false);
+    cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, 'J', true);
+    if (!IsAllowedOneShotVk_(cfg.one_shot_manual_vk)) {
+        WriteLog("配置警告：OneShotManual 只允许单个字母，已回退到 J");
+        cfg.one_shot_manual_vk = 'J';
+    }
 
     WriteLog("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X",
         cfg.disable_on_start, cfg.toggle_manual_vk, cfg.one_shot_manual_vk);
+}
+
+static const char* HotkeyDisplayName_(int vk)
+{
+    static char buf[16];
+    if (vk >= VK_F1 && vk <= VK_F12) {
+        snprintf(buf, sizeof(buf), "F%d", vk - VK_F1 + 1);
+        return buf;
+    }
+    if (vk >= 'A' && vk <= 'Z') {
+        snprintf(buf, sizeof(buf), "%c", vk);
+        return buf;
+    }
+    if (vk >= '0' && vk <= '9') {
+        snprintf(buf, sizeof(buf), "%c", vk);
+        return buf;
+    }
+    if (vk == VK_LCONTROL) return "左Ctrl";
+    if (vk == VK_RCONTROL) return "右Ctrl";
+    if (vk == VK_CONTROL) return "Ctrl";
+    snprintf(buf, sizeof(buf), "0x%X", vk);
+    return buf;
 }
 
 // ========== 日志输出 ==========

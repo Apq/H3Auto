@@ -120,7 +120,15 @@ void TestTargetScoring()
     Check(SelectTargetIndex(candidates, 3, SEL_COUNT_HIGH, 0) == 0,
         "count high keeps first tie");
     Check(SelectTargetIndex(candidates, 3, SEL_RANGED_SPEED, 0) == 1,
-        "ranged speed prefers shooter before speed");
+        "ranged flyer speed prefers shooter before flyer");
+
+    const TargetCandidate flight[] = {
+        {5, 10, 100, 0, 1, 30, 0},
+        {5, 10, 100, 0, 1, 10, 1},
+        {5, 10, 100, 0, 0, 40, 1},
+    };
+    Check(SelectTargetIndex(flight, 3, SEL_RANGED_SPEED, 0) == 1,
+        "ranged flyer speed prefers flyer before speed");
     Check(SelectTargetIndex(candidates, 3, SEL_RANDOM, 4) == 1,
         "random selector uses injected random value");
 
@@ -312,12 +320,12 @@ void TestProtect()
     Check(ProtectThresholdHp(2500, 500) == 125, "ratio 25% is a quarter");
     Check(ProtectThresholdHp(3333, 1000) == 333, "ratio 33.33% rounds via truncation");
 
-    // 严格小于阈值触发；未勾选不触发；意外全灭不触发。
+    // 严格小于阈值触发；未勾选不触发；全灭尸体可触发。
     Check(ProtectShouldCast(true, 10000, 500, 2, 499), "hp strictly below threshold casts");
     Check(!ProtectShouldCast(true, 10000, 500, 2, 500), "hp equal to threshold does not cast");
     Check(!ProtectShouldCast(false, 10000, 500, 2, 1), "unchecked protect disables");
-    Check(!ProtectShouldCast(true, 10000, 500, 0, 0), "fully dead stack does not trigger");
-    Check(!ProtectShouldCast(true, 10000, 0, 2, 1), "unlearned spell never triggers");
+    Check(ProtectShouldCast(true, 10000, 500, 0, 0), "dead stack with a corpse triggers");
+    Check(!ProtectShouldCast(true, 10000, 0, 0, 0), "dead stack without the spell never triggers");
 
     // 默认规则：未勾选，倍率 100%。
     const AutoStackRule def = MakeDefaultRule();

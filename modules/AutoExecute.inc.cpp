@@ -38,9 +38,10 @@ static struct {
     int   oneshot_side;         // 锁定部队 side
     int   oneshot_slot;         // 锁定部队 army_slot
     int   oneshot_creature;     // 锁定部队 creature_id
-    bool  oneshot_pending;      // 按住 Ctrl 时若当前不可接管，则等下一支
-    bool  prev_toggle_down;     // F11 边沿
-    bool  prev_oneshot_down;    // Ctrl 边沿
+    bool  oneshot_pending;      // 当前不可接管时，等下一支
+    bool  prev_toggle_down;     // 全手动热键边沿
+    bool  prev_oneshot_down;    // 单次接管热键边沿
+    bool  suppress_toggle_edge; // 关闭面板后的一次切换边沿无效
     char  last_status_text[64]; // 状态提示去重
 } g_auto_state;
 
@@ -299,6 +300,15 @@ static bool IsGameWindowForegroundForHotkeys_()
         && GetAncestor(foreground, GA_ROOT) == GetAncestor(game_window, GA_ROOT);
 }
 
+static bool IsHotkeyDown_(int vk);
+
+void SyncControlHotkeyEdges_()
+{
+    g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
+    g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
+    g_auto_state.suppress_toggle_edge = true;
+}
+
 static bool IsHotkeyDown_(int vk)
 {
     if (vk <= 0 || vk >= 256) return false;
@@ -483,8 +493,12 @@ static void PollControlHotkeys_(_BattleMgr_* mgr)
     const bool toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
     const bool oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
 
-    if (toggle_down && !g_auto_state.prev_toggle_down)
-        ToggleBattleManual_();
+    if (toggle_down && !g_auto_state.prev_toggle_down) {
+        if (g_auto_state.suppress_toggle_edge)
+            g_auto_state.suppress_toggle_edge = false;
+        else
+            ToggleBattleManual_();
+    }
 
     // 全手动时不需要单次接管；松键也不保留 pending。
     if (!g_auto_state.battle_manual) {
@@ -573,11 +587,13 @@ void ResetAutoState()
     g_auto_state.spell_mana_before = 0;
     g_auto_state.spell_casted_before = 0;
     g_auto_state.spell_waiting = false;
-    g_auto_state.battle_manual = false;
+    // F9 全手动是用户对"本场谁执行"的显式选择；取消重打/重绑不清，
+    // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
+    // 只清单次接管与施法等待等运行时数据。
     g_protect_checked_turn = -1;   // 战斗状态重置后重新判定首动保活
     ClearOneShotManual_();
-    g_auto_state.prev_toggle_down = false;
-    g_auto_state.prev_oneshot_down = false;
+    g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
+    g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
     g_auto_state.last_status_text[0] = 0;
     // 策略是本进程内的已确认设置，战斗状态重置时保留；
     // 跟踪表是“当前战斗绑定”，进程重置时清空。
@@ -782,7 +798,7 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
 // 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历勾选了
 // 首动保活的己方部队，当前总血量严格低于 可恢复量×(倍率/100) 的取血量
 // 最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，直接 CastSpell 施放。
-// 每回合只判一次（成败不重试）；部队意外全灭不触发；英雄本回合已施法
+// 每回合只判一次（成败不重试）；已全灭但仍有尸体的部队优先恢复；英雄本回合已施法
 // 跳过；不占快捷施法、不推进任何部队的循环施法游标。
 
 // 设置面板提交后调用：作废已判定标记，当前/下一回合重新判定。
@@ -794,8 +810,27 @@ void SyncActiveProtect()
     }
 }
 
+// 设置保存后进入「停」：保存只落方案，不立即自动执行；
+// 由 F9（启停打铁）启动。重复调用不重复记日志。
+void PauseAutoExecution()
+{
+    if (!g_auto_state.battle_manual) {
+        g_auto_state.battle_manual = true;
+        ClearOneShotManual_();
+        WriteLog("[Control] paused after commit; press toggle hotkey to start");
+        RefreshControlStatusHint_();
+    }
+}
+
 // 战斗回合号：H3CombatManager::turn（tacticsPhase 之后，H3API.hpp:19445）。
 // _BattleMgr_（Compat）没有该字段，须走 H3CombatManager::Get()。
+static int StackHex_(_BattleStack_* stack)
+{
+    if (!stack) return -1;
+    const int hex = reinterpret_cast<H3CombatCreature*>(stack)->position;
+    return (hex >= 0 && hex <= 186) ? hex : -1;
+}
+
 static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
 {
     if (!mgr) return -1;
@@ -831,19 +866,22 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     }
     const int spell_power = cm->heroSpellPower[side];
 
-    // 遍历勾选槽，取满足条件且当前总血量最低的一支。
+    // 遍历勾选槽，优先恢复已全灭但仍有尸体的部队；其余取当前总血量最低的一支。
     int best_slot = -1, best_remaining = 0, best_spell = 0, best_exp = 0;
+    bool best_dead = false;
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = g_active_rules[slot];
         if (!rule.protectEnable) continue;
 
         const StackTrackEntry& te = g_stack_track[slot];
-        if (!te.bound || !te.alive || te.side != side) continue;
+        if (!te.bound || te.side != side) continue;
         _BattleStack_* st = &mgr->stack[side][slot];
-        if (!st || st->count_current <= 0) continue;   // 意外全灭不触发
+        if (!st || st->count_at_start <= 0) continue;
+        const bool dead = st->count_current <= 0;
+        if (dead && StackHex_(st) < 0) continue;          // 没有可施法的尸体格
 
         // 总血量口径与急救“失血数值”互为倒数：存活数×满血 − 顶层已损。
-        // 满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
+        // 全灭后总血量为 0；满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
         H3AutoPolicy::TargetCandidate cand = {};
         cand.count_current = st->count_current;
         cand.count_at_start = st->count_at_start;
@@ -862,11 +900,15 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         if (!H3AutoPolicy::ProtectShouldCast(true, rule.protectRatioX100,
                 restorable, st->count_current, remaining))
             continue;
-        if (best_slot < 0 || remaining < best_remaining) {
+        const bool better = best_slot < 0
+            || (dead && !best_dead)
+            || (dead == best_dead && remaining < best_remaining);
+        if (better) {
             best_slot = slot;
             best_remaining = remaining;
             best_spell = spell_id;
             best_exp = expertise;
+            best_dead = dead;
         }
     }
     if (best_slot < 0) return false;
@@ -875,7 +917,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     WriteLog("[Protect] turn=%d slot=%d cid=0x%X hp=%d spell=%d exp=%d; casting",
         turn, best_slot, st->creature_id, best_remaining, best_spell, best_exp);
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
-    cm->CastSpell(best_spell, st->hex_ix, 0, -1, best_exp, spell_power);
+    cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
     return true;
 }
 
@@ -1025,6 +1067,7 @@ static H3AutoPolicy::TargetCandidate TargetCandidateOf_(_BattleStack_* t)
     c.lost_hp = t->lost_hp;
     c.shots = t->creature.shots;
     c.speed = t->creature.speed;
+    c.flyer = P_CreatureInformation[t->creature_id].flyer ? 1 : 0;
     return c;
 }
 
@@ -1039,10 +1082,9 @@ static int WoundRatioKey_(_BattleStack_* t)
 }
 
 // 通用部队选择：side_filter = 0己方 / 1敌方 / 2双方；require_wounded 用于急救。
-// 远程：随机 / 远程高速优先 / 数量最多；急救：随机 / 失血比例 / 失血数值。
+// 远程：随机 / 远程飞兵高速优先 / 数量最多；急救：随机 / 失血比例 / 失血数值。
 static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
-    const AutoStackRule& rule, int side_filter, bool require_wounded,
-    bool require_can_shoot)
+    const AutoStackRule& rule, int side_filter, bool require_wounded)
 {
     if (!mgr || !self) return nullptr;
 
@@ -1055,8 +1097,7 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
             _BattleStack_* t = &mgr->stack[side][i];
             if (t == self) continue;
             if (t->count_current <= 0 || t->count_at_start <= 0) continue;
-            if (t->creature_id < 0) continue;
-            if (require_can_shoot && !self->CanShoot(t)) continue;
+            if (t->creature_id < 0 || IsWarMachineCid_(t->creature_id)) continue;
             if (require_wounded
                 && t->lost_hp <= 0 && t->count_current >= t->count_at_start)
                 continue;
@@ -1071,7 +1112,12 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     const int selected = H3AutoPolicy::SelectTargetIndex(
         scored, count, rule.target.selector,
         static_cast<uint32_t>(rand()));
-    return selected >= 0 ? candidates[selected] : nullptr;
+    if (selected < 0) {
+        WriteLog("[Auto] target selector rejected count=%d selector=%d side=%d wounded=%d",
+            count, (int)rule.target.selector, side_filter, require_wounded ? 1 : 0);
+        return nullptr;
+    }
+    return candidates[selected];
 }
 
 // 解析位置目标：用部队目标的位置作锚点（循环移动旧单目标兜底）。
@@ -1082,8 +1128,8 @@ static int ResolvePositionTarget_(_BattleMgr_* mgr, _BattleStack_* self,
     int side_filter = 2;
     if (rule.target.side == ATS_OWN) side_filter = 0;
     else if (rule.target.side == ATS_ENEMY) side_filter = 1;
-    _BattleStack_* t = SelectStackTarget_(mgr, self, rule, side_filter, false, false);
-    if (t) return t->hex_ix;
+    _BattleStack_* t = SelectStackTarget_(mgr, self, rule, side_filter, false);
+    if (t) return StackHex_(t);
     return -1;
 }
 
@@ -1115,15 +1161,26 @@ static bool WriteAction_(_BattleMgr_* mgr, _BattleStack_* self,
     return true;
 }
 
-// 提交远程攻击：action=7, actionTarget=目标 hex。
+// 提交远程攻击：action=7, actionParameter=目标 hex。
 static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
 {
-    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false, true);
-    if (!target) return false;
-    if (!WriteAction_(mgr, self, BA_SHOOT, -1, target->hex_ix))
+    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false);
+    if (!target) {
+        WriteLog("[Auto] ranged target unavailable slot=%d cid=0x%X selector=%d",
+            self->army_slot_ix, self->creature_id, (int)rule.target.selector);
+        return false;
+    }
+    const int target_hex = StackHex_(target);
+    if (target_hex < 0) {
+        WriteLog("[Auto] ranged target hex invalid slot=%d target_slot=%d cid=0x%X",
+            self->army_slot_ix, target->army_slot_ix, target->creature_id);
+        return false;
+    }
+    // 与近战一致：目标格走 actionTarget；actionParameter 不承载射击落点。
+    if (!WriteAction_(mgr, self, BA_SHOOT, -1, target_hex))
         return false;
     WriteLog("[Auto] submit SHOOT slot=%d -> hex=%d target_slot=%d",
-        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+        self->army_slot_ix, target_hex, target->army_slot_ix);
     return true;
 }
 
@@ -1182,16 +1239,16 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
 
         // 到点才推进（方案 A）：已站在当前点，则切到下一个点；
         // 若配置含重复点，跳过连续的脚下点。
-        if (self->hex_ix == wps[cur])
+        if (StackHex_(self) == wps[cur])
             cur = (cur + 1) % n;
         int guard = 0;
-        while (wps[cur] == self->hex_ix && guard < n) {
+        while (wps[cur] == StackHex_(self) && guard < n) {
             cur = (cur + 1) % n;
             ++guard;
         }
 
         int hex = wps[cur];
-        if (hex == self->hex_ix) return false; // 所有点都在脚下
+        if (hex == StackHex_(self)) return false; // 所有点都在脚下
         if (!IsMoveTargetReachable_(mgr, self, hex)) {
             WriteLog("[Auto] WALK target unreachable slot=%d hex=%d cursor=%d/%d; no cursor advance",
                 self->army_slot_ix, hex, cur, n);
@@ -1208,7 +1265,7 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     // 回退：旧单目标移动。
     int hex = ResolvePositionTarget_(mgr, self, rule);
     if (hex < 1 || hex > 185) return false;
-    if (hex == self->hex_ix) return false;
+    if (hex == StackHex_(self)) return false;
     if (!IsMoveTargetReachable_(mgr, self, hex)) {
         WriteLog("[Auto] WALK target unreachable slot=%d hex=%d; player/fallback path",
             self->army_slot_ix, hex);
@@ -1231,7 +1288,7 @@ static _BattleStack_* FindEnemyOccupyingHex_(_BattleMgr_* mgr, _BattleStack_* se
         _BattleStack_* t = &mgr->stack[enemy_side][i];
         if (t->count_current <= 0 || t->count_at_start <= 0) continue;
         if (t->creature_id < 0) continue;
-        if (t->hex_ix == hex) return t;
+        if (StackHex_(t) == hex) return t;
         int second = -1;
         __try {
             second = THISCALL_1(int, 0x4463C0, t);
@@ -1291,7 +1348,7 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
     if (!legacy && count > 0)
         runtime.melee_cursor = (cursor + 1) % count;
     WriteLog("[Auto] submit MELEE(loop) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
-        cursor, count, stand_hex, attack_hex, enemy->army_slot_ix, enemy->hex_ix,
+        cursor, count, stand_hex, attack_hex, enemy->army_slot_ix, StackHex_(enemy),
         legacy ? 0 : runtime.melee_cursor);
     return true;
 }
@@ -1305,15 +1362,17 @@ static bool SubmitWait_(_BattleMgr_* mgr, _BattleStack_* self)
     return true;
 }
 
-// 提交急救：action=11, actionTarget=己方伤员 hex。
+// 提交急救：action=11, actionParameter=己方伤员 hex。
 static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
 {
-    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 0, true, false);
+    _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 0, true);
     if (!target) return false;
-    if (!WriteAction_(mgr, self, BA_FIRST_AID, -1, target->hex_ix))
+    const int target_hex = StackHex_(target);
+    if (target_hex < 0) return false;
+    if (!WriteAction_(mgr, self, BA_FIRST_AID, target_hex, -1))
         return false;
     WriteLog("[Auto] submit FIRST_AID slot=%d -> hex=%d target_slot=%d",
-        self->army_slot_ix, target->hex_ix, target->army_slot_ix);
+        self->army_slot_ix, target_hex, target->army_slot_ix);
     return true;
 }
 

@@ -66,7 +66,7 @@ static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
     "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗",
 };
 static const char* DEFAULT_SELECTOR_LABELS[SEL_COUNT] = {
-    "随机", "远程高速优先", "数量最多", "失血比例", "失血数值",
+    "随机", "远程飞兵高速优先", "数量最多", "失血比例", "失血数值",
 };
 
 // 运行时标签
@@ -2292,20 +2292,24 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         x + 16, y + 12, w - 32, 26,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 
-    // 极简 7 条 + 大行距，避免密麻。
-    static const char* kHelpLines[] = {
+    char hotkey_line[96];
+    snprintf(hotkey_line, sizeof(hotkey_line), "热键：%s 启停打铁 · %s 单次接管",
+        HotkeyDisplayName_(cfg.toggle_manual_vk),
+        HotkeyDisplayName_(cfg.one_shot_manual_vk));
+
+    const char* help_lines[] = {
         "打开设置窗口：右键点击“自动战斗”",
         "方案：5 套本场有效，确定才保存",
         "施法/近战/移动：点 ＋ 后按提示设置",
         "首动保活：卡片勾选，血量低自动复活/聚灵",
         "删除：槽位上右键",
-        "热键：F11 全手动 · 左Ctrl 单次接管",
+        hotkey_line,
         "设置有效期：取消重打保留，接受结果清除",
     };
     const int line_h = 28;
     int ty = y + 50;
-    for (int i = 0; i < (int)(sizeof(kHelpLines) / sizeof(kHelpLines[0])); ++i) {
-        DrawTxt(scr, small_font, kHelpLines[i],
+    for (int i = 0; i < (int)(sizeof(help_lines) / sizeof(help_lines[0])); ++i) {
+        DrawTxt(scr, small_font, help_lines[i],
             x + 18, ty, w - 36, line_h,
             (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
         ty += line_h;
@@ -2421,6 +2425,7 @@ static void DrawPanelToBuffer_()
         if (editing || ctrl->protect_edit_text)
             ctrl->dirty = true;
         ctrl->protect_edit_text = editing ? s_p.ratio_buf : nullptr;
+        ctrl->protect_edit_caret = editing && ((GetTickCount() / 500) & 1) == 0;
         if (ctrl->dirty || !ctrl->buffer)
             CellControl_DrawCollapsed(ctrl);
         if (ctrl->buffer && ctrl->buffer->buffer) {
@@ -2719,6 +2724,7 @@ static void CommitAndCloseSettingsPanel_()
     SaveCurrentCellsToDraft_();
     CommitProfiles(s_p.selected_profile, s_p.draft_rules);
     SyncActiveProtect();
+    PauseAutoExecution();
     CloseSettingsPanel();
 }
 
@@ -2760,6 +2766,7 @@ void CloseSettingsPanel()
         UnhookWindowsHookEx(s_mouse_hook);
         s_mouse_hook = nullptr;
     }
+    SyncControlHotkeyEdges_();
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
             mouse->SetCursor(s_p.saved_cursor_frame, s_p.saved_cursor_type);

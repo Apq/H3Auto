@@ -381,6 +381,7 @@ struct TargetCandidate {
     int lost_hp;
     int shots;
     int speed;
+    int flyer;
 };
 
 inline int StackRemainingHp(const TargetCandidate& candidate)
@@ -419,13 +420,13 @@ inline int ProtectThresholdHp(int ratio_x100, int restorable_hp)
     return static_cast<int>(t);
 }
 
-// 是否触发：未勾选不触发；已全灭（alive_count<=0）不触发（部队意外
-// 全灭后不再保活）；当前总血量严格小于阈值才触发。
+// 是否触发：未勾选不触发；当前总血量严格小于阈值才触发。
+// alive_count<=0 表示部队已全灭但仍保留尸体，这种部队优先恢复，不因全灭跳过。
 inline bool ProtectShouldCast(bool enabled, int ratio_x100,
     int restorable_hp, int alive_count, int remaining_hp)
 {
+    (void)alive_count;
     if (!enabled) return false;
-    if (alive_count <= 0) return false;
     if (remaining_hp < 0) remaining_hp = 0;
     return remaining_hp < ProtectThresholdHp(ratio_x100, restorable_hp);
 }
@@ -468,8 +469,11 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
         case SEL_RANGED_SPEED: {
             const int current_ranged = candidates[i].shots > 0 ? 1 : 0;
             const int best_ranged = candidates[best].shots > 0 ? 1 : 0;
+            const int current_flyer = candidates[i].flyer > 0 ? 1 : 0;
+            const int best_flyer = candidates[best].flyer > 0 ? 1 : 0;
             better = current_ranged > best_ranged
-                || (current_ranged == best_ranged
+                || (current_ranged == best_ranged && current_flyer > best_flyer)
+                || (current_ranged == best_ranged && current_flyer == best_flyer
                     && candidates[i].speed > candidates[best].speed);
             break;
         }
