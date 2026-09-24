@@ -2766,7 +2766,6 @@ void CloseSettingsPanel()
         UnhookWindowsHookEx(s_mouse_hook);
         s_mouse_hook = nullptr;
     }
-    SyncControlHotkeyEdges_();
     if (s_p.cursor_saved) {
         if (H3MouseManager* mouse = H3MouseManager::Get())
             mouse->SetCursor(s_p.saved_cursor_frame, s_p.saved_cursor_type);

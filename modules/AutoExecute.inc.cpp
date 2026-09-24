@@ -39,9 +39,8 @@ static struct {
     int   oneshot_slot;         // 锁定部队 army_slot
     int   oneshot_creature;     // 锁定部队 creature_id
     bool  oneshot_pending;      // 当前不可接管时，等下一支
-    bool  prev_toggle_down;     // 全手动热键边沿
-    bool  prev_oneshot_down;    // 单次接管热键边沿
-    bool  suppress_toggle_edge; // 关闭面板后的一次切换边沿无效
+    bool  kb_toggle_seen;       // 键盘钩子捕获的启停键按下（待消费）
+    bool  kb_oneshot_seen;      // 键盘钩子捕获的单次接管键按下（待消费）
     char  last_status_text[64]; // 状态提示去重
 } g_auto_state;
 
@@ -300,23 +299,45 @@ static bool IsGameWindowForegroundForHotkeys_()
         && GetAncestor(foreground, GA_ROOT) == GetAncestor(game_window, GA_ROOT);
 }
 
-static bool IsHotkeyDown_(int vk);
+// ==== 战斗热键：常驻键盘钩子捕获 keydown 边沿 ====
+// PollControlHotkeys_ 挂在回合控制权判定时机，战斗动画期间不被调用，
+// GetAsyncKeyState 轮询会错过短按。钩子在按键消息发生时立即记录标志，
+// 轮询只消费标志，因此绝不漏按；也不受轮询频率影响。
+static HHOOK s_combat_kb_hook = nullptr;
 
-void SyncControlHotkeyEdges_()
+static LRESULT CALLBACK CombatHotkeyKbHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
-    g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
-    g_auto_state.suppress_toggle_edge = true;
+    // bit31=1 是 keyup；bit30=1 是自动重复（按住不放），都不要。
+    if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)
+        && !IsPanelActive())
+    {
+        if ((int)wParam == cfg.toggle_manual_vk)
+            g_auto_state.kb_toggle_seen = true;
+        else if ((int)wParam == cfg.one_shot_manual_vk)
+            g_auto_state.kb_oneshot_seen = true;
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-static bool IsHotkeyDown_(int vk)
+static void EnsureCombatKbHook_()
 {
-    if (vk <= 0 || vk >= 256) return false;
-    // 左右 Ctrl 分别检测；VK_CONTROL 则任意一侧。
-    if (vk == VK_CONTROL)
-        return (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0
-            || (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
-    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+    if (s_combat_kb_hook) return;
+    HWND game_window = *reinterpret_cast<HWND*>(0x699650);
+    if (!game_window) return;
+    const DWORD tid = GetWindowThreadProcessId(game_window, nullptr);
+    if (!tid) return;
+    s_combat_kb_hook = SetWindowsHookExA(WH_KEYBOARD, CombatHotkeyKbHook_,
+        g_hModule, tid);
+    if (s_combat_kb_hook)
+        WriteLog("[Control] combat keyboard hook installed");
+}
+
+void ShutdownCombatHotkeys()
+{
+    if (s_combat_kb_hook) {
+        UnhookWindowsHookEx(s_combat_kb_hook);
+        s_combat_kb_hook = nullptr;
+    }
 }
 
 static void ClearOneShotManual_()
@@ -475,34 +496,31 @@ static void ToggleBattleManual_()
     RefreshControlStatusHint_();
 }
 
-// 每帧/每消息入口：处理热键边沿 + 待命单次接管。
+// 回合控制权判定/消息入口调用：消费钩子记录的热键按下 + 处理待命单次接管。
 static void PollControlHotkeys_(_BattleMgr_* mgr)
 {
+    EnsureCombatKbHook_();
     if (IsPanelActive()) {
-        // 设置面板打开时不抢热键，只同步边沿，避免关面板后误触发。
-        g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
-        g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
+        // 设置面板打开期间的热键交给面板自身处理，不生效。
+        g_auto_state.kb_toggle_seen = false;
+        g_auto_state.kb_oneshot_seen = false;
         return;
     }
     if (!IsGameWindowForegroundForHotkeys_()) {
-        g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
-        g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
+        g_auto_state.kb_toggle_seen = false;
+        g_auto_state.kb_oneshot_seen = false;
         return;
     }
 
-    const bool toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
-    const bool oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
-
-    if (toggle_down && !g_auto_state.prev_toggle_down) {
-        if (g_auto_state.suppress_toggle_edge)
-            g_auto_state.suppress_toggle_edge = false;
-        else
-            ToggleBattleManual_();
+    if (g_auto_state.kb_toggle_seen) {
+        g_auto_state.kb_toggle_seen = false;
+        ToggleBattleManual_();
     }
 
     // 全手动时不需要单次接管；松键也不保留 pending。
     if (!g_auto_state.battle_manual) {
-        if (oneshot_down && !g_auto_state.prev_oneshot_down) {
+        if (g_auto_state.kb_oneshot_seen) {
+            g_auto_state.kb_oneshot_seen = false;
             if (!g_auto_state.oneshot_active)
                 ArmOneShotManual_(mgr);
         }
@@ -519,9 +537,6 @@ static void PollControlHotkeys_(_BattleMgr_* mgr)
     } else if (g_auto_state.oneshot_active || g_auto_state.oneshot_pending) {
         ClearOneShotManual_();
     }
-
-    g_auto_state.prev_toggle_down = toggle_down;
-    g_auto_state.prev_oneshot_down = oneshot_down;
 }
 
 // 当前是否应把控制权留给玩家（最高优先级门）。
@@ -592,8 +607,8 @@ void ResetAutoState()
     // 只清单次接管与施法等待等运行时数据。
     g_protect_checked_turn = -1;   // 战斗状态重置后重新判定首动保活
     ClearOneShotManual_();
-    g_auto_state.prev_toggle_down = IsHotkeyDown_(cfg.toggle_manual_vk);
-    g_auto_state.prev_oneshot_down = IsHotkeyDown_(cfg.one_shot_manual_vk);
+    g_auto_state.kb_toggle_seen = false;
+    g_auto_state.kb_oneshot_seen = false;
     g_auto_state.last_status_text[0] = 0;
     // 策略是本进程内的已确认设置，战斗状态重置时保留；
     // 跟踪表是“当前战斗绑定”，进程重置时清空。

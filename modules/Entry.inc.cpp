@@ -2,6 +2,7 @@
 // 插件入口与 Hook 注册
 
 extern void ResetAutoState();
+extern void ShutdownCombatHotkeys();
 extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
 extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
@@ -63,6 +64,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         StartPlugin();
     }
     if (reason == DLL_PROCESS_DETACH) {
+        ShutdownCombatHotkeys();
         ResetAutoState();
     }
     return TRUE;
