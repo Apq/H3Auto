@@ -315,31 +315,57 @@ void TestProtect()
     Check(ResurrectionRestoreHp(3, 10) == 1000, "expert resurrection restores 100*power");
     Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
 
-    // 阈值：先算倍率/100（浮点），再乘可恢复量。100.00% 存 10000。
-    Check(ProtectThresholdHp(10000, 500) == 500, "ratio 100% keeps restorable hp");
-    Check(ProtectThresholdHp(2500, 500) == 125, "ratio 25% is a quarter");
-    Check(ProtectThresholdHp(3333, 1000) == 333, "ratio 33.33% rounds via truncation");
+    // 方案级策略门槛：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量。
+    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, true),
+        "PS_NONE never casts");
+    Check(ProtectShouldCast(true, PS_ON_DEAD, 500, 600, true),
+        "on-dead strategy casts for a dead stack");
+    Check(!ProtectShouldCast(true, PS_ON_DEAD, 500, 600, false),
+        "on-dead strategy skips living stacks");
+    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, false),
+        "first-action strategy casts on any loss");
+    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, false),
+        "first-action strategy skips undamaged stacks");
+    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, false),
+        "loss above restorable casts");
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, false),
+        "loss equal to restorable does not cast");
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, true),
+        "unlearned spell never casts");
+    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, true),
+        "not in queue disables");
 
-    // 严格小于阈值触发；未勾选不触发；全灭尸体可触发。
-    Check(ProtectShouldCast(true, 10000, 500, 2, 499), "hp strictly below threshold casts");
-    Check(!ProtectShouldCast(true, 10000, 500, 2, 500), "hp equal to threshold does not cast");
-    Check(!ProtectShouldCast(false, 10000, 500, 2, 1), "unchecked protect disables");
-    Check(ProtectShouldCast(true, 10000, 500, 0, 0), "dead stack with a corpse triggers");
-    Check(!ProtectShouldCast(true, 10000, 0, 0, 0), "dead stack without the spell never triggers");
+    // 够格者中选目标：血量最低（全灭者剩余 0 天然最前）。
+    {
+        TargetCandidate cands[3] = {};
+        // [0] 大天使 2 剩 1，hp200 lost30：wound=230, remaining=170
+        cands[0].count_current = 1;
+        cands[0].count_at_start = 2;
+        cands[0].hit_points = 200;
+        cands[0].lost_hp = 30;
+        // [1] 冠军 5 剩 3，hp100 lost40：wound=240, remaining=260
+        cands[1].count_current = 3;
+        cands[1].count_at_start = 5;
+        cands[1].hit_points = 100;
+        cands[1].lost_hp = 40;
+        // [2] 泰坦 4 全灭，hp150：wound=600, remaining=0
+        cands[2].count_current = 0;
+        cands[2].count_at_start = 4;
+        cands[2].hit_points = 150;
 
-    // 默认规则：未勾选，倍率 100%。
+        Check(SelectProtectTargetIndex(cands, 3) == 2,
+            "lowest hp picks the dead stack first");
+        Check(SelectProtectTargetIndex(cands, 2) == 0,
+            "without the dead stack picks angel at 170 over champion at 260");
+        Check(SelectProtectTargetIndex(nullptr, 3) == -1,
+            "null candidates returns -1");
+        Check(SelectProtectTargetIndex(cands, 0) == -1,
+            "empty candidate list returns -1");
+    }
+
+    // 默认规则：未入保活队列。
     const AutoStackRule def = MakeDefaultRule();
-    Check(def.protectEnable == 0 && def.protectRatioX100 == PROTECT_RATIO_DEFAULT_X100,
-        "default rule has protect off at 100%");
-
-    // 倍率夹范围（0..10000.00%）。
-    AutoStackRule dirty = def;
-    dirty.protectRatioX100 = -5;
-    NormalizeRule(&dirty, 0, false, false, false);
-    Check(dirty.protectRatioX100 == PROTECT_RATIO_MIN_X100, "negative ratio clamps to 0");
-    dirty.protectRatioX100 = 5000000;
-    NormalizeRule(&dirty, 0, false, false, false);
-    Check(dirty.protectRatioX100 == PROTECT_RATIO_MAX_X100, "huge ratio clamps to max");
+    Check(def.protectEnable == 0, "default rule is not in the protect queue");
 }
 
 } // namespace

@@ -10,7 +10,8 @@ static void WriteLog(const char* fmt, ...);
 void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b);
 H3Font* GetSmallFont();
 static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width,
-    int expected_height, H3LoadedPcx16*& cache, bool& load_failed);
+    int expected_height, H3LoadedPcx16*& cache, bool& load_failed,
+    bool allow_shorter_height);
 static void DrawTransparentPcx_(H3LoadedPcx16* source,
     H3LoadedPcx16* destination, int dst_x, int dst_y);
 
@@ -71,17 +72,11 @@ static const int CC_BOT_Y    = 54;  // 下行（降级/阵营/路径槽）
 static const int CC_PROTECT_Y = 78; // 底部行：首动保活（§8.7）
 static const int CC_CHECKBOX_H = 14;
 
-// 首动保活行布局（第三小列内）：复选框在文字前面，倍率数字框后缀 %。
+// 首动保活行布局（第三小列内）：复选框在文字前面，仅「加入保活队列」。
 static const int CC_PROTECT_CB_X     = CC_COL3_X;          // 复选框
 static const int CC_PROTECT_CB_BOX   = 10;
-static const int CC_PROTECT_LABEL_X  = CC_COL3_X + 14;     // 「首动保活」
-static const int CC_PROTECT_LABEL_W  = 68;
-static const int CC_PROTECT_RLBL_X   = CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W + 8; // 「倍率」
-static const int CC_PROTECT_RLBL_W   = 34;
-static const int CC_PROTECT_RATIO_X  = CC_PROTECT_RLBL_X + CC_PROTECT_RLBL_W + 2;   // 数字框
-static const int CC_PROTECT_RATIO_W  = 60;
-static const int CC_PROTECT_PCT_X    = CC_PROTECT_RATIO_X + CC_PROTECT_RATIO_W + 4; // 「%」
-static const int CC_PROTECT_PCT_W    = 14;
+static const int CC_PROTECT_LABEL_X  = CC_COL3_X + 14;     // 「加入保活队列」
+static const int CC_PROTECT_LABEL_W  = 118;
 // 循环施法：标签占第二小列；槽位从第三小列起。
 // 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
@@ -143,12 +138,6 @@ struct CellControl
     // 循环施法录入请求：0=无，1..SPELL_SLOT_CAPACITY=待按数字键的槽索引+1。
     // 面板保持打开，仅支持按 1-9/0 写入同一数字（不再点选快捷施法栏）。
     int              spell_pick_request;
-    // 首动保活倍率录入请求：0=无，1=请求进入录入态（SettingsDlg 轮询接管键盘）。
-    int              ratio_edit_request;
-    // 录入中由 SettingsDlg 注入的显示串（十进制小数）；nullptr=显示规则当前值。
-    const char*      protect_edit_text;
-    // 录入光标可见相位，由 SettingsDlg 每帧更新。
-    bool             protect_edit_caret;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 };
@@ -438,8 +427,6 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->melee_pair_pick_request = 0;
     ctrl->move_path_pick_request = 0;
     ctrl->spell_pick_request = 0;
-    ctrl->ratio_edit_request = 0;
-    ctrl->protect_edit_text = nullptr;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -744,7 +731,8 @@ static void CellControl_DrawCreatureIcon(CellControl* ctrl, H3LoadedPcx16* scr)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     H3LoadedPcx16* frameImg = LoadPanelPcx24_("HA_icon_frame.pcx",
-        CC_ICON_FRAME_W, CC_ICON_FRAME_H, s_cc_icon_frame, s_cc_icon_frame_load_failed);
+        CC_ICON_FRAME_W, CC_ICON_FRAME_H, s_cc_icon_frame,
+        s_cc_icon_frame_load_failed, false);
     if (frameImg)
         DrawTransparentPcx_(frameImg, scr, CC_ICON_X - 1, CC_ICON_Y - 1);
 }
@@ -938,7 +926,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         }
     }
 
-    // ---- 底部行：首动保活（复选框在文字前面，倍率数字框后缀 %） ----
+    // ---- 底部行：加入保活队列（复选框在文字前面） ----
     {
         const bool enabled = rule.protectEnable != 0;
 
@@ -958,48 +946,8 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
         }
 
-        CellControl_DrawText(scr, fntS, "首动保活",
+        CellControl_DrawText(scr, fntS, "加入保活队列",
             CC_PROTECT_LABEL_X, CC_PROTECT_Y, CC_PROTECT_LABEL_W, CC_ROW_H,
-            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
-            eTextAlignment::MIDDLE_LEFT);
-
-        CellControl_DrawText(scr, fntS, "倍率",
-            CC_PROTECT_RLBL_X, CC_PROTECT_Y, CC_PROTECT_RLBL_W, CC_ROW_H,
-            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
-            eTextAlignment::MIDDLE_LEFT);
-
-        // 倍率数字框：录入中金色高亮并在文字末尾显示闪烁光标；未勾选置灰不可点。
-        const bool editing = ctrl->protect_edit_text != nullptr;
-        CellControl_DrawButtonBg(scr, CC_PROTECT_RATIO_X, CC_PROTECT_Y,
-            CC_PROTECT_RATIO_W, CC_ROW_H, editing, false);
-        char ratio_buf[20] = {};
-        if (editing)
-            _snprintf(ratio_buf, sizeof(ratio_buf), "%s",
-                ctrl->protect_edit_text ? ctrl->protect_edit_text : "");
-        else if (rule.protectRatioX100 > 0)
-            _snprintf(ratio_buf, sizeof(ratio_buf), "%g",
-                rule.protectRatioX100 / 100.0);
-        else
-            _snprintf(ratio_buf, sizeof(ratio_buf), "0");
-        const int ratio_text_x = CC_PROTECT_RATIO_X + 4;
-        const int ratio_text_w = CC_PROTECT_RATIO_W - 8;
-        CellControl_DrawText(scr, fntS, ratio_buf,
-            ratio_text_x, CC_PROTECT_Y, ratio_text_w,
-            CC_ROW_H,
-            (INT32)(enabled ? eTextColor::GOLD : eTextColor::GRAY),
-            editing ? eTextAlignment::MIDDLE_LEFT
-                    : eTextAlignment::MIDDLE_CENTER);
-        if (editing && ctrl->protect_edit_caret) {
-            int caret_x = ratio_text_x + CellControl_TextWidth(fntS, ratio_buf) + 1;
-            const int caret_right = ratio_text_x + ratio_text_w - 2;
-            if (caret_x > caret_right) caret_x = caret_right;
-            const int caret_y = CC_PROTECT_Y + 4;
-            const int caret_h = CC_ROW_H - 8;
-            Fill(scr, caret_x, caret_y, 1, caret_h, 235, 205, 116);
-        }
-
-        CellControl_DrawText(scr, fntS, "%",
-            CC_PROTECT_PCT_X, CC_PROTECT_Y, CC_PROTECT_PCT_W, CC_ROW_H,
             (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
             eTextAlignment::MIDDLE_LEFT);
     }
@@ -1327,8 +1275,7 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
-    CELL_HIT_PROTECT_CHECKBOX, // 首动保活复选框
-    CELL_HIT_PROTECT_RATIO,    // 首动保活倍率框
+    CELL_HIT_PROTECT_CHECKBOX, // 加入保活队列复选框
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
@@ -1437,15 +1384,11 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         }
     }
 
-    // 底部首动保活行：复选框恒可点；倍率框仅勾选后可点（录入请求转 SettingsDlg）。
+    // 底部保活行：复选框与文字恒可点（勾选=加入保活队列）。
     if (local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H) {
         if (local_x >= CC_PROTECT_CB_X
             && local_x < CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W)
             return CELL_HIT_PROTECT_CHECKBOX;
-        if (ctrl->data.rule.protectEnable
-            && local_x >= CC_PROTECT_RATIO_X
-            && local_x < CC_PROTECT_RATIO_X + CC_PROTECT_RATIO_W)
-            return CELL_HIT_PROTECT_RATIO;
     }
 
     if (local_x >= CC_ICON_X && local_x < CC_ICON_X + CC_ICON_W
@@ -1539,16 +1482,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         if (hit == CELL_HIT_PROTECT_CHECKBOX) {
             ctrl->data.rule.protectEnable =
                 ctrl->data.rule.protectEnable ? 0 : 1;
-            if (!ctrl->data.rule.protectEnable)
-                ctrl->ratio_edit_request = 0;
             ctrl->expanded = CEX_NONE;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit == CELL_HIT_PROTECT_RATIO) {
-            ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = 0;
-            ctrl->ratio_edit_request = 1;   // SettingsDlg 轮询接管键盘录入
             ctrl->dirty = true;
             return true;
         }
@@ -1599,7 +1533,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         ctrl->spell_pick_request = 0;
         ctrl->move_path_pick_request = 0;
         ctrl->melee_pair_pick_request = 0;
-        ctrl->ratio_edit_request = 0;   // 右键不恢复默认，仅退出录入请求
 
         if (hit >= CELL_HIT_SPELL_BASE
             && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {

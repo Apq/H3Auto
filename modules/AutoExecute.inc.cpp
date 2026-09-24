@@ -3,11 +3,13 @@
 
 static void WriteLog(const char* fmt, ...);
 
-extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21]);
+extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
+    const uint8_t protect_strategy[5]);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
+extern uint8_t g_protect_strategy[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -810,10 +812,11 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
 }
 
 // ==== 首动保活（§3.1.1） ====
-// 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历勾选了
-// 首动保活的己方部队，当前总血量严格低于 可恢复量×(倍率/100) 的取血量
-// 最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，直接 CastSpell 施放。
-// 每回合只判一次（成败不重试）；已全灭但仍有尸体的部队优先恢复；英雄本回合已施法
+// 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历队列
+// （卡片勾选「加入保活队列」）内的己方部队，按方案级策略
+// （无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量）判定够格，
+// 够格者中取血量最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，
+// 直接 CastSpell 施放。每回合只判一次（成败不重试）；英雄本回合已施法
 // 跳过；不占快捷施法、不推进任何部队的循环施法游标。
 
 // 设置面板提交后调用：作废已判定标记，当前/下一回合重新判定。
@@ -858,15 +861,28 @@ static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
 
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
+    const int strategy = g_protect_strategy[g_active_profile];
+    if (strategy == H3AutoPolicy::PS_NONE) return false;
+
+    // 判定时机按策略分派：
+    // - 回合内首动：每回合只判一次（判过即记，无论是否施法）；
+    // - 部队全灭后 / 损失量大于恢复量：事件型，每次行动（控制权交玩家）
+    //   都判。游戏一回合只允许施法一次：已施法/法力不足时静默跳过，
+    //   不记回合标记，之后的行动继续判。
+    const bool once_per_turn =
+        strategy == (int)H3AutoPolicy::PS_FIRST_ACTION;
     const int turn = GetCurrentBattleTurn_(mgr);
     if (turn < 0) return false;
-    if (turn == g_protect_checked_turn) return false;
-    g_protect_checked_turn = turn;          // 本回合只判这一次
+    if (once_per_turn) {
+        if (turn == g_protect_checked_turn) return false;
+        g_protect_checked_turn = turn;      // 本回合只判这一次
+    }
 
     const int side = ResolveHumanSide_(mgr);
     if (side < 0 || side > 1) return false;
     if (GetHeroCasted_(mgr, side)) {
-        WriteLog("[Protect] turn=%d hero already casted; skip", turn);
+        if (once_per_turn)
+            WriteLog("[Protect] turn=%d hero already casted; skip", turn);
         return false;
     }
 
@@ -876,14 +892,17 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     if (!hero) return false;
     // 复活/聚灵固定耗魔 10（SoD，不随等级变化）。
     if (GetHeroMana_(mgr, side) < 10) {
-        WriteLog("[Protect] turn=%d mana<10; skip", turn);
+        if (once_per_turn)
+            WriteLog("[Protect] turn=%d mana<10; skip", turn);
         return false;
     }
     const int spell_power = cm->heroSpellPower[side];
 
-    // 遍历勾选槽，优先恢复已全灭但仍有尸体的部队；其余取当前总血量最低的一支。
-    int best_slot = -1, best_remaining = 0, best_spell = 0, best_exp = 0;
-    bool best_dead = false;
+    // 收集队列内够格候选：勾选 + 按方案策略判定。
+    // 够格者中统一取血量最低（全灭者剩余 0 天然最前）。
+    H3AutoPolicy::TargetCandidate cands[21] = {};
+    int cand_slot[21] = {}, cand_spell[21] = {}, cand_exp[21] = {};
+    int cand_count = 0;
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = g_active_rules[slot];
         if (!rule.protectEnable) continue;
@@ -895,14 +914,14 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         const bool dead = st->count_current <= 0;
         if (dead && StackHex_(st) < 0) continue;          // 没有可施法的尸体格
 
-        // 总血量口径与急救“失血数值”互为倒数：存活数×满血 − 顶层已损。
-        // 全灭后总血量为 0；满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
+        // 损失口径与急救"失血数值"一致：死亡数×满血 + 顶层已损。
+        // 满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
         H3AutoPolicy::TargetCandidate cand = {};
         cand.count_current = st->count_current;
         cand.count_at_start = st->count_at_start;
         cand.hit_points     = st->creature.hit_points;
         cand.lost_hp        = st->lost_hp;
-        const int remaining = H3AutoPolicy::StackRemainingHp(cand);
+        const int wound = H3AutoPolicy::WoundValue(cand);
 
         // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
         const int spell_id = P_CreatureInformation[st->creature_id].undead
@@ -912,25 +931,30 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         const int restorable =
             H3AutoPolicy::ResurrectionRestoreHp(expertise, spell_power);
 
-        if (!H3AutoPolicy::ProtectShouldCast(true, rule.protectRatioX100,
-                restorable, st->count_current, remaining))
+        if (!H3AutoPolicy::ProtectShouldCast(true,
+                (H3AutoPolicy::ProtectStrategy)strategy,
+                restorable, wound, dead))
             continue;
-        const bool better = best_slot < 0
-            || (dead && !best_dead)
-            || (dead == best_dead && remaining < best_remaining);
-        if (better) {
-            best_slot = slot;
-            best_remaining = remaining;
-            best_spell = spell_id;
-            best_exp = expertise;
-            best_dead = dead;
-        }
+        cands[cand_count] = cand;
+        cand_slot[cand_count] = slot;
+        cand_spell[cand_count] = spell_id;
+        cand_exp[cand_count] = expertise;
+        ++cand_count;
     }
-    if (best_slot < 0) return false;
+    const int picked = H3AutoPolicy::SelectProtectTargetIndex(cands, cand_count);
+    if (picked < 0) return false;
+
+    const int best_slot = cand_slot[picked];
+    const int best_spell = cand_spell[picked];
+    const int best_exp = cand_exp[picked];
+    const int best_remaining =
+        H3AutoPolicy::StackRemainingHp(cands[picked]);
+    const int best_wound = H3AutoPolicy::WoundValue(cands[picked]);
 
     _BattleStack_* st = &mgr->stack[side][best_slot];
-    WriteLog("[Protect] turn=%d slot=%d cid=0x%X hp=%d spell=%d exp=%d; casting",
-        turn, best_slot, st->creature_id, best_remaining, best_spell, best_exp);
+    WriteLog("[Protect] turn=%d strategy=%d slot=%d cid=0x%X wound=%d hp=%d spell=%d exp=%d; casting",
+        turn, strategy, best_slot, st->creature_id, best_wound, best_remaining,
+        best_spell, best_exp);
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
     return true;
@@ -1016,11 +1040,14 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 }
 
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
-void CommitProfiles(int active_profile, AutoStackRule rules[5][21])
+void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
+    const uint8_t protect_strategy[5])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
     memcpy(g_profiles, rules, sizeof(g_profiles));
+    for (int p = 0; p < 5; ++p)
+        g_protect_strategy[p] = protect_strategy ? protect_strategy[p] : 0;
     g_active_profile = active_profile;
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     const int side = ResolveHumanSide_(o_BattleMgr);
@@ -1702,8 +1729,9 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         return orig;            // 非“交给玩家”路径：不介入
     __try {
         PollControlHotkeys_(This);
-        // 每回合第一次控制权交给玩家（含本插件接管）：判一次回合首动施法。
-        // 仅在 orig==0 路径判：蛊惑/敌方回合本就不交玩家，语义自动满足。
+        // 每次行动（控制权交玩家）都判保活：回合内首动每回合只判一次；
+        // 部队全灭后 / 损失量大于恢复量为事件型，每次行动都判，
+        // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         if (This && This->active_stack) {
             if (g_auto_state.last_handled_stack

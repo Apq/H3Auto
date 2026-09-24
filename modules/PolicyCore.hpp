@@ -52,11 +52,6 @@ static constexpr int MELEE_PAIR_CAPACITY = 10;
 static constexpr int MOVE_WAYPOINT_CAPACITY = 16;
 static constexpr int SPELL_SLOT_CAPACITY = 10;
 
-// 首动保活（§3.1.1）默认/范围。倍率定点存储：X100，即 100.00% 存 10000。
-static constexpr int PROTECT_RATIO_DEFAULT_X100 = 10000;
-static constexpr int PROTECT_RATIO_MIN_X100 = 0;
-static constexpr int PROTECT_RATIO_MAX_X100 = 1000000; // 10000.00%
-
 inline bool IsQuickSpellDigit(int digit)
 {
     return digit == 0 || (digit >= 1 && digit <= 9);
@@ -85,8 +80,7 @@ struct AutoStackRule {
     int8_t spellSlotCount;
 
     // 首动保活（§3.1.1）：挂单支部队，随方案/槽位一起存储与重排。
-    uint8_t protectEnable;      // 0=关闭；1=勾选
-    int32_t protectRatioX100;   // 倍率 %，定点 X100（100.00% 存 10000），范围 0..1000000
+    uint8_t         protectEnable;       // 0=关闭；1=加入保活队列
 };
 
 inline AutoStackRule MakeDefaultRule()
@@ -113,7 +107,6 @@ inline AutoStackRule MakeDefaultRule()
         r.spellSlots[i] = -1;
     r.spellSlotCount = 0;
     r.protectEnable = 0;
-    r.protectRatioX100 = PROTECT_RATIO_DEFAULT_X100;
     return r;
 }
 
@@ -409,26 +402,30 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
     return base * spell_power;
 }
 
-// 触发阈值：先算倍率/100（浮点），再乘可恢复量；夹到 int 范围。
-inline int ProtectThresholdHp(int ratio_x100, int restorable_hp)
-{
-    if (restorable_hp <= 0) return 0;
-    double t = static_cast<double>(restorable_hp)
-        * (static_cast<double>(ratio_x100) / 10000.0);
-    if (t < 0.0) t = 0.0;
-    if (t > 2000000000.0) t = 2000000000.0;
-    return static_cast<int>(t);
-}
+// 保活策略（方案级）：整个方案的保活触发方式；默认 0=无。
+enum ProtectStrategy : uint8_t {
+    PS_NONE = 0,          // 无：不保活
+    PS_ON_DEAD,           // 部队全灭后：只救已全灭（仍有尸体）者
+    PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
+    PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
+    PS_COUNT
+};
 
-// 是否触发：未勾选不触发；当前总血量严格小于阈值才触发。
-// alive_count<=0 表示部队已全灭但仍保留尸体，这种部队优先恢复，不因全灭跳过。
-inline bool ProtectShouldCast(bool enabled, int ratio_x100,
-    int restorable_hp, int alive_count, int remaining_hp)
+// 是否够格：未入队不触发；无损失不触发；按方案策略判定。
+// PS_ON_DEAD 只救已全灭；PS_FIRST_ACTION 有损失即救；
+// PS_LOSS_GT_RESTORE 要求已损 HP 严格大于一次可恢复量。
+inline bool ProtectShouldCast(bool enabled, ProtectStrategy strategy,
+    int restorable_hp, int wound_value, bool dead)
 {
-    (void)alive_count;
     if (!enabled) return false;
-    if (remaining_hp < 0) remaining_hp = 0;
-    return remaining_hp < ProtectThresholdHp(ratio_x100, restorable_hp);
+    if (wound_value <= 0) return false;
+    switch (strategy) {
+    case PS_ON_DEAD:         return dead;
+    case PS_FIRST_ACTION:    return true;
+    case PS_LOSS_GT_RESTORE: return restorable_hp > 0
+        && wound_value > restorable_hp;
+    default:                 return false; // PS_NONE
+    }
 }
 
 inline int WoundValue(const TargetCandidate& candidate)
@@ -448,6 +445,18 @@ inline int WoundRatioKey(const TargetCandidate& candidate)
     const int total = start * hp;
     if (total <= 0) return 0;
     return static_cast<int>((static_cast<int64_t>(WoundValue(candidate)) * 10000) / total);
+}
+
+// 够格者中选目标下标：血量最低（全灭者剩余 0 天然最前）；
+// 平分保留先出现者。返回 -1 = 无合适目标。
+inline int SelectProtectTargetIndex(const TargetCandidate* candidates, int count)
+{
+    if (!candidates || count <= 0) return -1;
+    int best = 0;
+    for (int i = 1; i < count; ++i)
+        if (StackRemainingHp(candidates[i]) < StackRemainingHp(candidates[best]))
+            best = i;
+    return best;
 }
 
 // 返回候选下标；平分时保留先出现者，与原执行器行为一致。
@@ -558,11 +567,6 @@ inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged
     bool has_artillery, bool has_first_aid)
 {
     if (!rule) return;
-    // 首动保活倍率夹范围（定点 X100）；放函数开头，避开下方 early return。
-    if (rule->protectRatioX100 < PROTECT_RATIO_MIN_X100)
-        rule->protectRatioX100 = PROTECT_RATIO_MIN_X100;
-    if (rule->protectRatioX100 > PROTECT_RATIO_MAX_X100)
-        rule->protectRatioX100 = PROTECT_RATIO_MAX_X100;
 
     AutoActionKind allowed[AA_COUNT] = {};
     const int n = GetAllowedActions(creature_type, is_ranged,
@@ -649,6 +653,3 @@ using H3AutoPolicy::SEL_COUNT;
 using H3AutoPolicy::MELEE_PAIR_CAPACITY;
 using H3AutoPolicy::MOVE_WAYPOINT_CAPACITY;
 using H3AutoPolicy::SPELL_SLOT_CAPACITY;
-using H3AutoPolicy::PROTECT_RATIO_DEFAULT_X100;
-using H3AutoPolicy::PROTECT_RATIO_MIN_X100;
-using H3AutoPolicy::PROTECT_RATIO_MAX_X100;

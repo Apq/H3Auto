@@ -7,12 +7,15 @@ static AutoStackRule MakeDefaultRule_()
     return H3AutoPolicy::MakeDefaultRule();
 }
 // 五套仅驻留内存的已确认方案；默认全为手动。
-// 首动保活字段（protectEnable/protectRatioX100）在 AutoStackRule 内随方案走。
+// 首动保活的勾选（protectEnable）在 AutoStackRule 内随方案走；策略是方案级。
 AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;
 
 // 当前生效方案（运行时视图）
 AutoStackRule g_active_rules[21] = {};
+
+// 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
+uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
 
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
@@ -26,6 +29,8 @@ void ClearConfirmedProfiles()
     g_active_profile = 0;
     for (int s = 0; s < 21; ++s)
         g_active_rules[s] = def;
+    for (int p = 0; p < 5; ++p)
+        g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
 }
 
 static struct Config {
