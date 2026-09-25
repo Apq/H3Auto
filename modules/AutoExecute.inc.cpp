@@ -4,13 +4,13 @@
 static void WriteLog(const char* fmt, ...);
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint8_t stop_turns[5]);
+    const uint8_t protect_strategy[5], const uint16_t stop_turns[5]);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
 extern uint8_t g_protect_strategy[5];
-extern uint8_t g_stop_turns[5];
+extern uint16_t g_stop_turns[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -1344,7 +1344,7 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint8_t stop_turns[5])
+    const uint8_t protect_strategy[5], const uint16_t stop_turns[5])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
@@ -1353,8 +1353,8 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         g_protect_strategy[p] = protect_strategy ? protect_strategy[p] : 0;
         int turns = stop_turns ? stop_turns[p] : H3AutoPolicy::DEFAULT_STOP_TURNS;
         if (turns < 0) turns = 0;
-        if (turns > 99) turns = 99;
-        g_stop_turns[p] = static_cast<uint8_t>(turns);
+        if (turns > 999) turns = 999;
+        g_stop_turns[p] = static_cast<uint16_t>(turns);
     }
     g_active_profile = active_profile;
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));

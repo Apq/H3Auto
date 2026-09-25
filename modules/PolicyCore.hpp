@@ -610,7 +610,7 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 // Decode 只接受以 "H3AP1 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
 inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
     const AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
-    const uint8_t stop_turns[PROFILE_STORE_COUNT],
+    const uint16_t stop_turns[PROFILE_STORE_COUNT],
     char* buffer, int buffer_size)
 {
     if (!strategies || !rules || !stop_turns || !buffer || buffer_size <= 0)
@@ -631,7 +631,7 @@ inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
     for (int p = 0; p < PROFILE_STORE_COUNT; ++p) {
         int turns = stop_turns[p];
         if (turns < 0) turns = 0;
-        if (turns > 99) turns = 99;
+        if (turns > 999) turns = 999;
         ints[n++] = turns;
     }
     bool ok = true;
@@ -667,7 +667,7 @@ inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
 inline bool DecodeProfileStoreText(const char* text,
     uint8_t strategies[PROFILE_STORE_COUNT],
     AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
-    uint8_t stop_turns[PROFILE_STORE_COUNT])
+    uint16_t stop_turns[PROFILE_STORE_COUNT])
 {
     if (!text || !strategies || !rules || !stop_turns) return false;
     const char* magic = "H3AP1";
@@ -699,7 +699,7 @@ inline bool DecodeProfileStoreText(const char* text,
     }
 
     uint8_t decoded_strategy[PROFILE_STORE_COUNT] = {};
-    uint8_t decoded_stop[PROFILE_STORE_COUNT] = {};
+    uint16_t decoded_stop[PROFILE_STORE_COUNT] = {};
     AutoStackRule decoded[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
     int n = 0;
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
@@ -707,8 +707,8 @@ inline bool DecodeProfileStoreText(const char* text,
         decoded_strategy[i] = static_cast<uint8_t>(ints[n++]);
     }
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
-        if (ints[n] < 0 || ints[n] > 99) { delete[] ints; return false; }
-        decoded_stop[i] = static_cast<uint8_t>(ints[n++]);
+        if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
+        decoded_stop[i] = static_cast<uint16_t>(ints[n++]);
     }
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i)
         for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {

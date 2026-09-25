@@ -16,7 +16,7 @@ AutoStackRule g_active_rules[21] = {};
 
 // 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
 uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
-uint8_t g_stop_turns[5] = { 10, 10, 10, 10, 10 }; // 自动停止阈值，0=关闭
+uint16_t g_stop_turns[5] = { 10, 10, 10, 10, 10 }; // 自动停止阈值，0=关闭，0..999
 
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
@@ -289,7 +289,7 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 // 成功返回 true。文件不存在或内容损坏返回 false（草稿保持原样）。
 // SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
 static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
-    const uint8_t strategies[5], const uint8_t stop_turns[5])
+    const uint8_t strategies[5], const uint16_t stop_turns[5])
 {
     char* text = new char[64 * 1024];
     // WriteLog("[Panel] 保存：开始编码");
@@ -309,7 +309,7 @@ static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
 }
 
 static bool SaveProfileStore_(const AutoStackRule rules[5][21],
-    const uint8_t strategies[5], const uint8_t stop_turns[5])
+    const uint8_t strategies[5], const uint16_t stop_turns[5])
 {
     bool ok = false;
     DWORD code = 0;
@@ -326,7 +326,7 @@ static bool SaveProfileStore_(const AutoStackRule rules[5][21],
 }
 
 static bool LoadProfileStore_(AutoStackRule rules[5][21],
-    uint8_t strategies[5], uint8_t stop_turns[5])
+    uint8_t strategies[5], uint16_t stop_turns[5])
 {
     FILE* fp = nullptr;
     if (fopen_s(&fp, g_profiles_path, "rb") != 0 || !fp) return false;
@@ -377,25 +377,25 @@ static void ReadConfig()
         cfg.open_settings_vk);
 }
 
-static const char* HotkeyDisplayName_(int vk)
+static const char* HotkeyDisplayName_(int vk, char* buf, int buf_size)
 {
-    static char buf[16];
+    if (!buf || buf_size <= 0) return "";
     if (vk >= VK_F1 && vk <= VK_F12) {
-        snprintf(buf, sizeof(buf), "F%d", vk - VK_F1 + 1);
+        snprintf(buf, buf_size, "F%d", vk - VK_F1 + 1);
         return buf;
     }
     if (vk >= 'A' && vk <= 'Z') {
-        snprintf(buf, sizeof(buf), "%c", vk);
+        snprintf(buf, buf_size, "%c", vk);
         return buf;
     }
     if (vk >= '0' && vk <= '9') {
-        snprintf(buf, sizeof(buf), "%c", vk);
+        snprintf(buf, buf_size, "%c", vk);
         return buf;
     }
     if (vk == VK_LCONTROL) return "左Ctrl";
     if (vk == VK_RCONTROL) return "右Ctrl";
     if (vk == VK_CONTROL) return "Ctrl";
-    snprintf(buf, sizeof(buf), "0x%X", vk);
+    snprintf(buf, buf_size, "0x%X", vk);
     return buf;
 }
 

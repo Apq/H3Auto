@@ -14,8 +14,8 @@ extern void EnsureStackTrackingBound();
 // ========================================================================
 
 static const int PANEL_W    = 680;
-// 方案行与金框之间空一行（保活策略下拉行），面板整体加高 22。
-static const int PANEL_H    = 502;
+// 底部状态栏 +26，背景图 HA_bg.pcx 同步为 680×528。
+static const int PANEL_H    = 528;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
 static const int CELL_W     = 568; // 横向占满金框宽（右侧留滚动条）
@@ -37,7 +37,7 @@ static const int BTN_H      = 30;
 static const int BTN_FRAME_W = 66;
 static const int BTN_FRAME_H = 32;
 static const int BTN_GAP    = 24;
-static const int BTN_Y      = PANEL_H - 56;
+static const int BTN_Y      = PANEL_H - 83;
 static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
 static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * VISIBLE_ROWS;
@@ -77,8 +77,9 @@ static const int PROTECT_DD_X        = GRID_FRAME_X + 80;
 static const int PROTECT_DD_W        = 150;
 static const int PROTECT_DD_ITEM_H   = 18;
 
-// 保活行最右侧：自动停止回合数。点击后用数字键录入。
-static const int STOP_BOX_W = 36;
+// 保活行最右侧：自动停止回合数。点击后用数字键录入（可编辑文本框：
+// 预填当前值、光标可左右移动、退格删除；见 s_stop_turns_* 状态）。
+static const int STOP_BOX_W = 52;
 static const int STOP_BOX_X = GRID_FRAME_X + GRID_FRAME_W - STOP_BOX_W;
 static const int STOP_LABEL_W = 42;
 static const int STOP_LABEL_X = STOP_BOX_X - 4 - STOP_LABEL_W;
@@ -144,7 +145,7 @@ static struct Panel {
     int x, y;
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS];
     uint8_t draft_protect_strategy[PROFILE_COUNT]; // 保活策略草稿（方案级）
-    uint8_t draft_stop_turns[PROFILE_COUNT];      // 自动停止回合草稿，0=关闭
+    uint16_t draft_stop_turns[PROFILE_COUNT];     // 自动停止回合草稿，0=关闭，0..999
     int selected_profile;
     int pressed_profile;
     int count;                 // 可配置部队总数（可大于可见行）
@@ -203,7 +204,13 @@ static bool s_help_modal_open = false;
 static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
 static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
 static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
-static char s_stop_turns_text[4] = {};
+static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
+static int  s_stop_turns_caret = 0;        // 插入位置（0..文本长度）
+static DWORD s_stop_turns_caret_tick = 0;  // 光标闪烁基准（按键后重置，输入即可见）
+static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到 999
+static char s_status_text[96] = {};
+static DWORD s_status_until = 0;
+static bool s_status_error = false;
 static HHOOK s_kb_hook = nullptr;
 
 // ===== 保活策略下拉（方案级）与数字键拦截 =====
@@ -264,17 +271,69 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             return 1;  // swallow
         }
         if (wParam == VK_RETURN) return 1;
-        if (IsDigitKey_(wParam)) {
-            // 录入中：数字键由我们消费；其它时候也吞掉，防止快捷施法。
-            if (s_stop_turns_editing) {
+        // 停止回合录入走钩子即时处理。轮询有帧间隔，短按会丢。
+        // 按住方向/退格/删除：首次重复等 400ms，之后每 30ms。
+        if (s_stop_turns_editing) {
+            static WPARAM s_repeat_vk = 0;
+            static DWORD s_repeat_tick = 0;
+            const DWORD now = GetTickCount();
+            const bool repeatable = wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE;
+            const bool first = (lParam & 0x40000000) == 0;
+            if (repeatable && !first) {
+                const DWORD gap = (s_repeat_vk == wParam)
+                    ? (DWORD)30 : (DWORD)400;
+                if (now - s_repeat_tick < gap)
+                    return 1;
+            }
+            const int len = (int)strlen(s_stop_turns_text);
+            bool changed = false;
+            if (wParam == VK_BACK && s_stop_turns_caret > 0) {
+                memmove(s_stop_turns_text + s_stop_turns_caret - 1,
+                    s_stop_turns_text + s_stop_turns_caret,
+                    len - s_stop_turns_caret + 1);
+                --s_stop_turns_caret;
+                changed = true;
+            } else if (wParam == VK_DELETE && s_stop_turns_caret < len) {
+                memmove(s_stop_turns_text + s_stop_turns_caret,
+                    s_stop_turns_text + s_stop_turns_caret + 1,
+                    len - s_stop_turns_caret);
+                changed = true;
+            } else if (wParam == VK_LEFT && s_stop_turns_caret > 0) {
+                --s_stop_turns_caret;
+                changed = true;
+            } else if (wParam == VK_RIGHT && s_stop_turns_caret < len) {
+                ++s_stop_turns_caret;
+                changed = true;
+            } else if (IsDigitKey_(wParam)) {
                 const int d = DigitFromVk_(wParam);
-                const int len = (int)strlen(s_stop_turns_text);
-                if (d >= 0 && len < 2) {
-                    s_stop_turns_text[len] = static_cast<char>('0' + d);
-                    s_stop_turns_text[len + 1] = 0;
-                    DrawPanelToBuffer_();
+                if (d >= 0 && len < STOP_TURNS_MAX_DIGITS
+                    && s_stop_turns_caret <= len) {
+                    memmove(s_stop_turns_text + s_stop_turns_caret + 1,
+                        s_stop_turns_text + s_stop_turns_caret,
+                        len - s_stop_turns_caret + 1);
+                    s_stop_turns_text[s_stop_turns_caret] =
+                        static_cast<char>('0' + d);
+                    ++s_stop_turns_caret;
+                    changed = true;
                 }
-            } else if (s_spell_pick_cell >= 0) {
+            }
+            if (changed) {
+                s_stop_turns_caret_tick = now;
+                if (repeatable) {
+                    s_repeat_vk = wParam;
+                    s_repeat_tick = now;
+                }
+                DrawPanelToBuffer_();
+            }
+            if (changed || wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE
+                || IsDigitKey_(wParam))
+                return 1;
+        }
+        if (IsDigitKey_(wParam)) {
+            // 快捷施法槽位：钩子先手；停止回合录入与槽位兜底都在轮询。
+            if (s_spell_pick_cell >= 0) {
                 const int d = DigitFromVk_(wParam);
                 if (d >= 0) CommitSpellSlotPick_(d);
             }
@@ -863,10 +922,8 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
 
 static H3LoadedPcx16* LoadPanelBackground_()
 {
-    // 面板加高后允许背景图比面板矮（旧图 680×480，面板 680×502），
-    // 不足部分由 CopyPanelBackground_ 用末行延伸。
     return LoadPanelPcx24_("HA_bg.pcx", PANEL_W, PANEL_H,
-        s_panel_background, s_panel_background_load_failed, true);
+        s_panel_background, s_panel_background_load_failed, false);
 }
 
 static H3LoadedPcx16* LoadPanelCell_()
@@ -895,11 +952,6 @@ static bool CopyPanelBackground_(H3LoadedPcx16* destination)
         memcpy(destination->buffer + y * destination->scanlineSize,
             background->buffer + y * background->scanlineSize, row_bytes);
     }
-    // 背景图比面板矮（面板加高一行）：底部不足部分填面板底色
-    // （与背景加载失败回退同色 70,42,22），不做任何拉伸/延伸；
-    // 该区域基本被确定/取消按钮覆盖。
-    if (copy_h < PANEL_H)
-        Fill(destination, 0, copy_h, PANEL_W, PANEL_H - copy_h, 70, 42, 22);
     return true;
 }
 
@@ -2225,7 +2277,7 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 364;
+    const int h = 336;
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -2295,27 +2347,30 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         x + 16, y + 12, w - 32, 26,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 
-    char hotkey_line[128];
+    char toggle_name[16];
+    char oneshot_name[16];
+    char open_name[16];
+    char hotkey_line[160];
     snprintf(hotkey_line, sizeof(hotkey_line), "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置",
-        HotkeyDisplayName_(cfg.toggle_manual_vk),
-        HotkeyDisplayName_(cfg.one_shot_manual_vk),
-        HotkeyDisplayName_(cfg.open_settings_vk));
+        HotkeyDisplayName_(cfg.toggle_manual_vk, toggle_name, sizeof(toggle_name)),
+        HotkeyDisplayName_(cfg.one_shot_manual_vk, oneshot_name, sizeof(oneshot_name)),
+        HotkeyDisplayName_(cfg.open_settings_vk, open_name, sizeof(open_name)));
 
     // 打开方法单独一行：右键「自动战斗」或按配置的打开设置键（键名读配置）。
+    char open_key[16];
     char open_line[160];
     snprintf(open_line, sizeof(open_line), "打开设置：右键“自动战斗”按钮，或按 %s 键",
-        HotkeyDisplayName_(cfg.open_settings_vk));
+        HotkeyDisplayName_(cfg.open_settings_vk, open_key, sizeof(open_key)));
 
     const char* help_lines[] = {
         open_line,
         "方案：5 套本场有效，点勾号才生效",
         "施法/近战/移动：点 ＋ 后按提示设置",
-        "保活：卡片勾选入队，策略在方案行下方",
         "停止：敌方预计剩余回合内全灭时交回",
         "读档/存档：仅更新界面显示，点勾号才生效",
         "删除：槽位上右键",
         hotkey_line,
-        "设置有效期：取消重打保留，接受结果清除",
+        "设置有效期：同一场战斗，包括取消重打",
     };
     const int line_h = 28;
     int ty = y + 50;
@@ -2351,10 +2406,11 @@ static void CommitStopTurnsEdit_()
     int value = 0;
     for (int i = 0; s_stop_turns_text[i]; ++i)
         value = value * 10 + (s_stop_turns_text[i] - '0');
-    if (value > 99) value = 99;
-    s_p.draft_stop_turns[s_p.selected_profile] = static_cast<uint8_t>(value);
+    if (value > 999) value = 999;
+    s_p.draft_stop_turns[s_p.selected_profile] = static_cast<uint16_t>(value);
     s_stop_turns_editing = false;
     s_stop_turns_text[0] = 0;
+    s_stop_turns_caret = 0;
     WriteLog("[Panel] 停止回合=%d (方案%d)", value, s_p.selected_profile + 1);
 }
 
@@ -2362,6 +2418,7 @@ static void CancelStopTurnsEdit_()
 {
     s_stop_turns_editing = false;
     s_stop_turns_text[0] = 0;
+    s_stop_turns_caret = 0;
 }
 
 static void GetProtectDdItemRect_(int item, int* out_x, int* out_y,
@@ -2416,9 +2473,31 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
         s_stop_turns_editing ? 28 : 24);
     scr->DrawFrame(STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
         (BYTE)210, (BYTE)170, (BYTE)72);
-    DrawTxt(scr, small_font, num[0] ? num : "0",
-        STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
-        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+    if (s_stop_turns_editing) {
+        // 编辑态：左对齐绘制 + 500ms 闪烁光标（BltComplete 每帧重绘面板，
+        // 按键/移动重置基准，保证输入后光标立即可见）。
+        const int text_x = STOP_BOX_X + 8;
+        DrawTxt(scr, small_font, num, text_x, PROTECT_DD_Y,
+            STOP_BOX_W - 12, PROTECT_DD_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        const bool caret_on =
+            ((GetTickCount() - s_stop_turns_caret_tick) / 500) % 2 == 0;
+        if (caret_on) {
+            char prefix[8] = {};
+            const int caret = s_stop_turns_caret;
+            if (caret > 0)
+                memcpy(prefix, num, caret < 7 ? caret : 7);
+            const INT32 prefix_w =
+                small_font ? small_font->GetMaxLineWidth(prefix) : 0;
+            Fill(scr, text_x + prefix_w,
+                PROTECT_DD_Y + (PROTECT_DD_H - 10) / 2, 2, 10,
+                210, 170, 72); // 金色竖线光标
+        }
+    } else {
+        DrawTxt(scr, small_font, num[0] ? num : "0",
+            STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+    }
 }
 
 // 展开列表：每项单独底色+边框（同卡片下拉暖色主题），
@@ -2577,6 +2656,17 @@ static void DrawPanelToBuffer_()
 
     DrawPanelButtons_(scr);
 
+    if (s_status_text[0]) {
+        if (GetTickCount() >= s_status_until)
+            s_status_text[0] = 0;
+        else
+            DrawTxt(scr, GetSmallFont(), s_status_text,
+                20, BTN_Y + BTN_H + 14, PANEL_W - 40, 20,
+                s_status_error ? (INT32)eTextColor::RED
+                               : (INT32)eTextColor::LIGHT_GREEN,
+                eTextAlignment::MIDDLE_CENTER);
+    }
+
     // 保活策略展开列表：盖住金框上缘/第一行格子，画在格子之后。
     DrawProtectDropdownList_(scr);
 
@@ -2727,6 +2817,11 @@ static void SaveProfilesToDisk_()
     const bool ok = SaveProfileStore_(s_p.draft_rules,
         s_p.draft_protect_strategy, s_p.draft_stop_turns);
     WriteLog("[Panel] 方案%s：%s", ok ? "已存档" : "存档失败", g_profiles_path);
+    snprintf(s_status_text, sizeof(s_status_text), "%s",
+        ok ? "存档成功" : "存档失败");
+    s_status_error = !ok;
+    s_status_until = GetTickCount() + 5000;
+    DrawPanelToBuffer_();
 }
 
 static void LoadProfilesFromDisk_()
@@ -2734,7 +2829,7 @@ static void LoadProfilesFromDisk_()
     // 105 条规则约 8KB，堆分配避免游戏线程栈溢出。
     AutoStackRule (*loaded)[MAX_STACKS] = new AutoStackRule[PROFILE_COUNT][MAX_STACKS]();
     uint8_t strategies[PROFILE_COUNT] = {};
-    uint8_t stop_turns[PROFILE_COUNT] = {};
+    uint16_t stop_turns[PROFILE_COUNT] = {};
     const bool ok = LoadProfileStore_(loaded, strategies, stop_turns);
     if (ok) {
         memcpy(s_p.draft_rules, loaded, sizeof(s_p.draft_rules));
@@ -2753,6 +2848,11 @@ static void LoadProfilesFromDisk_()
     delete[] loaded;
     WriteLog("[Panel] 方案%s：%s", ok ? "已读档" : "读档失败（文件不存在或损坏）",
         g_profiles_path);
+    snprintf(s_status_text, sizeof(s_status_text), "%s",
+        ok ? "读档成功" : "读档失败");
+    s_status_error = !ok;
+    s_status_until = GetTickCount() + 5000;
+    DrawPanelToBuffer_();
 }
 
 static void SelectProfile_(int profile)
@@ -3105,12 +3205,33 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
-    // 停止回合录入中：点框外提交，点框内忽略。
+    // 停止回合录入中：点框外提交；点框内（按下）把光标定位到最近字符边界。
     if (s_stop_turns_editing && (raw_command == 8 || raw_command == 16)) {
         if (!PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
                 STOP_BOX_W, PROTECT_DD_H) && raw_command == 16) {
             CommitStopTurnsEdit_();
             DrawPanelToBuffer_();
+        } else if (raw_command == 8
+            && PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
+                STOP_BOX_W, PROTECT_DD_H)) {
+            H3Font* fnt = GetSmallFont();
+            const int text_x = STOP_BOX_X + 8; // 与绘制端一致
+            const int len = (int)strlen(s_stop_turns_text);
+            int best = len, best_dist = 0x7FFFFFFF;
+            for (int i = 0; i <= len; ++i) {
+                char prefix[8] = {};
+                if (i > 0) memcpy(prefix, s_stop_turns_text, i);
+                const int bx = text_x
+                    + (fnt ? fnt->GetMaxLineWidth(prefix) : 0);
+                int dist = px - bx;
+                if (dist < 0) dist = -dist;
+                if (dist < best_dist) { best_dist = dist; best = i; }
+            }
+            if (best != s_stop_turns_caret) {
+                s_stop_turns_caret = best;
+                s_stop_turns_caret_tick = GetTickCount();
+                DrawPanelToBuffer_();
+            }
         }
         return;
     }
@@ -3219,9 +3340,19 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         }
         if (PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
                 STOP_BOX_W, PROTECT_DD_H)) {
-            s_stop_turns_editing = true;
-            s_stop_turns_text[0] = 0;
-            DrawPanelToBuffer_();
+            // 进入编辑：预填当前草稿值（值 0 预填空，避免「点击即变 0」），
+            // 光标在末尾。已在编辑态时点框内不再重置。
+            if (!s_stop_turns_editing) {
+                s_stop_turns_editing = true;
+                const int cur = (int)s_p.draft_stop_turns[s_p.selected_profile];
+                s_stop_turns_text[0] = 0;
+                if (cur > 0)
+                    _snprintf(s_stop_turns_text, sizeof(s_stop_turns_text),
+                        "%d", cur);
+                s_stop_turns_caret = (int)strlen(s_stop_turns_text);
+                s_stop_turns_caret_tick = GetTickCount();
+                DrawPanelToBuffer_();
+            }
             return;
         }
 
@@ -3444,7 +3575,10 @@ static void HandlePanelInput_()
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
     const bool page_up_down = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
     const bool page_down_down = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
-    if (!IsGameWindowForeground_()) {
+    // 停止回合编辑态例外：输入法常驻窗会盖住游戏窗口（modal_depth>=2 且
+    // 前台判定失败），两条键盘路径都被掐死。GetAsyncKeyState 不依赖焦点，
+    // 编辑态放行；滚屏/翻页仍受前台判定保护。
+    if (!IsGameWindowForeground_() && !s_stop_turns_editing) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
         previous_down_down = down_down;

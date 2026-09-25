@@ -388,7 +388,7 @@ void TestProfileStoreRoundtrip()
     rules[2][7].allowDefendFallback = true;
     rules[4][20].action = AA_RANGED_ATTACK;
     rules[4][20].target.selector = SEL_RANGED_SPEED;
-    uint8_t stop_turns[PROFILE_STORE_COUNT] = { 10, 0, 25, 99, 7 };
+    uint16_t stop_turns[PROFILE_STORE_COUNT] = { 10, 0, 25, 999, 7 };
 
     char text[64 * 1024] = {};
     const int written = EncodeProfileStoreText(strategies, rules, stop_turns,
@@ -396,7 +396,7 @@ void TestProfileStoreRoundtrip()
     Check(written > 0, "profile store encodes");
 
     uint8_t out_strategies[PROFILE_STORE_COUNT] = {};
-    uint8_t out_stop[PROFILE_STORE_COUNT] = {};
+    uint16_t out_stop[PROFILE_STORE_COUNT] = {};
     AutoStackRule out_rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
     Check(DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
         "profile store decodes");
