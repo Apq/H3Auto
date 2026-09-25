@@ -1284,13 +1284,31 @@ enum CellHitArea
 
 // 命中区 → 状态栏提示文案（方案 A tips 的表格内细分）。
 // 返回静态字符串；未命中返回 nullptr。
-static const char* CellControl_TipForHit(CellHitArea hit)
+// 行动/目标选择下拉按当前选中项取各自的提示；当前值没有对应文案
+// （如等待）时回落到展开列表的通用提示。
+static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctrl)
 {
     switch (hit) {
-    case CELL_HIT_ACTION:
-        return T("tips.cell_action");
-    case CELL_HIT_SELECTOR:
-        return T("tips.cell_selector");
+    case CELL_HIT_ACTION: {
+        if (ctrl) {
+            char key[24] = {};
+            _snprintf(key, sizeof(key) - 1, "tips.action_opt%d",
+                (int)ctrl->data.rule.action);
+            const char* tip = T(key);
+            if (tip && strncmp(tip, "!!", 2) != 0) return tip;
+        }
+        return T("tips.cell_drop");
+    }
+    case CELL_HIT_SELECTOR: {
+        if (ctrl) {
+            char key[24] = {};
+            _snprintf(key, sizeof(key) - 1, "tips.selector_opt%d",
+                (int)ctrl->data.rule.target.selector);
+            const char* tip = T(key);
+            if (tip && strncmp(tip, "!!", 2) != 0) return tip;
+        }
+        return T("tips.cell_drop");
+    }
     case CELL_HIT_CHECKBOX:
         return T("tips.cell_fallback");
     case CELL_HIT_PROTECT_CHECKBOX:

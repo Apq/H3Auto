@@ -72,7 +72,7 @@ static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
 static int  s_stop_turns_caret = 0;        // 插入位置（0..文本长度）
 static DWORD s_stop_turns_caret_tick = 0;  // 光标闪烁基准（按键后重置，输入即可见）
 static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到 999
-static char s_status_text[256] = {};
+static char s_status_text[512] = {};
 static DWORD s_status_until = 0;
 // 当前文本是否来自悬停 tip（tip 在光标静止时只续期，不参与覆盖竞争）。
 static bool s_status_is_tip = false;

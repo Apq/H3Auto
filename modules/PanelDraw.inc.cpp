@@ -445,13 +445,13 @@ static const char* PanelTipAt_(int px, int py)
         CellControl* ctrl = &s_p.cells[i];
         if (!ctrl->has_data) continue;
         const CellHitArea hit = CellControl_HitTestInCell(ctrl, px - cRc.left, py - cRc.top);
-        if (const char* tip = CellControl_TipForHit(hit))
+        if (const char* tip = CellControl_TipForHit(hit, ctrl))
             return tip;
         // 标签「行动前循环快捷施法:」本身不在槽位命中区内，整行都给施法说明。
         if (py >= cRc.top + CC_SPELL_Y && py < cRc.top + CC_SPELL_Y + CC_ROW_H
             && px >= cRc.left + CC_COL2_X && px < cRc.left + CC_COL3_RIGHT)
             return CellControl_TipForHit(
-                static_cast<CellHitArea>(CELL_HIT_SPELL_BASE));
+                static_cast<CellHitArea>(CELL_HIT_SPELL_BASE), ctrl);
     }
     struct TipRect { int x, y, w, h; const char* text; };
     static const TipRect kTips[] = {
@@ -465,12 +465,22 @@ static const char* PanelTipAt_(int px, int py)
     };
     static const char* const kTipKeys[] = {
         "tips.btn_load", "tips.btn_save", "tips.btn_profile",
-        "tips.protect_row", "tips.stop_row", "tips.btn_ok", "tips.btn_cancel",
+        nullptr, "tips.stop_row", "tips.btn_ok", "tips.btn_cancel",
     };
     for (int i = 0; i < (int)(sizeof(kTips) / sizeof(kTips[0])); ++i) {
         const TipRect& t = kTips[i];
-        if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
+        if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) {
+            // 保活策略下拉：提示跟随当前选中项（kTipKeys 第 4 项）。
+            if (i == 3) {
+                const int cur = s_p.draft_protect_strategy[s_p.selected_profile];
+                if (cur < 0 || cur >= (int)H3AutoPolicy::PS_COUNT)
+                    return T("tips.cell_drop");
+                char key[24] = {};
+                _snprintf(key, sizeof(key) - 1, "tips.protect_opt%d", cur);
+                return T(key);
+            }
             return T(kTipKeys[i]);
+        }
     }
     // 标题带热键说明：只兜标题文字附近（居中绘制，按文字宽估算），
     // 不再整条 680×44 触发（按钮/空白处不给这个 tip）。
@@ -763,7 +773,7 @@ static void DrawPanelToBuffer_()
             s_tip_last_cx = cursor.x;
             s_tip_last_cy = cursor.y;
             if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
-                char rich[256];
+                char rich[512];
                 snprintf(rich, sizeof(rich), T("tips.color_wrap"), tip);
                 SetStatusText_(rich, 3000);
                 s_status_is_tip = true;
