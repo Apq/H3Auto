@@ -793,7 +793,6 @@ static void SaveProfilesToDisk_()
         s_p.draft_protect_strategy[s_p.selected_profile],
         s_p.draft_stop_turns[s_p.selected_profile],
         s_p.selected_profile);
-    if (ok) RememberProfileSlot(s_p.selected_profile);
     char* slot_path = new(std::nothrow) char[kPathCap_];
     if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
     LogInfo("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
@@ -844,7 +843,6 @@ static void LoadProfilesFromDisk_()
         LogInfo("[Panel] 读档关联：四轮匹配 %d/21 槽，未匹配存档槽已忽略",
             matched);
     }
-    if (ok) RememberProfileSlot(s_p.selected_profile);
     delete[] loaded;
     char* slot_path = new(std::nothrow) char[kPathCap_];
     if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
@@ -994,6 +992,8 @@ static void CommitAndCloseSettingsPanel_()
     SaveCurrentCellsToDraft_();
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
         s_p.draft_protect_strategy, s_p.draft_stop_turns);
+    // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
+    RememberProfileSlot(s_p.selected_profile);
     SyncActiveProtect();
     PauseAutoExecution();
     CloseSettingsPanel();
