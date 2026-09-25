@@ -453,15 +453,6 @@ static const char* PanelTipAt_(int px, int py)
             return CellControl_TipForHit(
                 static_cast<CellHitArea>(CELL_HIT_SPELL_BASE));
     }
-    if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
-        static char title_tip[256];
-        char t1[16], t2[16], t3[16];
-        snprintf(title_tip, sizeof(title_tip), T("tips.titlebar"),
-            HotkeyDisplayName_(cfg.toggle_manual_vk, t1, sizeof(t1)),
-            HotkeyDisplayName_(cfg.one_shot_manual_vk, t2, sizeof(t2)),
-            HotkeyDisplayName_(cfg.open_settings_vk, t3, sizeof(t3)));
-        return title_tip;
-    }
     struct TipRect { int x, y, w, h; const char* text; };
     static const TipRect kTips[] = {
         { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
@@ -480,6 +471,15 @@ static const char* PanelTipAt_(int px, int py)
         const TipRect& t = kTips[i];
         if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
             return T(kTipKeys[i]);
+    }
+    if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
+        static char title_tip[256];
+        char t1[16], t2[16], t3[16];
+        snprintf(title_tip, sizeof(title_tip), T("tips.titlebar"),
+            HotkeyDisplayName_(cfg.toggle_manual_vk, t1, sizeof(t1)),
+            HotkeyDisplayName_(cfg.one_shot_manual_vk, t2, sizeof(t2)),
+            HotkeyDisplayName_(cfg.open_settings_vk, t3, sizeof(t3)));
+        return title_tip;
     }
     return nullptr;
 }
@@ -741,16 +741,27 @@ static void DrawPanelToBuffer_()
     DrawPanelButtons_(scr);
 
     // 状态栏：tips 与结果文字共用 SetStatusText_（富文本 + 统一延时消失）。
-    // 悬停命中每帧刷新保持期；移开后不再刷新，到期自动清空。
+    // 语义：任何新调用立即覆盖旧文本并重新计时。tips 只在光标位置变化时
+    // 调用（点存/读档后光标不动 → 结果文字稳定显示到到期，不再被按钮 tip
+    // 每帧刷新盖掉）；光标静止悬停在同一目标上时仅对 tip 续期不覆盖。
+    // 帮助模态打开期间面板 tips 整体停用（模态盖住的控件不该再穿透提示）。
     {
+        static int s_tip_last_cx = -1, s_tip_last_cy = -1;
         const H3POINT cursor = H3POINT::GetCursorPosition();
-        if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
-            // 结果消息保护期内不覆盖（存/读档、打包结果优先于悬停说明）。
-            if (!StatusResultHoldActive_()) {
+        if (!s_help_modal_open
+            && (cursor.x != s_tip_last_cx || cursor.y != s_tip_last_cy)) {
+            s_tip_last_cx = cursor.x;
+            s_tip_last_cy = cursor.y;
+            if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
                 char rich[256];
                 snprintf(rich, sizeof(rich), T("tips.color_wrap"), tip);
                 SetStatusText_(rich, 3000);
+                s_status_is_tip = true;
             }
+        } else if (!s_help_modal_open && s_status_is_tip && s_status_text[0]
+            && GetTickCount() >= s_status_until) {
+            // 静止悬停：tip 到期前续期（不消失），结果消息不续期自然到期。
+            s_status_until = GetTickCount() + 3000;
         }
     }
 
