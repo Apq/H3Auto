@@ -80,7 +80,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "tips.action_opt5", "行动·远程攻击：自动远程攻击，目标按目标选择排序" },
     { "tips.action_opt6", "行动·急救治疗：自动治疗己方伤员，目标按目标选择排序" },
     { "tips.selector_opt0", "目标选择·随机：候选中随机挑一个" },
-    { "tips.selector_opt1", "目标选择·远程飞兵高速优先：先打远程和飞行，再按速度" },
+    { "tips.selector_opt1", "目标选择·远程飞兵高速优先：先打远程和飞行，再按速度；同类同速优先打血量更高的那队" },
     { "tips.selector_opt2", "目标选择·数量最多：优先数量最多的部队" },
     { "tips.selector_opt3", "目标选择·失血比例：优先失血比例最高的（急救用）" },
     { "tips.selector_opt4", "目标选择·失血数值：优先失血数值最大的（急救用）" },

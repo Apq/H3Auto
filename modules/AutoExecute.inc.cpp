@@ -1242,6 +1242,8 @@ static H3AutoPolicy::TargetCandidate TargetCandidateOf_(_BattleStack_* t)
     c.shots = t->creature.shots;
     c.speed = t->creature.speed;
     c.flyer = P_CreatureInformation[t->creature_id].flyer ? 1 : 0;
+    // 远程按生物类型固有标志，不用当前弹药（弹药打光 shots 归零，但类型不变）。
+    c.ranged = P_CreatureInformation[t->creature_id].shooter ? 1 : 0;
     return c;
 }
 

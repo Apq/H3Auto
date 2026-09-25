@@ -387,6 +387,7 @@ struct TargetCandidate {
     int shots;
     int speed;
     int flyer;
+    int ranged; // 生物类型固有远程标志（H3CreatureInformation.shooter），与当前弹药无关
 };
 
 inline int StackRemainingHp(const TargetCandidate& candidate)
@@ -510,14 +511,19 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
             better = candidates[i].count_current > candidates[best].count_current;
             break;
         case SEL_RANGED_SPEED: {
-            const int current_ranged = candidates[i].shots > 0 ? 1 : 0;
-            const int best_ranged = candidates[best].shots > 0 ? 1 : 0;
+            // 远程按生物类型固有标志，不用当前弹药（shots 弹药打光即归零）。
+            const int current_ranged = candidates[i].ranged > 0 ? 1 : 0;
+            const int best_ranged = candidates[best].ranged > 0 ? 1 : 0;
             const int current_flyer = candidates[i].flyer > 0 ? 1 : 0;
             const int best_flyer = candidates[best].flyer > 0 ? 1 : 0;
+            // 远程 > 飞行 > 速度；同类同速时优先打剩余总血量更高的那队。
             better = current_ranged > best_ranged
                 || (current_ranged == best_ranged && current_flyer > best_flyer)
                 || (current_ranged == best_ranged && current_flyer == best_flyer
-                    && candidates[i].speed > candidates[best].speed);
+                    && candidates[i].speed > candidates[best].speed)
+                || (current_ranged == best_ranged && current_flyer == best_flyer
+                    && candidates[i].speed == candidates[best].speed
+                    && StackRemainingHp(candidates[i]) > StackRemainingHp(candidates[best]));
             break;
         }
         case SEL_WOUND_VALUE:

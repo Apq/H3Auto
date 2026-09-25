@@ -113,9 +113,9 @@ void TestInvalidActionNormalization()
 void TestTargetScoring()
 {
     const TargetCandidate candidates[] = {
-        {10, 10, 100, 0, 0, 20},
-        {5, 10, 100, 0, 1, 10},
-        {8, 10, 100, 0, 0, 30},
+        {10, 10, 100, 0, 0, 20, 0, 0},
+        {5, 10, 100, 0, 1, 10, 0, 1},
+        {8, 10, 100, 0, 0, 30, 0, 0},
     };
     Check(SelectTargetIndex(candidates, 3, SEL_COUNT_HIGH, 0) == 0,
         "count high keeps first tie");
@@ -123,12 +123,29 @@ void TestTargetScoring()
         "ranged flyer speed prefers shooter before flyer");
 
     const TargetCandidate flight[] = {
-        {5, 10, 100, 0, 1, 30, 0},
-        {5, 10, 100, 0, 1, 10, 1},
-        {5, 10, 100, 0, 0, 40, 1},
+        {5, 10, 100, 0, 1, 30, 0, 1},
+        {5, 10, 100, 0, 1, 10, 1, 1},
+        {5, 10, 100, 0, 0, 40, 1, 0},
     };
     Check(SelectTargetIndex(flight, 3, SEL_RANGED_SPEED, 0) == 1,
         "ranged flyer speed prefers flyer before speed");
+
+    // 同类同速：剩余总血量高者优先（第三队 20×100=2000 > 第一队 5×100=500）。
+    // 第二队弹药已空但类型仍是远程，不得因此掉出远程档。
+    const TargetCandidate hp[] = {
+        {5, 10, 100, 0, 0, 12, 0, 1},
+        {8, 10, 100, 0, 0, 12, 0, 1},
+        {20, 20, 100, 0, 0, 12, 0, 1},
+    };
+    Check(SelectTargetIndex(hp, 3, SEL_RANGED_SPEED, 0) == 2,
+        "same ranged and speed prefers higher remaining hp");
+    // 速度仍高于血量：血厚但更慢的远程不压过更快的远程。
+    const TargetCandidate slow_fat[] = {
+        {20, 20, 100, 0, 0, 8, 0, 1},
+        {5, 10, 100, 0, 0, 15, 0, 1},
+    };
+    Check(SelectTargetIndex(slow_fat, 2, SEL_RANGED_SPEED, 0) == 1,
+        "speed outranks remaining hp");
     Check(SelectTargetIndex(candidates, 3, SEL_RANDOM, 4) == 1,
         "random selector uses injected random value");
 
