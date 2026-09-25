@@ -1239,15 +1239,15 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 int bx = 0, by = 0, bw = 0, bh = 0;
                 GetHelpPackBtnRect_(&bx, &by, &bw, &bh);
                 if (PointInRect_(px, py, bx, by, bw, bh)) {
-                    char zip_path[MAX_PATH] = {};
+                    // 提示不带文件路径，out_path 只供函数内部写盘与复制，传空。
                     char reason[192] = {};
-                    if (PackRecentLogs_(zip_path, sizeof(zip_path),
+                    if (PackRecentLogs_(nullptr, 0,
                             reason, sizeof(reason))) {
                         // 系统对话框：文本可选中复制（玩家要复制 QQ 号），
                         // 自绘状态栏/模态文字都做不到复制。缓冲按文案键上限
                         // （覆盖缓冲 512）+ 路径留余量，不能只给 MAX_PATH+256。
                         char msg[1024];
-                        _snprintf(msg, sizeof(msg) - 1, T("help.pack_ok"), zip_path);
+                        _snprintf(msg, sizeof(msg) - 1, "%s", T("help.pack_ok"));
                         msg[sizeof(msg) - 1] = 0;
                         // ini 值写不了真换行：| 记换行位，弹窗前还原。
                         for (char* c = msg; *c; ++c) if (*c == '|') *c = '\n';

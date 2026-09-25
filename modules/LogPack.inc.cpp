@@ -233,7 +233,10 @@ static bool LogPackCopyToClipboard_(const char* path)
 // 原因文案键（help.pack_fail 的 %s）由调用方组织；此处只回填路径/原因。
 static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason, int reason_size)
 {
-    out_path[0] = 0;
+    char internal_path[MAX_PATH] = {};
+    char* actual_path = out_path ? out_path : internal_path;
+    const int actual_path_size = out_path ? out_path_size : (int)sizeof(internal_path);
+    actual_path[0] = 0;
     fail_reason[0] = 0;
 
     // 5 槽：最近 4 个日志 + 1 个发送说明（QQ 号写进包内 txt，解压即可复制；
@@ -441,12 +444,12 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             "H3Auto_logs_%04u%02u%02u_%02u%02u%02u.7z",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         zip_name[sizeof(zip_name) - 1] = 0;
-        _snprintf(out_path, out_path_size - 1, "%s\\%s", dir, zip_name);
-        out_path[out_path_size - 1] = 0;
+        _snprintf(actual_path, actual_path_size - 1, "%s\\%s", dir, zip_name);
+        actual_path[actual_path_size - 1] = 0;
 
         const DWORD blob_len = (DWORD)(32 + pack_total + header_len);
         bool ok = false;
-        HANDLE hz = CreateFileA(out_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        HANDLE hz = CreateFileA(actual_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hz != INVALID_HANDLE_VALUE) {
             DWORD wrote = 0;
@@ -460,7 +463,7 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             _snprintf(fail_reason, reason_size - 1, "%s", zip_name);
             goto bail;
         }
-        if (!LogPackCopyToClipboard_(out_path)) {
+        if (!LogPackCopyToClipboard_(actual_path)) {
             // 7z 已生成，只是剪贴板被占用：路径已写 out_path，调用方可提示手动复制。
             _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_clipboard_fail"));
             goto bail;

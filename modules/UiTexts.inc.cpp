@@ -54,7 +54,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.log_level_opt4", "错误" },
     { "help.pack_btn", "打包日志" },
     { "help.pack_title", "日志已打包" },
-    { "help.pack_ok", "日志已打包成 .7z 并复制为文件，直接到 QQ 聊天框粘贴发送即可。|QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。|（QQ号已同时写在压缩包内的 00_说明.txt 里，解压即可复制）|%s" },
+    { "help.pack_ok", "日志已打包成 .7z 并复制为文件，直接到 QQ 聊天框粘贴发送即可。|QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。|（QQ号已同时写在压缩包内的 00_说明.txt 里，解压即可复制）" },
     { "help.pack_note", "请把同目录的日志文件发送到：|QQ群：1042362808 / 740338251|或加 QQ：712999712 私发|" },
     { "help.pack_fail", "{红}打包日志失败：%s" },
     { "help.pack_no_logs", "没有找到日志文件" },
