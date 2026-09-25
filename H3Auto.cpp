@@ -18,6 +18,7 @@ PatcherInstance* _PI = nullptr;
 #include "modules/ConfigLog.inc.cpp"
 #include "modules/Compat.inc.cpp"
 #include "modules/AutoExecute.inc.cpp"
+#include "modules/BattleState.inc.cpp"
 #include "modules/CellControl.inc.cpp"
 #include "modules/SettingsDlg.inc.cpp"
 #include "modules/Entry.inc.cpp"

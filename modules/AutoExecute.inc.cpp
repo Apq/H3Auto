@@ -15,35 +15,12 @@ extern uint16_t g_stop_turns[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
-// ===== 战场状态机（设计文档 §15 / 重构步骤.md §1.1）=====
-// 唯一迁移出口 SetPhase_：合法边查表 + 边动作 + 日志；非法组合记日志保持原状。
-enum BattlePhase {
-    BP_PEACE,          // 战斗前
-    BP_COMBAT_CLOSED,  // 战斗中·面板关
-    BP_COMBAT_OPEN,    // 战斗中·面板开
-    BP_RESULT,         // 战斗结算
-    BP_ENDED,          // 战斗结束（瞬态：进入即清理后续转 BP_PEACE）
-};
-enum BattleEvent {
-    BE_BATTLE_UI_APPEARED,   // 战斗 UI 出现（BltComplete 每帧扫描）
-    BE_PANEL_OPEN_REQUESTED, // 右键自动战斗 / P 键（面板打开成功后）
-    BE_PANEL_COMMIT,         // 面板「确定」
-    BE_PANEL_CANCEL,         // 面板「取消」/ESC
-    BE_RESULT_SHOWN,         // CPResult 结果窗出现
-    BE_RESULT_RETRY,         // 结算→取消/重打
-    BE_RESULT_ACCEPTED,      // 结算→接受
-    BE_BATTLE_UI_GONE,       // 战斗 UI 消失且未经结算（兜底）
-};
+// 战场阶段状态机（enum/g_phase/SetPhase_）：声明在 BattleState.hpp，
+// 实现在 BattleState.inc.cpp（本文件之后 include）。
+#include "BattleState.hpp"
 
-// 文件后部的清理函数：SetPhase_ 边动作需要，先声明（C2065 预防）。
-static void ClearSpellWait_();
-static void ClearOneShotManual_();
+// 定义在本文件后部：SetControlMode_ 边动作需要，先声明（C2065 预防）。
 static void RefreshControlStatusHint_();
-
-BattlePhase g_phase = BP_PEACE;
-// 兜底边（BE_BATTLE_UI_GONE）宽限：重打销毁重建战斗 UI 常超 3 帧，
-// RETRY 边置 3 秒宽限，期间 UI 消失不视为「未经结算消失」（重构步骤 S4.2）。
-DWORD g_ui_gone_grace_until = 0;
 
 // ===== 控制权子状态（重构步骤 §1.2；仅战斗中·面板关内有效）=====
 enum ControlMode {
@@ -95,85 +72,6 @@ bool PanelOpen_()
     return g_phase == BP_COMBAT_OPEN;
 }
 
-static const char* PhaseName_(BattlePhase p)
-{
-    switch (p) {
-    case BP_PEACE:         return "PEACE";
-    case BP_COMBAT_CLOSED: return "COMBAT_CLOSED";
-    case BP_COMBAT_OPEN:   return "COMBAT_OPEN";
-    case BP_RESULT:        return "RESULT";
-    case BP_ENDED:         return "ENDED";
-    default:               return "?";
-    }
-}
-
-static const char* EventName_(BattleEvent e)
-{
-    switch (e) {
-    case BE_BATTLE_UI_APPEARED:   return "UI_APPEARED";
-    case BE_PANEL_OPEN_REQUESTED: return "PANEL_OPEN";
-    case BE_PANEL_COMMIT:         return "PANEL_COMMIT";
-    case BE_PANEL_CANCEL:         return "PANEL_CANCEL";
-    case BE_RESULT_SHOWN:         return "RESULT_SHOWN";
-    case BE_RESULT_RETRY:         return "RESULT_RETRY";
-    case BE_RESULT_ACCEPTED:      return "RESULT_ACCEPTED";
-    case BE_BATTLE_UI_GONE:       return "UI_GONE";
-    default:                      return "?";
-    }
-}
-
-// 边动作：定义在 g_auto_state 之后（要引用运行时状态），此处只声明。
-// 按 (from, ev) 分派：ENDED→PEACE 的续转边不重复清理。
-static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev);
-
-// 状态机边动作用到的文件后部函数。
-void ResetAutoState();
-void EnsureStackTrackingBound();
-
-void SetPhase_(BattlePhase next, BattleEvent ev)
-{
-    if (next == g_phase) return; // 幂等：同状态重复事件不算迁移
-    struct PhaseEdge { BattlePhase from, to; BattleEvent ev; };
-    static const PhaseEdge legal[] = {
-        { BP_PEACE,         BP_COMBAT_CLOSED, BE_BATTLE_UI_APPEARED },
-        { BP_PEACE,         BP_RESULT,        BE_RESULT_SHOWN },   // 快速战斗：未经战斗 UI 直接结算
-        { BP_COMBAT_CLOSED, BP_COMBAT_OPEN,   BE_PANEL_OPEN_REQUESTED },
-        { BP_COMBAT_OPEN,   BP_COMBAT_CLOSED, BE_PANEL_COMMIT },
-        { BP_COMBAT_OPEN,   BP_COMBAT_CLOSED, BE_PANEL_CANCEL },
-        { BP_COMBAT_CLOSED, BP_RESULT,        BE_RESULT_SHOWN },
-        { BP_COMBAT_OPEN,   BP_RESULT,        BE_RESULT_SHOWN },
-        { BP_RESULT,        BP_COMBAT_CLOSED, BE_RESULT_RETRY },
-        { BP_RESULT,        BP_ENDED,         BE_RESULT_ACCEPTED },
-        { BP_COMBAT_CLOSED, BP_ENDED,         BE_BATTLE_UI_GONE },
-        { BP_COMBAT_OPEN,   BP_ENDED,         BE_BATTLE_UI_GONE },
-        { BP_RESULT,        BP_ENDED,         BE_BATTLE_UI_GONE },  // 结算中读档/退出
-        { BP_ENDED,         BP_PEACE,         BE_RESULT_ACCEPTED }, // 瞬态续转
-        { BP_ENDED,         BP_PEACE,         BE_BATTLE_UI_GONE },  // 瞬态续转
-    };
-    bool ok = false;
-    for (int i = 0; i < (int)(sizeof(legal) / sizeof(legal[0])); ++i) {
-        if (legal[i].from == g_phase && legal[i].to == next
-            && legal[i].ev == ev) {
-            ok = true;
-            break;
-        }
-    }
-    if (!ok) {
-        WriteLog("[Phase] illegal %s -> %s (ev=%s)",
-            PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
-        return;
-    }
-
-    WriteLog("[Phase] %s -> %s (ev=%s)",
-        PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
-    PhaseEdgeAction_(g_phase, ev);
-    g_phase = next;
-
-    // ENDED 是瞬态：清理已做，立即续转回 PEACE（合法表含同事件的续转边）。
-    if (g_phase == BP_ENDED)
-        SetPhase_(BP_PEACE, ev);
-}
-
 // 接管模型（收敛后）：
 // 1) 只在“控制权交给玩家”时介入（HH_ShouldAutoExecute 返回 0 的路径）。
 //    被蛊惑/敌方回合等本就不会把控制权交给玩家，无需单独状态机。
@@ -202,73 +100,6 @@ static struct {
     bool  kb_open_panel_seen;   // 键盘钩子捕获的打开面板键按下（待消费）
     char  last_status_text[64]; // 状态提示去重
 } g_auto_state;
-
-// 状态机边动作（§15）。在合法迁移确认后、g_phase 赋值前执行；
-// from=迁移前状态。ENDED→PEACE 瞬态续转边不执行任何动作——清理已在
-// 进入 ENDED 的主边做过，重复执行依赖边动作幂等是侥幸而非结构保证。
-static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
-{
-    if (from == BP_ENDED)
-        return; // 续转边：无动作
-
-    if (ev == BE_PANEL_OPEN_REQUESTED) {
-        // 打开面板=强制停自动执行（§15.3：面板开时不得存在在跑的子流程）。
-        // 切停走与 F9 相同的清理；已停则不动。
-        if (g_control != CM_MANUAL) {
-            ClearOneShotManual_();
-            SetControlMode_(CM_MANUAL);
-            WriteLog("[Control] 面板打开：切换为全手动");
-        }
-        // GetTickCount 相对超时挂在面板关闭后会瞬间误超时，清空而非冻结。
-        ClearSpellWait_();
-        return;
-    }
-
-    if (from == BP_ENDED)
-        return; // 瞬态续转：清理已在进入 ENDED 时做过
-
-    if (ev == BE_RESULT_SHOWN) {
-        // 面板开时战斗推进到结算（如敌方清场）：静默关面板，草稿丢弃。
-        if (IsPanelActive()) {
-            WriteLog("[Phase] 结算出现：静默关闭设置面板");
-            CloseSettingsPanel();
-        }
-        return;
-    }
-
-    if (ev == BE_RESULT_RETRY) {
-        // 取消/重打：重排身份+重绑+清运行时（EnsureStackTrackingBound 内含）；
-        // CM 保留——全手动是玩家显式选择，重打不清（设计文档 §10.1）。
-        g_ui_gone_grace_until = GetTickCount() + 3000;
-        EnsureStackTrackingBound();
-        return;
-    }
-
-    if (ev == BE_RESULT_ACCEPTED || ev == BE_BATTLE_UI_GONE) {
-        // 战斗终了（ENDED→PEACE 续转边不重复）：钩子捕获的待消费热键全部丢弃，
-        // PollControlHotkeys_ 在 PEACE 不运行，不清会横跨两场战斗。
-        g_auto_state.kb_toggle_seen = false;
-        g_auto_state.kb_oneshot_seen = false;
-        g_auto_state.kb_open_panel_seen = false;
-    }
-
-    if (ev == BE_RESULT_ACCEPTED) {
-        // 接受：清方案+清运行时+跟踪（OnBattleResultAccepted 内含）；
-        // 决策③：跨场不残留全手动，下一场恢复自动。
-        ClearConfirmedProfiles();
-        ResetAutoState();
-        SetControlMode_(CM_AUTO);
-        return;
-    }
-
-    if (ev == BE_BATTLE_UI_GONE) {
-        // 兜底（读档/中途退出）：清运行时+跟踪+面板（ResetAutoState 内含静默关面板）；
-        // 决策②：5 套方案保留；CM 重置同接受。
-        ResetAutoState();
-        SetControlMode_(CM_AUTO);
-        return;
-    }
-}
 
 // 当前战斗的人类侧部队跟踪表（辅助正确套用设置，不是第二套控制权逻辑）。
 // 设置提交时绑定“槽位 + 生物类型”；之后刷新存活/位置/数量。
@@ -846,16 +677,6 @@ void ResetAutoState()
     // 跟踪表是“当前战斗绑定”，进程重置时清空。
     ClearStackTracking_();
     WriteLog("Auto state reset; confirmed strategies preserved, tracking cleared.");
-}
-
-// 玩家点结果窗「确定/接受」：清空 5 套方案 + 运行时状态。
-// 「取消/重打」不得调用本函数。
-// 重构后由状态机 BE_RESULT_ACCEPTED 边动作取代（PhaseEdgeAction_），保留外壳兼容。
-void OnBattleResultAccepted()
-{
-    ClearConfirmedProfiles();
-    ResetAutoState();
-    WriteLog("[Life] battle result accepted: profiles+runtime cleared");
 }
 
 // 取消重打后战场回来：按稳定身份重排方案、清空本轮状态并强制重绑。

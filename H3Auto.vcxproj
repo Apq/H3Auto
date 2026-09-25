@@ -62,6 +62,7 @@
   <ItemGroup>
     <ClInclude Include="..\H3API\single_header\H3API.hpp" />
     <ClInclude Include="modules\PolicyCore.hpp" />
+    <ClInclude Include="modules\BattleState.hpp" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
