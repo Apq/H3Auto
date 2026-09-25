@@ -1,0 +1,232 @@
+// ========== UTF-8 ini 读写 ==========
+// H3Auto.ini 与 lang\*.ini 为 UTF-8 文本（写统一带 BOM，读兼容无 BOM）。
+// GetPrivateProfileStringA 是 ANSI 接口，读 UTF-8 中文值会按 GBK 误解成
+// 乱码，因此手写解析。路径参数按系统 ACP 传 char*（与 GetModuleFileNameA
+// 一致），文件内容按 UTF-8 字节原样返回（调用方内部字符串均为 UTF-8）。
+// 行内注释只认 ';'（不认 '#'，避免截断 {#RRGGBB} 颜色标记）；
+// 行首 '#' 或 ';' 均为注释行。节/键比较不区分大小写。
+
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+
+// 去掉行首 BOM/空白与行尾空白（原地写 0，返回头指针）。
+static char* IniTrim_(char* s)
+{
+    if (!s) return s;
+    if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB
+        && (unsigned char)s[2] == 0xBF)
+        s += 3;
+    while (*s == ' ' || *s == '\t') ++s;
+    char* end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t'
+        || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = 0;
+    return s;
+}
+
+// 读整个文件到堆缓冲（UTF-8 原样字节，追加 '\0'）。
+// 返回 new[] 缓冲（调用方 delete[]），失败返回 nullptr。
+static char* IniReadFileToBuffer_(const char* path, long* out_size)
+{
+    if (!path || !path[0]) return nullptr;
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, path, "rb") != 0 || !fp) return nullptr;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz < 0) { fclose(fp); return nullptr; }
+    char* buf = new char[sz + 1];
+    const size_t got = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    buf[got] = 0;
+    if (out_size) *out_size = (long)got;
+    return buf;
+}
+
+// 在缓冲内定位 section/key 的值。返回 true 并给出值区间（已 Trim、
+// 已去行内 ';' 注释）。节的键允许乱序；重复键取第一个。
+static bool IniFindValue_(char* buf, const char* section, const char* key,
+    const char** out_val, int* out_len)
+{
+    if (!buf || !section || !key) return false;
+    bool in_section = false;
+    char* p = buf;
+    while (*p) {
+        char* line = p;
+        while (*p && *p != '\r' && *p != '\n') ++p;
+        if (*p) {
+            *p++ = 0;
+            if (p[-1] == '\r' && *p == '\n') ++p;
+        }
+        char* s = IniTrim_(line);
+        if (!*s) continue;
+        if (*s == '[') {
+            char* close = strchr(s, ']');
+            if (!close) { in_section = false; continue; }
+            *close = 0;
+            in_section = _stricmp(IniTrim_(s + 1), section) == 0;
+            continue;
+        }
+        if (!in_section) continue;
+        char* eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char* k = IniTrim_(s);
+        if (_stricmp(k, key) != 0) continue;
+        char* v = eq + 1;
+        char* semi = strchr(v, ';');
+        if (semi) *semi = 0;
+        v = IniTrim_(v);
+        *out_val = v;
+        *out_len = (int)strlen(v);
+        return true;
+    }
+    return false;
+}
+
+// 读字符串键。命中返回 true；未命中/文件不存在时写 default_value 并
+// 返回 false。out 始终以 0 结尾。
+static bool IniReadUtf8(const char* path, const char* section, const char* key,
+    const char* default_value, char* out, int out_size)
+{
+    if (!out || out_size <= 0) return false;
+    out[0] = 0;
+    bool found = false;
+    long sz = 0;
+    char* buf = IniReadFileToBuffer_(path, &sz);
+    if (buf) {
+        const char* v = nullptr;
+        int vlen = 0;
+        if (IniFindValue_(buf, section, key, &v, &vlen) && vlen > 0) {
+            const int n = vlen < out_size - 1 ? vlen : out_size - 1;
+            memcpy(out, v, n);
+            out[n] = 0;
+            found = true;
+        }
+        delete[] buf;
+    }
+    if (!found) {
+        const char* d = default_value ? default_value : "";
+        const int n = (int)strlen(d) < out_size - 1 ? (int)strlen(d) : out_size - 1;
+        memcpy(out, d, n);
+        out[n] = 0;
+    }
+    return found;
+}
+
+// 读整数键（未命中/坏值返回 default_value）。
+static int IniReadIntUtf8(const char* path, const char* section,
+    const char* key, int default_value)
+{
+    char buf[32] = {};
+    if (!IniReadUtf8(path, section, key, "", buf, sizeof(buf)))
+        return default_value;
+    if (!buf[0]) return default_value;
+    return atoi(buf);
+}
+
+// 写/改一个键：保留文件其余行与注释（该键所在行的行内注释会被替换掉），
+// 写回统一 UTF-8 带 BOM、CRLF。节不存在则追加新节。文件不存在则新建。
+static bool IniWriteKeyUtf8(const char* path, const char* section,
+    const char* key, const char* value)
+{
+    if (!path || !path[0] || !section || !key) return false;
+    long sz = 0;
+    char* old = IniReadFileToBuffer_(path, &sz);
+    // 输出缓冲：原内容 + 新行余量
+    const long cap = (old ? sz : 0) + 256 + (long)strlen(key)
+        + (long)(value ? strlen(value) : 0) + (long)strlen(section) + 16;
+    char* out = new char[cap];
+    long out_len = 0;
+    auto append = [&](const char* s, long n) {
+        if (n > 0 && out_len + n < cap) { memcpy(out + out_len, s, n); out_len += n; }
+    };
+    append("\xEF\xBB\xBF", 3);
+
+    bool written = false;
+    bool in_section = false;
+    bool section_seen = false;
+    if (old) {
+        char* p = old;
+        bool first_line = true;
+        while (*p) {
+            char* line = p;
+            while (*p && *p != '\r' && *p != '\n') ++p;
+            bool had_newline = *p != 0;
+            if (*p) {
+                *p++ = 0;
+                if (p[-1] == '\r' && *p == '\n') ++p;
+            }
+            // 跳过旧 BOM
+            char* s = line;
+            if (first_line) {
+                first_line = false;
+                if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB
+                    && (unsigned char)s[2] == 0xBF)
+                    s += 3;
+            }
+            char* t = IniTrim_(s);
+            const bool is_section = *t == '[';
+            if (is_section) {
+                char* close = strchr(t, ']');
+                if (close) {
+                    *close = 0;
+                    // 离开目标节且键未写：在节末插入
+                    if (in_section && !written) {
+                        char nl[320];
+                        int n = _snprintf(nl, sizeof(nl) - 1, "%s = %s\r\n",
+                            key, value ? value : "");
+                        append(nl, n);
+                        written = true;
+                    }
+                    in_section = _stricmp(IniTrim_(t + 1), section) == 0;
+                    if (in_section) section_seen = true;
+                    *close = ']';
+                }
+            } else if (in_section && !written) {
+                char* eq = strchr(t, '=');
+                if (eq) {
+                    *eq = 0;
+                    const bool key_match = _stricmp(IniTrim_(t), key) == 0;
+                    *eq = '=';
+                    if (key_match) {
+                        char nl[320];
+                        int n = _snprintf(nl, sizeof(nl) - 1, "%s = %s\r\n",
+                            key, value ? value : "");
+                        append(nl, n);
+                        written = true;
+                        continue; // 原行不输出（已被新行替换）
+                    }
+                }
+            }
+            // 原样输出该行（保持 CRLF）
+            long len = (long)strlen(s);
+            append(s, len);
+            if (had_newline) append("\r\n", 2);
+        }
+    }
+    if (!written) {
+        if (!section_seen) {
+            if (out_len > 3) append("\r\n", 2); // BOM 后不产生首空行
+            append("[", 1);
+            append(section, (long)strlen(section));
+            append("]\r\n", 3);
+        }
+        char nl[320];
+        int n = _snprintf(nl, sizeof(nl) - 1, "%s = %s\r\n",
+            key, value ? value : "");
+        append(nl, n);
+    }
+    out[out_len] = 0;
+
+    bool ok = false;
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, path, "wb") == 0 && fp) {
+        ok = fwrite(out, 1, (size_t)out_len, fp) == (size_t)out_len;
+        fclose(fp);
+    }
+    delete[] out;
+    delete[] old;
+    return ok;
+}

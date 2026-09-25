@@ -111,47 +111,10 @@ static char* TrimAscii(char* s)
 
 static bool ReadDisableLogFromIniFileW(const wchar_t* ini_path)
 {
-    if (!ini_path || !ini_path[0]) return false;
-    HANDLE file = CreateFileW(ini_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    char buf[4097];
-    DWORD bytes_read = 0;
-    BOOL ok = ReadFile(file, buf, sizeof(buf) - 1, &bytes_read, nullptr);
-    CloseHandle(file);
-    if (!ok || bytes_read == 0) return false;
-    buf[bytes_read] = 0;
-
-    bool in_logging = false;
-    char* p = buf;
-    while (*p) {
-        char* line = p;
-        while (*p && *p != '\r' && *p != '\n') ++p;
-        if (*p) {
-            *p++ = 0;
-            if (p[-1] == '\r' && *p == '\n') ++p;
-        }
-        char* s = TrimAscii(line);
-        if (!s || !*s || *s == ';' || *s == '#') continue;
-        if (*s == '[') {
-            char* close = strchr(s, ']');
-            if (!close) { in_logging = false; continue; }
-            *close = 0;
-            char* section = TrimAscii(s + 1);
-            in_logging = section && _stricmp(section, "Logging") == 0;
-            continue;
-        }
-        if (!in_logging) continue;
-        char* eq = strchr(s, '=');
-        if (!eq) continue;
-        *eq = 0;
-        char* key = TrimAscii(s);
-        char* value = TrimAscii(eq + 1);
-        if (key && value && _stricmp(key, "DisableLog") == 0)
-            return atoi(value) != 0;
-    }
-    // 没有 [Logging] 段 → 默认不禁用日志（DisableLog=0）
-    return false;
+    // 走统一 UTF-8 解析：路径转 ACP char 后 IniReadIntUtf8。
+    char path[MAX_PATH] = {};
+    WideCharToMultiByte(CP_ACP, 0, ini_path, -1, path, sizeof(path), nullptr, nullptr);
+    return IniReadIntUtf8(path, "Logging", "DisableLog", 0) != 0;
 }
 
 static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base, const wchar_t* current_log_path)
@@ -247,7 +210,46 @@ static int ClampInt(int value, int min_value, int max_value)
     return value;
 }
 
-static void WriteLog(const char* fmt, ...);  // 前向声明
+// 日志级别（常见五级）。MinLevel 以下不落盘；DisableLog 仍最高优先。
+enum LogLevel {
+    LOG_TRACE = 0,
+    LOG_DEBUG = 1,
+    LOG_INFO  = 2,
+    LOG_WARN  = 3,
+    LOG_ERROR = 4,
+};
+static int g_log_level = LOG_INFO; // 由 [Logging] MinLevel 覆盖（默认 info）
+
+// 级别名（写日志行前缀用，固定小写）。
+static const char* LogLevelName_(int level)
+{
+    switch (level) {
+    case LOG_TRACE: return "trace";
+    case LOG_DEBUG: return "debug";
+    case LOG_INFO:  return "info";
+    case LOG_WARN:  return "warn";
+    default:        return "error";
+    }
+}
+
+// 级别名解析（trace/debug/info/warning/warn/error，不区分大小写；坏值回 info）。
+static int ParseLogLevel_(const char* name)
+{
+    if (!name || !name[0]) return LOG_INFO;
+    if (_stricmp(name, "trace") == 0) return LOG_TRACE;
+    if (_stricmp(name, "debug") == 0) return LOG_DEBUG;
+    if (_stricmp(name, "info") == 0) return LOG_INFO;
+    if (_stricmp(name, "warn") == 0 || _stricmp(name, "warning") == 0) return LOG_WARN;
+    if (_stricmp(name, "error") == 0) return LOG_ERROR;
+    return LOG_INFO;
+}
+
+// 分级日志前向声明（定义在本文件后部；ReadConfig 等早期调用点使用）。
+static void LogTrace(const char* fmt, ...);
+static void LogDebug(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);
+static void LogWarn(const char* fmt, ...);
+static void LogError(const char* fmt, ...);
 
 static bool IsAllowedOneShotVk_(int vk)
 {
@@ -385,8 +387,15 @@ static bool LoadProfileStore_(int army_types[21], int army_counts[21],
 static void ReadConfig()
 {
     const char* f = g_ini_path;
-    cfg.disable_on_start = GetPrivateProfileIntA("General", "DisableOnStart", 0, f);
+    cfg.disable_on_start = IniReadIntUtf8(f, "General", "DisableOnStart", 0);
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
+
+    // 日志级别：[Logging] MinLevel（trace/debug/info/warn/error，坏值回 info）。
+    {
+        char lv[16] = {};
+        IniReadUtf8(f, "Logging", "MinLevel", "info", lv, sizeof(lv));
+        g_log_level = ParseLogLevel_(lv);
+    }
 
     // 上次存/读档的槽位（面板自动选中该编号，不自动读档）。
     // 从独立文件 H3Auto.last 读（一行数字 1..5），无文件/坏值默认 1。
@@ -408,26 +417,26 @@ static void ReadConfig()
     char toggle_buf[64] = {};
     char oneshot_buf[64] = {};
     char openpanel_buf[64] = {};
-    GetPrivateProfileStringA("Hotkeys", "ToggleManual", "F9",
-        toggle_buf, sizeof(toggle_buf), f);
-    GetPrivateProfileStringA("Hotkeys", "OneShotManual", "J",
-        oneshot_buf, sizeof(oneshot_buf), f);
-    GetPrivateProfileStringA("Hotkeys", "OpenSettings", "P",
-        openpanel_buf, sizeof(openpanel_buf), f);
+    IniReadUtf8(f, "Hotkeys", "ToggleManual", "F9",
+        toggle_buf, sizeof(toggle_buf));
+    IniReadUtf8(f, "Hotkeys", "OneShotManual", "J",
+        oneshot_buf, sizeof(oneshot_buf));
+    IniReadUtf8(f, "Hotkeys", "OpenSettings", "P",
+        openpanel_buf, sizeof(openpanel_buf));
     cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F9, false);
     cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, 'J', true);
     if (!IsAllowedOneShotVk_(cfg.one_shot_manual_vk)) {
-        WriteLog("配置警告：OneShotManual 只允许单个字母，已回退到 J");
+        LogWarn("配置警告：OneShotManual 只允许单个字母，已回退到 J");
         cfg.one_shot_manual_vk = 'J';
     }
     cfg.open_settings_vk = ParseHotkeyVk_(openpanel_buf, 'P', true);
     if (!IsAllowedOpenPanelVk_(cfg.open_settings_vk)
         || cfg.open_settings_vk == cfg.one_shot_manual_vk) {
-        WriteLog("配置警告：OpenSettings 键位非法或与 OneShotManual 冲突，已回退到 P");
+        LogWarn("配置警告：OpenSettings 键位非法或与 OneShotManual 冲突，已回退到 P");
         cfg.open_settings_vk = 'P';
     }
 
-    WriteLog("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X OpenSettings=0x%X",
+    LogInfo("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X OpenSettings=0x%X",
         cfg.disable_on_start, cfg.toggle_manual_vk, cfg.one_shot_manual_vk,
         cfg.open_settings_vk);
 }
@@ -456,6 +465,8 @@ static const char* HotkeyDisplayName_(int vk, char* buf, int buf_size)
 
 // ========== 日志输出 ==========
 
+// ========== 日志输出 ==========
+
 static void AppendUtf8LogLine(const char* text)
 {
     if (g_disable_log) return;
@@ -475,14 +486,16 @@ static void AppendUtf8LogLine(const char* text)
     CloseHandle(h);
 }
 
-static void WriteLog(const char* fmt, ...)
+static void WriteLogLv(int level, const char* fmt, ...)
 {
     if (g_disable_log) return;
+    if (level < g_log_level) return;
     char line[1024];
     SYSTEMTIME st;
     GetLocalTime(&st);
-    int off = _snprintf(line, sizeof(line) - 1, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int off = _snprintf(line, sizeof(line) - 1, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [%s] ",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+        LogLevelName_(level));
     if (off < 0) off = 0;
     if (off >= (int)sizeof(line)) off = (int)sizeof(line) - 1;
 
@@ -493,3 +506,22 @@ static void WriteLog(const char* fmt, ...)
     line[sizeof(line) - 1] = 0;
     AppendUtf8LogLine(line);
 }
+
+// 分级入口：配置/状态=INFO，匹配与执行细节=DEBUG，配置回退=WARN，异常/初始化失败=ERROR。
+// 统一先把格式化结果落到本地缓冲，再经 WriteLogLv 补时间戳/级别前缀（避免 va_list 转发）。
+#define H3AUTO_LOG_BODY_(level)                                          \
+    do {                                                                 \
+        if (g_disable_log || (level) < g_log_level) break;               \
+        char line[1024];                                                 \
+        va_list ap; va_start(ap, fmt);                                   \
+        _vsnprintf(line, sizeof(line) - 1, fmt, ap);                     \
+        va_end(ap);                                                      \
+        line[sizeof(line) - 1] = 0;                                      \
+        WriteLogLv(level, "%s", line);                                   \
+    } while (0)
+
+static void LogTrace(const char* fmt, ...) { H3AUTO_LOG_BODY_(LOG_TRACE); }
+static void LogDebug(const char* fmt, ...) { H3AUTO_LOG_BODY_(LOG_DEBUG); }
+static void LogInfo(const char* fmt, ...)  { H3AUTO_LOG_BODY_(LOG_INFO); }
+static void LogWarn(const char* fmt, ...)  { H3AUTO_LOG_BODY_(LOG_WARN); }
+static void LogError(const char* fmt, ...) { H3AUTO_LOG_BODY_(LOG_ERROR); }

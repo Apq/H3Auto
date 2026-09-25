@@ -5,7 +5,7 @@
 
 #include "BattleState.hpp"
 
-static void WriteLog(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 extern void ClearConfirmedProfiles();
 extern void ResetAutoState();
 extern bool IsPanelActive();
@@ -72,12 +72,12 @@ void SetPhase_(BattlePhase next, BattleEvent ev)
         }
     }
     if (!ok) {
-        WriteLog("[Phase] illegal %s -> %s (ev=%s)",
+        LogInfo("[Phase] illegal %s -> %s (ev=%s)",
             PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
         return;
     }
 
-    WriteLog("[Phase] %s -> %s (ev=%s)",
+    LogInfo("[Phase] %s -> %s (ev=%s)",
         PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
     PhaseEdgeAction_(g_phase, ev);
     g_phase = next;
@@ -101,7 +101,7 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
         if (g_control != CM_MANUAL) {
             ClearOneShotManual_();
             SetControlMode_(CM_MANUAL);
-            WriteLog("[Control] 面板打开：切换为全手动");
+            LogInfo("[Control] 面板打开：切换为全手动");
         }
         // GetTickCount 相对超时挂在面板关闭后会瞬间误超时，清空而非冻结。
         ClearSpellWait_();
@@ -111,7 +111,7 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
     if (ev == BE_RESULT_SHOWN) {
         // 面板开时战斗推进到结算（如敌方清场）：静默关面板，草稿丢弃。
         if (IsPanelActive()) {
-            WriteLog("[Phase] 结算出现：静默关闭设置面板");
+            LogInfo("[Phase] 结算出现：静默关闭设置面板");
             CloseSettingsPanel();
         }
         return;
@@ -158,5 +158,5 @@ void OnBattleResultAccepted()
 {
     ClearConfirmedProfiles();
     ResetAutoState();
-    WriteLog("[Life] battle result accepted: profiles+runtime cleared");
+    LogInfo("[Life] battle result accepted: profiles+runtime cleared");
 }

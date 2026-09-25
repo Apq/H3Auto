@@ -7,7 +7,7 @@
 #define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
 #define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
 
-static void WriteLog(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
 static H3LoadedPcx16* s_panel_composite = nullptr;
@@ -215,7 +215,7 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
 
     FILE* file = nullptr;
     if (fopen_s(&file, path, "rb") != 0 || !file) {
-        WriteLog("[Panel] PCX 资源加载失败：%s", path);
+        LogError("[Panel] PCX 资源加载失败：%s", path);
         load_failed = true;
         return nullptr;
     }
@@ -254,7 +254,7 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
             && !(allow_shorter_height && height < expected_height))
         || bytes_per_line < width)
     {
-        WriteLog("[Panel] %s 格式不符 w=%d h=%d bpp=%d planes=%d bpl=%d。",
+        LogInfo("[Panel] %s 格式不符 w=%d h=%d bpp=%d planes=%d bpl=%d。",
             asset_name, width, height, bits_per_plane, plane_count, bytes_per_line);
         free(encoded);
         load_failed = true;
@@ -286,7 +286,7 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
     free(encoded);
 
     if (output_pos != raw_size) {
-        WriteLog("[Panel] %s 解码不完整 decoded=%u expected=%u。",
+        LogInfo("[Panel] %s 解码不完整 decoded=%u expected=%u。",
             asset_name, static_cast<unsigned>(output_pos), static_cast<unsigned>(raw_size));
         free(raw);
         load_failed = true;

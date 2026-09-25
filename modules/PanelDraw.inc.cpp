@@ -74,7 +74,7 @@ static void DrawProfileButtons_(H3LoadedPcx16* destination)
                 (BYTE)142, (BYTE)108, (BYTE)54);
         }
         char text[16];
-        _snprintf(text, sizeof(text), "方案 %d", i + 1);
+        _snprintf(text, sizeof(text), T("panel.profile_btn_fmt"), i + 1);
         DrawTxt(destination, font, text,
             rc.left, rc.top, PROFILE_BTN_W, PROFILE_BTN_H,
             selected ? (INT32)eTextColor::WHITE : (INT32)eTextColor::GOLD,
@@ -194,7 +194,7 @@ static void DrawMeleePickMarker_()
             //     abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
+        LogError("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
     }
 }
 
@@ -209,7 +209,7 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 336;
+    const int h = 412; // 原 336 + 日志级别行 + 打包日志按钮行
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -226,6 +226,67 @@ static void GetHelpModalCloseRect_(int* out_x, int* out_y, int* out_w, int* out_
     if (out_y) *out_y = y + h - bh - 14;
     if (out_w) *out_w = bw;
     if (out_h) *out_h = bh;
+}
+
+// 帮助模态新增行：日志级别下拉（收起态框体）与打包日志按钮。
+    // 级别序号 → 选项文案键（0..4 = trace..error）。
+static const char* HelpLogLevelOptKey_(int lv)
+{
+    static const char* const k[] = {
+        "help.log_level_opt0", "help.log_level_opt1", "help.log_level_opt2",
+        "help.log_level_opt3", "help.log_level_opt4",
+    };
+    return (lv >= 0 && lv < 5) ? k[lv] : k[2];
+}
+
+static const int HELP_DD_LABEL_W = 80;
+static const int HELP_DD_W  = 120;
+static const int HELP_DD_H  = 22;
+static const int HELP_DD_ITEM_H = 20;
+static const int HELP_PACK_BTN_W = 180;
+static const int HELP_PACK_BTN_H = 26;
+
+// 行 A 顶（原 8 行 help_lines 底之下）。
+static void GetHelpLogLevelRowY_(int* out_y)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+    if (out_y) *out_y = y + 50 + 8 * 28 + 6; // 8 行说明之后
+}
+
+static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+    int ry = 0;
+    GetHelpLogLevelRowY_(&ry);
+    if (out_x) *out_x = x + 18 + HELP_DD_LABEL_W + 8;
+    if (out_y) *out_y = ry;
+    if (out_w) *out_w = HELP_DD_W;
+    if (out_h) *out_h = HELP_DD_H;
+}
+
+static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
+    int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpLogLevelDdRect_(&x, &y, &w, &h);
+    if (out_x) *out_x = x;
+    if (out_y) *out_y = y + HELP_DD_H + item * HELP_DD_ITEM_H;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = HELP_DD_ITEM_H;
+}
+
+static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+    int ry = 0;
+    GetHelpLogLevelRowY_(&ry);
+    if (out_x) *out_x = x + 18;
+    if (out_y) *out_y = ry + HELP_DD_H + 10;
+    if (out_w) *out_w = HELP_PACK_BTN_W;
+    if (out_h) *out_h = HELP_PACK_BTN_H;
 }
 
 static void DrawHelpButton_(H3LoadedPcx16* destination)
@@ -275,34 +336,34 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 
     H3Font* title_font = GetPanelFont();
     H3Font* small_font = GetSmallFont();
-    DrawTxt(scr, title_font, "使用说明",
+    DrawTxt(scr, title_font, T("help.title"),
         x + 16, y + 12, w - 32, 26,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 
     char toggle_name[16];
     char oneshot_name[16];
     char open_name[16];
-    char hotkey_line[160];
-    snprintf(hotkey_line, sizeof(hotkey_line), "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置",
+    char hotkey_line[192];
+    snprintf(hotkey_line, sizeof(hotkey_line), T("help.line_hotkey"),
         HotkeyDisplayName_(cfg.toggle_manual_vk, toggle_name, sizeof(toggle_name)),
         HotkeyDisplayName_(cfg.one_shot_manual_vk, oneshot_name, sizeof(oneshot_name)),
         HotkeyDisplayName_(cfg.open_settings_vk, open_name, sizeof(open_name)));
 
     // 打开方法单独一行：右键「自动战斗」或按配置的打开设置键（键名读配置）。
     char open_key[16];
-    char open_line[160];
-    snprintf(open_line, sizeof(open_line), "打开设置：右键“自动战斗”按钮，或按 %s 键",
+    char open_line[192];
+    snprintf(open_line, sizeof(open_line), T("help.line_open"),
         HotkeyDisplayName_(cfg.open_settings_vk, open_key, sizeof(open_key)));
 
     const char* help_lines[] = {
         open_line,
-        "方案 1-5：独立草稿与存档文件，读档/存档针对选中编号",
-        "施法/近战/移动：点 ＋ 后按提示设置",
-        "停止：敌方预计剩余回合内全灭时交回",
-        "读档/存档：仅更新界面显示，点勾号才生效",
-        "删除：槽位上右键",
+        T("help.line1"),
+        T("help.line2"),
+        T("help.line3"),
+        T("help.line4"),
+        T("help.line5"),
         hotkey_line,
-        "设置有效期：同一场战斗，包括取消重打",
+        T("help.line6"),
     };
     const int line_h = 28;
     int ty = y + 50;
@@ -313,11 +374,59 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         ty += line_h;
     }
 
+// 行 A：日志级别下拉（选项 = 全部/调试/信息/警告/错误，对应 trace..error）。
+    {
+        int ry = 0;
+        GetHelpLogLevelRowY_(&ry);
+        DrawTxt(scr, small_font, T("help.log_level_label"),
+            x + 18, ry, HELP_DD_LABEL_W, HELP_DD_H,
+            (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        int dx = 0, dy = 0, dw = 0, dh = 0;
+        GetHelpLogLevelDdRect_(&dx, &dy, &dw, &dh);
+        Fill(scr, dx, dy, dw, dh, s_help_log_dd_open ? 104 : 74,
+            s_help_log_dd_open ? 70 : 52, s_help_log_dd_open ? 28 : 24);
+        scr->DrawFrame(dx, dy, dw, dh, (BYTE)210, (BYTE)170, (BYTE)72);
+        DrawTxt(scr, small_font, T(HelpLogLevelOptKey_(g_log_level)),
+            dx + 6, dy, dw - 20, dh,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        CellControl_DrawArrow(scr, dx + dw - 14, dy + dh / 2 - 2,
+            !s_help_log_dd_open);
+    }
+    // 行 B：打包日志按钮。
+    {
+        int bx = 0, by = 0, bw = 0, bh = 0;
+        GetHelpPackBtnRect_(&bx, &by, &bw, &bh);
+        Fill(scr, bx, by, bw, bh, 74, 50, 27);
+        scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
+        DrawTxt(scr, small_font, T("help.pack_btn"),
+            bx, by, bw, bh, (INT32)eTextColor::WHITE,
+            eTextAlignment::MIDDLE_CENTER);
+    }
+    // 展开的级别列表（最后绘制，盖在按钮上层）。
+    if (s_help_log_dd_open) {
+        static const char* const kKeys[] = {
+            "help.log_level_opt0", "help.log_level_opt1", "help.log_level_opt2",
+            "help.log_level_opt3", "help.log_level_opt4",
+        };
+        for (int i = 0; i < 5; ++i) {
+            int ix = 0, iy = 0, iw = 0, ih = 0;
+            GetHelpLogLevelItemRect_(i, &ix, &iy, &iw, &ih);
+            const bool cur = (i == g_log_level);
+            Fill(scr, ix, iy, iw, ih,
+                cur ? 136 : 68, cur ? 88 : 42, cur ? 24 : 18);
+            scr->DrawFrame(ix, iy, iw, ih,
+                (BYTE)(cur ? 232 : 166), (BYTE)(cur ? 184 : 112), (BYTE)(cur ? 76 : 40));
+            DrawTxt(scr, small_font, T(kKeys[i]),
+                ix + 6, iy, iw - 12, ih,
+                (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        }
+    }
+
     int bx = 0, by = 0, bw = 0, bh = 0;
     GetHelpModalCloseRect_(&bx, &by, &bw, &bh);
     Fill(scr, bx, by, bw, bh, 74, 50, 27);
     scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
-    DrawTxt(scr, small_font, "关闭",
+    DrawTxt(scr, small_font, T("help.close"),
         bx, by, bw, bh, (INT32)eTextColor::WHITE,
         eTextAlignment::MIDDLE_CENTER);
 }
@@ -338,17 +447,16 @@ static const char* PanelTipAt_(int px, int py)
         const CellHitArea hit = CellControl_HitTestInCell(ctrl, px - cRc.left, py - cRc.top);
         if (const char* tip = CellControl_TipForHit(hit))
             return tip;
-        // 标签「行动前循环施法:」本身不在槽位命中区内，整行都给施法说明。
+        // 标签「行动前循环快捷施法:」本身不在槽位命中区内，整行都给施法说明。
         if (py >= cRc.top + CC_SPELL_Y && py < cRc.top + CC_SPELL_Y + CC_ROW_H
             && px >= cRc.left + CC_COL2_X && px < cRc.left + CC_COL3_RIGHT)
             return CellControl_TipForHit(
                 static_cast<CellHitArea>(CELL_HIT_SPELL_BASE));
     }
     if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
-        static char title_tip[192];
+        static char title_tip[256];
         char t1[16], t2[16], t3[16];
-        snprintf(title_tip, sizeof(title_tip),
-            "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置 · 右键“自动战斗”按钮也可打开",
+        snprintf(title_tip, sizeof(title_tip), T("tips.titlebar"),
             HotkeyDisplayName_(cfg.toggle_manual_vk, t1, sizeof(t1)),
             HotkeyDisplayName_(cfg.one_shot_manual_vk, t2, sizeof(t2)),
             HotkeyDisplayName_(cfg.open_settings_vk, t3, sizeof(t3)));
@@ -356,24 +464,22 @@ static const char* PanelTipAt_(int px, int py)
     }
     struct TipRect { int x, y, w, h; const char* text; };
     static const TipRect kTips[] = {
-        { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
-          "读档：从选中编号的存档槽读入草稿（四轮部队关联）；仅更新界面，点勾号才生效" },
-        { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
-          "存档：把草稿写入选中编号的存档槽（其他槽不变）；不改变已生效方案" },
-        { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H,
-          "方案 1-5：各编号独立草稿与存档文件；切换编号各自保留，读档/存档针对选中编号" },
-        { 20, PROTECT_DD_Y - 4, STOP_LABEL_X - 24, 30,
-          "保活策略：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量" },
-        { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30,
-          "停止：敌方预计剩余回合 ≤ 此值时切回手动；0=关闭，最大 999" },
-        { OK_X, BTN_Y, BTN_W, BTN_H,
-          "勾号：草稿生效并关闭面板（不写盘）；有效期同一场战斗（含取消重打）" },
-        { CANCEL_X, BTN_Y, BTN_W, BTN_H,
-          "取消：丢弃全部修改并关闭面板" },
+        { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
+        { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
+        { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H, nullptr },
+        { 20, PROTECT_DD_Y - 4, STOP_LABEL_X - 24, 30, nullptr },
+        { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30, nullptr },
+        { OK_X, BTN_Y, BTN_W, BTN_H, nullptr },
+        { CANCEL_X, BTN_Y, BTN_W, BTN_H, nullptr },
     };
-    for (const TipRect& t : kTips) {
+    static const char* const kTipKeys[] = {
+        "tips.btn_load", "tips.btn_save", "tips.btn_profile",
+        "tips.protect_row", "tips.stop_row", "tips.btn_ok", "tips.btn_cancel",
+    };
+    for (int i = 0; i < (int)(sizeof(kTips) / sizeof(kTips[0])); ++i) {
+        const TipRect& t = kTips[i];
         if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
-            return t.text;
+            return T(kTipKeys[i]);
     }
     return nullptr;
 }
@@ -400,15 +506,27 @@ static void GetProtectDdItemRect_(int item, int* out_x, int* out_y,
 // 收起态：label「保活策略:」+ 当前项 + 下拉箭头。
 // 配色与卡片下拉（CellControl_DrawButtonBg / CellControl_DrawDropdownItem）对齐：
 // 深棕底避开格子的青色键色（16-bit 0x7FDF），否则合成时会被当透明抠掉。
+// 保活策略项文案（i18n；顺序同 ProtectStrategy）。
+static const char* ProtectStrategyLabel_(int i)
+{
+    switch (i) {
+    case 0: return T("panel.protect_opt0");
+    case 1: return T("panel.protect_opt1");
+    case 2: return T("panel.protect_opt2");
+    case 3: return T("panel.protect_opt3");
+    default: return "?";
+    }
+}
+
 static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
 {
     if (!scr) return;
     const int current = s_p.draft_protect_strategy[s_p.selected_profile];
     const char* text = (current >= 0 && current < (int)H3AutoPolicy::PS_COUNT)
-        ? PROTECT_STRATEGY_LABELS[current] : "?";
+        ? ProtectStrategyLabel_(current) : "?";
     H3Font* small_font = GetSmallFont();
 
-    DrawTxt(scr, small_font, "保活策略:",
+    DrawTxt(scr, small_font, T("panel.protect_label"),
         PROTECT_DD_LABEL_X, PROTECT_DD_Y, PROTECT_DD_LABEL_W, PROTECT_DD_H,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
 
@@ -425,7 +543,7 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
     CellControl_DrawArrow(scr, PROTECT_DD_X + PROTECT_DD_W - 14,
         PROTECT_DD_Y + PROTECT_DD_H / 2 - 2, !s_protect_dd_open);
 
-    DrawTxt(scr, small_font, "停止:",
+    DrawTxt(scr, small_font, T("panel.stop_label"),
         STOP_LABEL_X, PROTECT_DD_Y, STOP_LABEL_W, PROTECT_DD_H,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
     char num[8] = {};
@@ -491,7 +609,7 @@ static void DrawProtectDropdownList_(H3LoadedPcx16* scr)
         }
         Fill(scr, ix, iy, iw, ih, bg_r, bg_g, bg_b);
         scr->DrawFrame(ix, iy, iw, ih, frame_r, frame_g, frame_b);
-        DrawTxt(scr, small_font, PROTECT_STRATEGY_LABELS[i],
+        DrawTxt(scr, small_font, ProtectStrategyLabel_(i),
             ix + 6, iy, iw - 12, ih,
             (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
     }
@@ -528,19 +646,18 @@ static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
     H3Font* title_font = GetPanelFont();
     H3Font* small_font = GetSmallFont();
     char slot_text[64] = {};
-    DrawTxt(scr, title_font, "\xe8\xae\xbe\xe7\xbd\xae\xe5\xbf\xab\xe6\x8d\xb7\xe6\x96\xbd\xe6\xb3\x95\xe9\x94\xae", // 设置快捷施法键
+    DrawTxt(scr, title_font, T("cell.spell_modal_title"),
         x + 16, y + 14, w - 32, 28,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
-    _snprintf(slot_text, sizeof(slot_text),
-        "\xe6\xad\xa3\xe5\x9c\xa8\xe8\xae\xbe\xe7\xbd\xae\xe5\xbe\xaa\xe7\x8e\xaf\xe6\x96\xbd\xe6\xb3\x95\xe7\xac\xac %d \xe6\xa7\xbd", // 正在设置循环施法第 %d 槽
+    _snprintf(slot_text, sizeof(slot_text), T("cell.spell_modal_slot"),
         s_spell_pick_slot + 1);
     DrawTxt(scr, small_font, slot_text,
         x + 16, y + 48, w - 32, 20,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-    DrawTxt(scr, small_font, "请直接按数字键 1-9 或 0（支持小键盘）",
+    DrawTxt(scr, small_font, T("cell.spell_modal_hint1"),
         x + 16, y + 72, w - 32, 20,
         (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_CENTER);
-    DrawTxt(scr, small_font, "输入后自动保存；按 ESC 或点击取消放弃。",
+    DrawTxt(scr, small_font, T("cell.spell_modal_hint2"),
         x + 16, y + 94, w - 32, 18,
         (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_CENTER);
 
@@ -548,7 +665,7 @@ static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
     GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
     Fill(scr, bx, by, bw, bh, 74, 50, 27);
     scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
-    DrawTxt(scr, small_font, "取消",
+    DrawTxt(scr, small_font, T("cell.spell_modal_cancel"),
         bx, by, bw, bh, (INT32)eTextColor::WHITE,
         eTextAlignment::MIDDLE_CENTER);
 }
@@ -566,12 +683,12 @@ static void DrawPanelToBuffer_()
         Fill(scr, px, py, PANEL_W, PANEL_H, 70, 42, 22);
         scr->DrawFrame(px, py, PANEL_W, PANEL_H, (BYTE)232, (BYTE)212, (BYTE)120);
     }
-    DrawTxt(scr, GetPanelFont(), g_panel_title[0] ? g_panel_title : "打铁设置",
+    DrawTxt(scr, GetPanelFont(), PanelTitle_(),
         px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
     DrawHelpButton_(scr);
-    DrawStoreButton_(scr, LOAD_BTN_X, 4, "读档");
-    DrawStoreButton_(scr, SAVE_BTN_X, 5, "存档");
+    DrawStoreButton_(scr, LOAD_BTN_X, 4, T("panel.load"));
+    DrawStoreButton_(scr, SAVE_BTN_X, 5, T("panel.save"));
     DrawProtectStrategyRow_(scr);
     DrawProfileButtons_(scr);
 
@@ -629,7 +746,7 @@ static void DrawPanelToBuffer_()
         const H3POINT cursor = H3POINT::GetCursorPosition();
         if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
             char rich[256];
-            snprintf(rich, sizeof(rich), "{金}%s", tip);
+            snprintf(rich, sizeof(rich), T("tips.color_wrap"), tip);
             SetStatusText_(rich, 3000);
         }
     }

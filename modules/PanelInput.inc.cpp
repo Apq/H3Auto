@@ -3,7 +3,7 @@
 // 在 H3Auto.cpp 中排在 SettingsDlg.inc.cpp 之后：面板状态与工具函数
 // 来自 SettingsDlg，反向被调用的函数经 PanelInput.hpp 声明。
 
-static void WriteLog(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 void OpenSettingsPanel_();
 static void CommitAndCloseSettingsPanel_();
@@ -267,7 +267,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
             if (s_pick_wait_button_release) {
                 // 吞掉进入拾取那一击的松开，不作战场选点。
                 s_pick_wait_button_release = false;
-                WriteLog("[Panel] 拾取已就绪，忽略引发点击的松开");
+                LogInfo("[Panel] 拾取已就绪，忽略引发点击的松开");
                 return msg.StopProcessing();
             }
             // 原版/HD 都是：绝对光标坐标 - 战斗窗口 dlg->x/y，再喂给 0x464380。
@@ -374,7 +374,7 @@ static void InitHdHover_()
     if (s_hd_sod_module) return;
     s_hd_sod_module = GetModuleHandleA("HD_SOD.dll");
     if (s_hd_sod_module) {
-        WriteLog("[Panel] HD_SOD.dll=%p", (void*)s_hd_sod_module);
+        LogInfo("[Panel] HD_SOD.dll=%p", (void*)s_hd_sod_module);
     }
 }
 
@@ -432,7 +432,7 @@ static bool BlockBattleHover_()
         s_hover_patch_secondary = _PI->CreateHexPatch(0x473F55,
             const_cast<char*>("83 C4 04 33 C0"));
     if (!s_hover_patch_primary || !s_hover_patch_secondary) {
-        WriteLog("[Panel] 创建战场悬停屏蔽补丁失败。");
+        LogError("[Panel] 创建战场悬停屏蔽补丁失败。");
         return false;
     }
 
@@ -443,12 +443,12 @@ static bool BlockBattleHover_()
     if (first < 0 || second < 0) {
         if (s_hover_patch_primary->IsApplied()) s_hover_patch_primary->Undo();
         if (s_hover_patch_secondary->IsApplied()) s_hover_patch_secondary->Undo();
-        WriteLog("[Panel] 应用战场悬停屏蔽补丁失败 first=%d second=%d。",
+        LogError("[Panel] 应用战场悬停屏蔽补丁失败 first=%d second=%d。",
             first, second);
         return false;
     }
     BlockHdHover_();
-    WriteLog("[Panel] 战场悬停处理已屏蔽。");
+    LogInfo("[Panel] 战场悬停处理已屏蔽。");
     return true;
 }
 
@@ -459,7 +459,7 @@ static void RestoreBattleHover_()
         s_hover_patch_secondary->Undo();
     if (s_hover_patch_primary && s_hover_patch_primary->IsApplied())
         s_hover_patch_primary->Undo();
-    WriteLog("[Panel] 战场悬停处理已恢复。");
+    LogInfo("[Panel] 战场悬停处理已恢复。");
 }
 
 static void RefreshBattleAfterPick_()
@@ -469,7 +469,7 @@ static void RefreshBattleAfterPick_()
             // 完整重建战场：从干净 drawBuffer 重画到屏幕，清掉 screen 层临时蓝标。
             // 注意：拾取期间不能 ShadeSquare，否则 drawBuffer 带脏像素，这里会重现蓝标。
             THISCALL_7(void, 0x493FC0, mgr, TRUE, FALSE, FALSE, 0, TRUE, FALSE);
-            WriteLog("[Panel] 已请求战场完整重绘以撤销临时标示");
+            LogInfo("[Panel] 已请求战场完整重绘以撤销临时标示");
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 }
@@ -493,14 +493,14 @@ static bool InstallBattleInputBlocker_()
 {
     H3BaseDlg* battle_ui = FindDialogByVtable_(s_combat_dialog_vtable);
     if (!battle_ui) {
-        WriteLog("[Panel] 未找到 BattleUI，无法安装输入屏障。");
+        LogError("[Panel] 未找到 BattleUI，无法安装输入屏障。");
         return false;
     }
 
     if (s_input_blocker.item && s_input_blocker.battle_ui == battle_ui) {
         *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.local_vtable;
         s_input_blocker.item->ShowActivate();
-        WriteLog("[Panel] 已重新激活 BattleUI 输入屏障 item=%p。", s_input_blocker.item);
+        LogInfo("[Panel] 已重新激活 BattleUI 输入屏障 item=%p。", s_input_blocker.item);
         return true;
     }
 
@@ -508,7 +508,7 @@ static bool InstallBattleInputBlocker_()
     H3DlgTransparentItem* item = H3DlgTransparentItem::Create(
         0, 0, H3GameWidth::Get(), H3GameHeight::Get(), 0x7FFE);
     if (!item) {
-        WriteLog("[Panel] 创建 BattleUI 输入屏障失败。");
+        LogError("[Panel] 创建 BattleUI 输入屏障失败。");
         return false;
     }
 
@@ -522,14 +522,14 @@ static bool InstallBattleInputBlocker_()
         *reinterpret_cast<void***>(item) = original_vtable;
         typedef H3DlgItem* (__thiscall *DestroyItemProc)(H3DlgItem*, BOOL8);
         reinterpret_cast<DestroyItemProc>(original_vtable[0])(item, TRUE);
-        WriteLog("[Panel] BattleUI 拒绝加入输入屏障控件。");
+        LogInfo("[Panel] BattleUI 拒绝加入输入屏障控件。");
         return false;
     }
 
     s_input_blocker.battle_ui = battle_ui;
     s_input_blocker.item = item;
     s_input_blocker.original_vtable = original_vtable;
-    WriteLog("[Panel] BattleUI 输入屏障已安装。 battle=%p item=%p prev=%p next=%p。",
+    LogInfo("[Panel] BattleUI 输入屏障已安装。 battle=%p item=%p prev=%p next=%p。",
         battle_ui, item, item->GetPreviousItem(), item->GetNextItem());
     return true;
 }
@@ -539,7 +539,7 @@ static void RemoveBattleInputBlocker_()
     if (!s_input_blocker.item) return;
     *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.original_vtable;
     s_input_blocker.item->HideDeactivate();
-    WriteLog("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
+    LogInfo("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
 }
 
 // 实验：面板打开时把 H3 模态深度计数器（0x69FEA4）顶成 1，看 HD.dll 的
@@ -571,7 +571,7 @@ static void EndMovePathPick_()
     // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
-    WriteLog("[Panel] 结束循环移动拾取 cell=%d wp=%d", old_cell, old_wp);
+    LogInfo("[Panel] 结束循环移动拾取 cell=%d wp=%d", old_cell, old_wp);
 }
 
 // 结束循环施法录入：面板始终保持打开，仅清掉“待按数字键”状态。
@@ -585,7 +585,7 @@ static void EndSpellPick_()
     if (old_cell >= 0 && old_cell < CELL_COUNT)
         s_p.cells[old_cell].spell_pick_request = 0;
     DrawPanelToBuffer_();
-    WriteLog("[Panel] 结束循环施法录入 cell=%d slot=%d", old_cell, old_slot);
+    LogInfo("[Panel] 结束循环施法录入 cell=%d slot=%d", old_cell, old_slot);
 }
 
 // 写入一个快捷施法数字（1-9/0）到当前拾取槽；成功返回 true。
@@ -608,7 +608,7 @@ static bool CommitSpellSlotPick_(int slot_value)
         ++rule.spellSlotCount;
     CellControl_NormalizeSpellSlots(&rule);
     ctrl->dirty = true;
-    WriteLog("[Panel] spell slot saved cell=%d idx=%d key=%d count=%d",
+    LogInfo("[Panel] spell slot saved cell=%d idx=%d key=%d count=%d",
         s_spell_pick_cell, slot_index, slot_value, (int)rule.spellSlotCount);
     EndSpellPick_();
     return true;
@@ -629,7 +629,7 @@ static void EndMeleePick_()
     // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
     ForcePanelModalDepth_(true);
     DrawPanelToBuffer_();
-    WriteLog("[Panel] 结束循环近战拾取 cell=%d pair=%d", old_cell, old_pair);
+    LogInfo("[Panel] 结束循环近战拾取 cell=%d pair=%d", old_cell, old_pair);
 }
 
 // 战场拾取坐标捕获：屏障已吞掉点击（不会触发部队行动），这里只把屏幕坐标
@@ -655,7 +655,7 @@ static void DoPickCapture_(int hex, bool right_click)
                 if (append && t.moveWaypointCount < MOVE_WAYPOINT_CAPACITY)
                     ++t.moveWaypointCount;
                 ctrl->dirty = true;
-                WriteLog("[Panel] move waypoint saved cell=%d wp=%d hex=%d count=%d",
+                LogInfo("[Panel] move waypoint saved cell=%d wp=%d hex=%d count=%d",
                     s_move_pick_cell, wp, hex, (int)t.moveWaypointCount);
                 EndMovePathPick_();
             }
@@ -680,7 +680,7 @@ static void DoPickCapture_(int hex, bool right_click)
             if (s_melee_pick_phase == 1) {
                 s_melee_pick_stand_hex = hex;
                 s_melee_pick_phase = 2;
-                WriteLog("[Panel] melee pair stand hex=%d cell=%d pair=%d; wait attack",
+                LogInfo("[Panel] melee pair stand hex=%d cell=%d pair=%d; wait attack",
                     hex, s_melee_pick_cell, s_melee_pick_pair);
                 // 立即画一次，不等下一帧 BltComplete。
                 DrawMeleePickMarker_();
@@ -689,7 +689,7 @@ static void DoPickCapture_(int hex, bool right_click)
                     || !CellControl_HexAdjacent(s_melee_pick_stand_hex, hex)) {
                     int neighbors[6] = {};
                     const int nn = CellControl_HexNeighbors(s_melee_pick_stand_hex, neighbors);
-                    WriteLog("[Panel] melee pair attack 非相邻或相同 hex=%d stand=%d nb=[%d,%d,%d,%d,%d,%d] n=%d 忽略",
+                    LogInfo("[Panel] melee pair attack 非相邻或相同 hex=%d stand=%d nb=[%d,%d,%d,%d,%d,%d] n=%d 忽略",
                         hex, s_melee_pick_stand_hex,
                         nn > 0 ? neighbors[0] : -1,
                         nn > 1 ? neighbors[1] : -1,
@@ -715,7 +715,7 @@ static void DoPickCapture_(int hex, bool right_click)
                         target.meleeAttackHex = target.meleeAttackHexes[0];
                     }
                     ctrl->dirty = true;
-                    WriteLog("[Panel] melee pair saved cell=%d pair=%d stand=%d attack=%d count=%d",
+                    LogInfo("[Panel] melee pair saved cell=%d pair=%d stand=%d attack=%d count=%d",
                         s_melee_pick_cell, pair, s_melee_pick_stand_hex, hex,
                         (int)target.meleePairCount);
                     EndMeleePick_();
@@ -745,16 +745,16 @@ static void UpdatePanelModalSuspension_()
     if (system_modal_active) {
         RemoveBattleInputBlocker_();
         RestoreBattleHover_();
-        WriteLog("[Panel] 检测到系统模态对话框，暂停面板绘制和输入。");
+        LogInfo("[Panel] 检测到系统模态对话框，暂停面板绘制和输入。");
     } else {
         if (!BlockBattleHover_() || !InstallBattleInputBlocker_()) {
-            WriteLog("[Panel] 系统模态对话框关闭后恢复面板失败，关闭设置面板。");
+            LogError("[Panel] 系统模态对话框关闭后恢复面板失败，关闭设置面板。");
             CloseSettingsPanel();
             return;
         }
         ForcePanelDefaultCursor_();
         DrawPanelToBuffer_();
-        WriteLog("[Panel] 系统模态对话框已关闭，恢复设置面板。");
+        LogInfo("[Panel] 系统模态对话框已关闭，恢复设置面板。");
     }
 }
 

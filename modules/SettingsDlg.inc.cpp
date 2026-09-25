@@ -22,42 +22,7 @@ void HandlePanelInput_();
 // 面板布局常量（与 PanelGfx/PanelDraw 共用）。
 #include "PanelLayout.hpp"
 
-const char* g_action_labels[AA_COUNT] = {};
-const char* g_selector_labels[SEL_COUNT] = {};
-static char g_panel_title[64] = {};
-static bool g_labels_loaded = false;
-
-static void LoadLabelArray_(const char* section, const char** defaults,
-    const char** out_labels, char storage[][64], int count, const char* ini_path)
-{
-    for (int i = 0; i < count; i++) {
-        char key[16] = {};
-        char buf[64] = {};
-        sprintf(key, "%d", i);
-        GetPrivateProfileStringA(section, key, defaults[i],
-            buf, sizeof(buf), ini_path);
-        strncpy(storage[i], buf, 63);
-        storage[i][63] = 0;
-        out_labels[i] = storage[i];
-    }
-}
-
-// 从 H3Auto.ini 加载面板标签
-static void LoadLabels_(const char* ini_path)
-{
-    if (g_labels_loaded) return;
-    g_labels_loaded = true;
-    static char storage_action[AA_COUNT][64] = {};
-    static char storage_selector[SEL_COUNT][64] = {};
-    LoadLabelArray_("Actions", DEFAULT_ACTION_LABELS, g_action_labels,
-        storage_action, AA_COUNT, ini_path);
-    LoadLabelArray_("Selectors", DEFAULT_SELECTOR_LABELS, g_selector_labels,
-        storage_selector, SEL_COUNT, ini_path);
-    WriteLog("[Panel] 标签已从 %s 加载。", ini_path);
-    GetPrivateProfileStringA("Panel", "Title", "打铁设置",
-        g_panel_title, sizeof(g_panel_title), ini_path);
-}
-
+// 界面文案/标签由 UiTexts 提供（T()/g_action_labels/g_panel_title）。
 
 static const INT32 COL_TITLE_TEXT  = 0x03;
 static const INT32 COL_TEXT        = 0x01;
@@ -99,6 +64,8 @@ static bool CommitSpellSlotPick_(int slot_value);
 static void DrawPanelToBuffer_();
 // 循环施法录入状态需在键盘钩子前声明。
 static bool s_help_modal_open = false;
+// 帮助模态里的日志级别下拉展开态（点击选项/外部收起）。
+static bool s_help_log_dd_open = false;
 static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
 static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
 static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
@@ -386,7 +353,7 @@ static void CheckBattleResultLifecycle_()
                 &s_result_lifecycle, H3AutoPolicy::RESULT_SHOWN);
             s_result_accept_armed = false;
             s_result_cancel_armed = false;
-            WriteLog("[Life] CPResult 结果窗出现，等待接受/取消重打。");
+            LogInfo("[Life] CPResult 结果窗出现，等待接受/取消重打。");
         }
 
         // 边沿：在结果窗上按下鼠标左键时记录命中按钮。
@@ -396,14 +363,14 @@ static void CheckBattleResultLifecycle_()
             const INT32 id = GetDlgItemUnderCursor_(result_dlg);
             if (id == s_cpresult_ok_id) {
                 if (!s_result_accept_armed)
-                    WriteLog("[Life] 结果窗命中确定/接受 id=0x%X。", id);
+                    LogInfo("[Life] 结果窗命中确定/接受 id=0x%X。", id);
                 s_result_accept_armed = true;
                 s_result_cancel_armed = false;
                 H3AutoPolicy::ApplyResultLifecycle(
                     &s_result_lifecycle, H3AutoPolicy::RESULT_ACCEPT_CLICKED);
             } else if (id == s_cpresult_cancel_id) {
                 if (!s_result_cancel_armed)
-                    WriteLog("[Life] 结果窗命中取消/重打 id=0x%X。", id);
+                    LogInfo("[Life] 结果窗命中取消/重打 id=0x%X。", id);
                 s_result_cancel_armed = true;
                 s_result_accept_armed = false;
                 H3AutoPolicy::ApplyResultLifecycle(
@@ -433,7 +400,7 @@ static void CheckBattleResultLifecycle_()
                              : H3AutoPolicy::RESULT_CLOSED_WITHOUT_BATTLE_UI);
 
     if (lifecycle_action == H3AutoPolicy::RESULT_KEEP_AND_REBIND) {
-        WriteLog("[Life] 取消/重打：保留 5 套方案并重绑跟踪。");
+        LogInfo("[Life] 取消/重打：保留 5 套方案并重绑跟踪。");
         s_saw_cpresult = false;
         s_result_accept_armed = false;
         s_result_cancel_armed = false;
@@ -446,7 +413,7 @@ static void CheckBattleResultLifecycle_()
 
     if (lifecycle_action == H3AutoPolicy::RESULT_CLEAR_SETTINGS) {
         // 点了确定，或原版无取消按钮时默认视为接受。
-        WriteLog("[Life] 接受战斗结果：清除设置。 accept=%d cancel=%d battle_ui=%d",
+        LogInfo("[Life] 接受战斗结果：清除设置。 accept=%d cancel=%d battle_ui=%d",
             s_result_accept_armed ? 1 : 0,
             s_result_cancel_armed ? 1 : 0,
             battle_ui_exists ? 1 : 0);
@@ -486,7 +453,7 @@ static void CheckAutoFightDialogClosed()
         && cursor_item_id == s_autofight_button_id)
     {
         if (!s_autofight_right_press_armed)
-            WriteLog("[AutoFight] 右键按下命中自动战斗按钮 id=0x%X。", s_autofight_button_id);
+            LogInfo("[AutoFight] 右键按下命中自动战斗按钮 id=0x%X。", s_autofight_button_id);
         s_autofight_right_press_armed = true;
     }
 
@@ -515,7 +482,7 @@ static void CheckAutoFightDialogClosed()
         if (g_auto_state.kb_open_panel_seen) {
             g_auto_state.kb_open_panel_seen = false;
             if (g_phase == BP_COMBAT_CLOSED && !IsPanelActive()) {
-                WriteLog("[Panel] OpenSettings hotkey");
+                LogInfo("[Panel] OpenSettings hotkey");
                 OpenSettingsPanel_();
                 if (s_p.active)
                     SetPhase_(BP_COMBAT_OPEN, BE_PANEL_OPEN_REQUESTED);
@@ -535,7 +502,7 @@ static void CheckAutoFightDialogClosed()
     if (explanation_is_top && !s_panel_popup_done) {
         if (!s_saw_explanation_dlg_in_battle) {
             s_saw_explanation_dlg_in_battle = true;
-            WriteLog("[AutoFight] 检测到右键按住时的自动战斗说明框，w=%d h=%d。", last_w, last_h);
+            LogInfo("[AutoFight] 检测到右键按住时的自动战斗说明框，w=%d h=%d。", last_w, last_h);
         }
         return;
     }
@@ -545,7 +512,7 @@ static void CheckAutoFightDialogClosed()
     {
         s_saw_explanation_dlg_in_battle = false;
         s_autofight_right_press_armed = false;
-        WriteLog("[AutoFight] 说明框已关闭且 BattleUI 仍在，打开设置面板。");
+        LogInfo("[AutoFight] 说明框已关闭且 BattleUI 仍在，打开设置面板。");
         OpenSettingsPanel_();
         // 状态机打开边（S2.1）：面板确认打开后再迁移，杜绝「已迁移但没开」死状态。
         if (s_p.active)
@@ -648,7 +615,7 @@ static void CommitStopTurnsEdit_()
     s_stop_turns_editing = false;
     s_stop_turns_text[0] = 0;
     s_stop_turns_caret = 0;
-    WriteLog("[Panel] 停止回合=%d (方案%d)", value, s_p.selected_profile + 1);
+    LogInfo("[Panel] 停止回合=%d (方案%d)", value, s_p.selected_profile + 1);
 }
 
 static void CancelStopTurnsEdit_()
@@ -673,7 +640,7 @@ static void HidePanelForPick_()
             // 把战场重画到屏幕，覆盖面板储留像素。
             THISCALL_7(void, 0x493FC0, mgr, TRUE, FALSE, FALSE, 0, TRUE, FALSE);
             s_panel_redraw_in_progress = false;
-            WriteLog("[Panel] 拾取隐藏：已请求战场重绘覆盖面板");
+            LogInfo("[Panel] 拾取隐藏：已请求战场重绘覆盖面板");
             return;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             s_panel_redraw_in_progress = false;
@@ -824,9 +791,9 @@ static void SaveProfilesToDisk_()
     if (ok) RememberProfileSlot(s_p.selected_profile);
     char slot_path[MAX_PATH] = {};
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
-    WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
+    LogError("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已存档" : "存档失败", slot_path);
-    SetStatusText_(ok ? "{绿}存档成功" : "{红}存档失败", 5000);
+    SetStatusText_(ok ? T("panel.status_save_ok") : T("panel.status_save_fail"), 5000);
     DrawPanelToBuffer_();
 }
 
@@ -868,16 +835,16 @@ static void LoadProfilesFromDisk_()
         s_protect_dd_open = false;
         s_protect_dd_hover = -1;
         LoadSelectedProfileIntoCells_();
-        WriteLog("[Panel] 读档关联：四轮匹配 %d/21 槽，未匹配存档槽已忽略",
+        LogInfo("[Panel] 读档关联：四轮匹配 %d/21 槽，未匹配存档槽已忽略",
             matched);
     }
     if (ok) RememberProfileSlot(s_p.selected_profile);
     delete[] loaded;
     char slot_path[MAX_PATH] = {};
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
-    WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
+    LogError("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path);
-    SetStatusText_(ok ? "{绿}读档成功" : "{红}读档失败", 5000);
+    SetStatusText_(ok ? T("panel.status_load_ok") : T("panel.status_load_fail"), 5000);
     DrawPanelToBuffer_();
 }
 
@@ -919,7 +886,7 @@ void OpenSettingsPanel_()
     s_protect_dd_hover = -1;
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
-        WriteLog("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
+        LogError("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
         return;
     }
     s_p.active = true;
@@ -1074,7 +1041,7 @@ void CloseSettingsPanel()
     ReleasePanelComposite_();
     if (H3CombatManager* mgr = GetCombatMgr())
         THISCALL_7(void, 0x493FC0, mgr, FALSE, TRUE, FALSE, 0, TRUE, FALSE);
-    WriteLog("[Panel] 设置面板已关闭。");
+    LogInfo("[Panel] 设置面板已关闭。");
 }
 
 bool IsPanelActive() { return s_p.active; }
@@ -1221,9 +1188,70 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     const int max_row = PanelMaxScrollRow_();
     const int button_size = PanelScrollButtonSize_();
 
-    // 帮助模态框打开时：吞掉所有底层点击，仅允许点关闭。
+    // 帮助模态框打开时：吞掉所有底层点击，仅允许关闭/日志级别/打包日志。
     if (s_help_modal_open) {
         if (raw_command == 16) {
+            // 展开的级别列表优先：命中选项即切换级别；点外部收起。
+            if (s_help_log_dd_open) {
+                bool picked = false;
+                for (int i = 0; i < 5; ++i) {
+                    int ix = 0, iy = 0, iw = 0, ih = 0;
+                    GetHelpLogLevelItemRect_(i, &ix, &iy, &iw, &ih);
+                    if (!PointInRect_(px, py, ix, iy, iw, ih)) continue;
+                    picked = true;
+                    s_help_log_dd_open = false;
+                    if (i != g_log_level) {
+                        static const char* const kNames[5] = {
+                            "trace", "debug", "info", "warn", "error",
+                        };
+                        g_log_level = i;
+                        IniWriteKeyUtf8(g_ini_path, "Logging", "MinLevel", kNames[i]);
+                        char msg[128];
+                        _snprintf(msg, sizeof(msg) - 1, T("help.log_level_set"),
+                            kNames[i]);
+                        msg[sizeof(msg) - 1] = 0;
+                        SetStatusText_(msg, 4000);
+                        LogInfo("[Config] 日志级别切换为 %s（已写入 ini）", kNames[i]);
+                    }
+                    DrawPanelToBuffer_();
+                    break;
+                }
+                if (!picked) s_help_log_dd_open = false;
+                return; // 展开期间吞掉其余点击（含关闭按钮，先收起）
+            }
+            // 日志级别下拉框：开/关。
+            {
+                int dx = 0, dy = 0, dw = 0, dh = 0;
+                GetHelpLogLevelDdRect_(&dx, &dy, &dw, &dh);
+                if (PointInRect_(px, py, dx, dy, dw, dh)) {
+                    s_help_log_dd_open = true;
+                    DrawPanelToBuffer_();
+                    return;
+                }
+            }
+            // 打包日志按钮。
+            {
+                int bx = 0, by = 0, bw = 0, bh = 0;
+                GetHelpPackBtnRect_(&bx, &by, &bw, &bh);
+                if (PointInRect_(px, py, bx, by, bw, bh)) {
+                    char zip_path[MAX_PATH] = {};
+                    char reason[192] = {};
+                    if (PackRecentLogs_(zip_path, sizeof(zip_path),
+                            reason, sizeof(reason))) {
+                        char msg[MAX_PATH + 128];
+                        _snprintf(msg, sizeof(msg) - 1, T("help.pack_ok"), zip_path);
+                        msg[sizeof(msg) - 1] = 0;
+                        SetStatusText_(msg, 8000);
+                    } else {
+                        char msg[512];
+                        _snprintf(msg, sizeof(msg) - 1, T("help.pack_fail"), reason);
+                        msg[sizeof(msg) - 1] = 0;
+                        SetStatusText_(msg, 8000);
+                        LogWarn("[LogPack] 打包失败：%s", reason);
+                    }
+                    return;
+                }
+            }
             int bx = 0, by = 0, bw = 0, bh = 0;
             GetHelpModalCloseRect_(&bx, &by, &bw, &bh);
             if (PointInRect_(px, py, bx, by, bw, bh)) {
@@ -1280,7 +1308,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         (uint8_t)i;
                     s_protect_dd_open = false;
                     s_protect_dd_hover = -1;
-                    WriteLog("[Panel] 保活策略=%d (方案%d)", i,
+                    LogInfo("[Panel] 保活策略=%d (方案%d)", i,
                         s_p.selected_profile + 1);
                     DrawPanelToBuffer_();
                     return;
@@ -1456,7 +1484,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             s_panel_hidden_for_pick = true;
                             s_pick_wait_button_release = true;
                             HidePanelForPick_();
-                            WriteLog("[Panel] 进入循环移动拾取 cell=%d wp=%d",
+                            LogInfo("[Panel] 进入循环移动拾取 cell=%d wp=%d",
                                 i, s_move_pick_wp);
                             ctrl->move_path_pick_request = 0;
                         }
@@ -1476,7 +1504,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 s_p.cells[k].dirty = true;
                             }
                             // 保留 spell_pick_request 做槽位高亮；数字键提交后再清。
-                            WriteLog("[Panel] 弹出循环施法快捷键模态框 cell=%d slot=%d",
+                            LogInfo("[Panel] 弹出循环施法快捷键模态框 cell=%d slot=%d",
                                 i, s_spell_pick_slot);
                         }
                         // 循环近战：已有组合可覆盖重设，末尾「＋」追加。
@@ -1489,7 +1517,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             s_panel_hidden_for_pick = true;
                             s_pick_wait_button_release = true;
                             HidePanelForPick_();
-                            WriteLog("[Panel] 进入循环近战拾取 cell=%d pair=%d",
+                            LogInfo("[Panel] 进入循环近战拾取 cell=%d pair=%d",
                                 i, s_melee_pick_pair);
                             ctrl->melee_pair_pick_request = 0;
                         }
@@ -1553,7 +1581,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 s_protect_dd_open = false;
                 s_protect_dd_hover = -1;
                 s_help_modal_open = true;
-                WriteLog("[Panel] 打开帮助说明模态框");
+                LogInfo("[Panel] 打开帮助说明模态框");
                 DrawPanelToBuffer_();
             } else if (pressed == 4) {
                 LoadProfilesFromDisk_();

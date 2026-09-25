@@ -72,10 +72,7 @@ static const int STOP_BOX_X = GRID_FRAME_X + GRID_FRAME_W - STOP_BOX_W;
 static const int STOP_LABEL_W = 42;
 static const int STOP_LABEL_X = STOP_BOX_X - 4 - STOP_LABEL_W;
 
-// 保活策略项（顺序同 ProtectStrategy）
-static const char* PROTECT_STRATEGY_LABELS[H3AutoPolicy::PS_COUNT] = {
-    "无", "部队全灭后", "回合内首动", "损失量大于恢复量",
-};
+// 保活策略项文案已外置（UiTexts panel.protect_opt0..3）。
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {

@@ -1,7 +1,7 @@
 ﻿// AutoExecute.inc.cpp
 // Automated battle execution module
 
-static void WriteLog(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint8_t protect_strategy[5], const uint16_t stop_turns[5]);
@@ -58,7 +58,7 @@ static void SetControlMode_(ControlMode m)
 {
     if (g_control == m) return;
     g_control = m;
-    WriteLog("[Control] control=%s", ControlModeName_(m));
+    LogInfo("[Control] control=%s", ControlModeName_(m));
     RefreshControlStatusHint_();
 }
 
@@ -191,13 +191,13 @@ static void BindStackTrackingFromBattle_()
     ClearStackTracking_();
     _BattleMgr_* mgr = o_BattleMgr;
     if (!mgr) {
-        WriteLog("[Track] bind skipped: no battle manager");
+        LogWarn("[Track] bind skipped: no battle manager");
         return;
     }
 
     const int side = ResolveHumanSide_(mgr);
     if (side < 0 || side > 1) {
-        WriteLog("[Track] bind skipped: invalid human side");
+        LogWarn("[Track] bind skipped: invalid human side");
         return;
     }
 
@@ -234,7 +234,7 @@ static void BindStackTrackingFromBattle_()
         if (g_active_rules[i].spellSlotCount > 0)
             ++configured_spell;
 
-        WriteLog("[Track] bind attempt=%d slot=%d source=%d idkind=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d spells=%d first=%d",
+        LogDebug("[Track] bind attempt=%d slot=%d source=%d idkind=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d spells=%d first=%d",
             t.attempt_id, i, s->source_army_slot, (int)t.identity.kind,
             t.creature_id, t.hex, t.alive ? 1 : 0,
             t.count_alive, t.count_start, (int)g_active_rules[i].action,
@@ -245,7 +245,7 @@ static void BindStackTrackingFromBattle_()
 
     g_track_side = side;
     g_track_active = bound > 0;
-    WriteLog("[Track] bound side=%d stacks=%d actions=%d spells=%d",
+    LogDebug("[Track] bound side=%d stacks=%d actions=%d spells=%d",
         side, bound, configured_action, configured_spell);
 }
 
@@ -270,7 +270,7 @@ static void UpdateStackTracking_()
                 t.identity, current_identities[i])) {
             // 槽位被复用/清空：本绑定失效。
             if (t.alive) {
-                WriteLog("[Track] identity lost slot=%d expect=0x%X got=0x%X",
+                LogWarn("[Track] identity lost slot=%d expect=0x%X got=0x%X",
                     i, t.creature_id, s->creature_id);
             }
             t.alive = false;
@@ -286,12 +286,12 @@ static void UpdateStackTracking_()
         t.alive = s->count_current > 0;
 
         if (prev_alive > 0 && !t.alive) {
-            WriteLog("[Track] dead slot=%d cid=0x%X last_hex=%d",
+            LogDebug("[Track] dead slot=%d cid=0x%X last_hex=%d",
                 i, t.creature_id, prev_hex);
         } else if (t.alive && (prev_hex != t.hex || prev_alive != t.count_alive)) {
             // 位置/数量变化仅在调试时有用；降噪：只在数量变化时打日志。
             if (prev_alive != t.count_alive) {
-                WriteLog("[Track] update slot=%d cid=0x%X hex=%d count=%d",
+                LogDebug("[Track] update slot=%d cid=0x%X hex=%d count=%d",
                     i, t.creature_id, t.hex, t.count_alive);
             }
         }
@@ -388,7 +388,7 @@ static void EnsureCombatKbHook_()
     s_combat_kb_hook = SetWindowsHookExA(WH_KEYBOARD, CombatHotkeyKbHook_,
         g_hModule, tid);
     if (s_combat_kb_hook)
-        WriteLog("[Control] combat keyboard hook installed");
+        LogInfo("[Control] combat keyboard hook installed");
 }
 
 void ShutdownCombatHotkeys()
@@ -437,28 +437,28 @@ static void ShowControlStatus_(const char* text)
         if (H3CombatManager* cm = H3CombatManager::Get()) {
             if (cm->dlg) {
                 cm->dlg->ShowHint(show, FALSE);
-                WriteLog("[Control] status shown: %s", text);
+                LogDebug("[Control] status shown: %s", text);
                 return;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    WriteLog("[Control] status (no dlg): %s", text);
+    LogDebug("[Control] status (no dlg): %s", text);
 }
 
 static const char* ControlModeLabel_()
 {
     switch (g_control) {
-    case CM_ONESHOT_LOCKED: return "单次接管";
-    case CM_ONESHOT_WAIT:   return "单次待命";
-    case CM_MANUAL:         return "全手动";
-    default:                return "自动";
+    case CM_ONESHOT_LOCKED: return T("hud.mode_oneshot");
+    case CM_ONESHOT_WAIT:   return T("hud.mode_wait");
+    case CM_MANUAL:         return T("hud.mode_manual");
+    default:                return T("hud.mode_auto");
     }
 }
 
 static void RefreshControlStatusHint_()
 {
     char buf[64] = {};
-    _snprintf(buf, sizeof(buf) - 1, "打铁助手: %s", ControlModeLabel_());
+    _snprintf(buf, sizeof(buf) - 1, T("hud.prefix"), ControlModeLabel_());
     ShowControlStatus_(buf);
 }
 
@@ -492,7 +492,7 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
     if (HasInFlightAutoAction_(mgr)) {
         // 已投递施法/动作：不能半途打断，记为待命，等下一支。
         g_control = CM_ONESHOT_WAIT;
-        WriteLog("[Control] oneshot deferred (in-flight) slot=%d action=%d spell_wait=%d",
+        LogDebug("[Control] oneshot deferred (in-flight) slot=%d action=%d spell_wait=%d",
             stack->army_slot_ix, mgr->action,
             g_pipeline_stage == PS_SPELL_POSTED ? 1 : 0);
         return false;
@@ -513,7 +513,7 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
     if (g_auto_state.action_wake_stack == stack)
         g_auto_state.action_wake_stack = nullptr;
 
-    WriteLog("[Control] oneshot armed%s side=%d slot=%d cid=0x%X",
+    LogDebug("[Control] oneshot armed%s side=%d slot=%d cid=0x%X",
         from_pending ? " (pending)" : "",
         g_auto_state.oneshot_side, g_auto_state.oneshot_slot,
         g_auto_state.oneshot_creature);
@@ -530,14 +530,14 @@ static void ArmOneShotManual_(_BattleMgr_* mgr)
     }
     if (IsTacticsPhase_(mgr) || IsHiddenBattle(mgr) || mgr->auto_combat) {
         g_control = CM_ONESHOT_WAIT;
-        WriteLog("[Control] oneshot pending: tactics/hidden/auto_combat");
+        LogDebug("[Control] oneshot pending: tactics/hidden/auto_combat");
         RefreshControlStatusHint_();
         return;
     }
     _BattleStack_* stack = mgr->active_stack;
     if (!stack || stack->count_current <= 0 || !ActiveStackMatchesTrack_(stack)) {
         g_control = CM_ONESHOT_WAIT;
-        WriteLog("[Control] oneshot pending: no matching active stack");
+        LogWarn("[Control] oneshot pending: no matching active stack");
         RefreshControlStatusHint_();
         return;
     }
@@ -610,7 +610,7 @@ static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
             g_auto_state.oneshot_creature))
         return true;
     // 活动单位已变且不是锁定部队：单次接管结束。
-    WriteLog("[Control] oneshot expired by active change old_slot=%d new_side=%d new_slot=%d",
+    LogDebug("[Control] oneshot expired by active change old_slot=%d new_side=%d new_slot=%d",
         g_auto_state.oneshot_slot, stack->def_group_ix, stack->army_slot_ix);
     ClearOneShotManual_();
     SetControlMode_(CM_AUTO);
@@ -635,7 +635,7 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
             const bool is_auto_submitted = g_pipeline_stage == PS_HANDLED
                 && g_pipeline_stack == stack;
             if (is_locked && !is_auto_submitted) {
-                WriteLog("[Control] oneshot completed by player action=%d slot=%d",
+                LogDebug("[Control] oneshot completed by player action=%d slot=%d",
                     This->action, stack ? stack->army_slot_ix : -1);
                 ClearOneShotManual_();
                 SetControlMode_(CM_AUTO);
@@ -676,7 +676,7 @@ void ResetAutoState()
     // 策略是本进程内的已确认设置，战斗状态重置时保留；
     // 跟踪表是“当前战斗绑定”，进程重置时清空。
     ClearStackTracking_();
-    WriteLog("Auto state reset; confirmed strategies preserved, tracking cleared.");
+    LogInfo("Auto state reset; confirmed strategies preserved, tracking cleared.");
 }
 
 // 取消重打后战场回来：按稳定身份重排方案、清空本轮状态并强制重绑。
@@ -709,7 +709,7 @@ void EnsureStackTrackingBound()
     ++g_battle_attempt_id;
     ResetAutoState();
     BindStackTrackingFromBattle_();
-    WriteLog("[Life] retry rebound attempt=%d side=%d with stable identity remap",
+    LogInfo("[Life] retry rebound attempt=%d side=%d with stable identity remap",
         g_battle_attempt_id, side);
 }
 
@@ -746,10 +746,10 @@ static void RequestUnitActionWake_(_BattleStack_* self)
     }
     if (PostMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(pt.x, pt.y))) {
         g_auto_state.action_wake_stack = self;
-        WriteLog("[Auto] action wake posted slot=%d hwnd=%p client=(%d,%d)",
+        LogDebug("[Auto] action wake posted slot=%d hwnd=%p client=(%d,%d)",
             self->army_slot_ix, hwnd, pt.x, pt.y);
     } else {
-        WriteLog("[Auto] action wake failed slot=%d hwnd=%p",
+        LogError("[Auto] action wake failed slot=%d hwnd=%p",
             self->army_slot_ix, hwnd);
     }
 }
@@ -787,7 +787,7 @@ static bool TriggerQuickSpellDigit_(int digit)
     if (!sod_sp)
         sod_sp = GetModuleHandleA("SoD_SP");
     if (!sod_sp) {
-        WriteLog("[Spell] SoD_SP.dll not loaded; cannot cast quickspell digit=%d",
+        LogError("[Spell] SoD_SP.dll not loaded; cannot cast quickspell digit=%d",
             digit);
         return false;
     }
@@ -812,7 +812,7 @@ static bool TriggerQuickSpellDigit_(int digit)
                 spell_flags = spell_table[spell_id * 0x88 + 0x0C];
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Spell] cannot inspect SoD_SP quickspell slot=%d base=%p",
+        LogError("[Spell] cannot inspect SoD_SP quickspell slot=%d base=%p",
             slot, (void*)sod_sp);
     }
 
@@ -831,12 +831,12 @@ static bool TriggerQuickSpellDigit_(int digit)
     //     GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
 
     if (spell_id < 0 || spell_id >= 70 || (spell_flags & 1) == 0)
-        WriteLog("[Spell] SoD_SP slot appears empty/invalid; still posting digit for other hooks slot=%d spell=%d flags=0x%X",
+        LogWarn("[Spell] SoD_SP slot appears empty/invalid; still posting digit for other hooks slot=%d spell=%d flags=0x%X",
             slot, spell_id, spell_flags);
 
     HWND hwnd = *reinterpret_cast<HWND*>(0x699650);
     if (!hwnd) {
-        WriteLog("[Spell] game window unavailable digit=%d spell=%d", digit, spell_id);
+        LogError("[Spell] game window unavailable digit=%d spell=%d", digit, spell_id);
         return false;
     }
 
@@ -853,7 +853,7 @@ static bool TriggerQuickSpellDigit_(int digit)
             return false;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Spell] posting quick key crashed digit=%d spell=%d", digit, spell_id);
+        LogError("[Spell] posting quick key crashed digit=%d spell=%d", digit, spell_id);
         return false;
     }
 }
@@ -879,7 +879,7 @@ void SyncActiveProtect()
 {
     if (g_protect_checked_turn != -1) {
         g_protect_checked_turn = -1;
-        WriteLog("[Protect] settings committed; player turn re-checks");
+        LogInfo("[Protect] settings committed; player turn re-checks");
     }
 }
 
@@ -890,7 +890,7 @@ void PauseAutoExecution()
     if (g_control != CM_MANUAL) {
         ClearOneShotManual_();
         SetControlMode_(CM_MANUAL);
-        WriteLog("[Control] paused after commit; press toggle hotkey to start");
+        LogInfo("[Control] paused after commit; press toggle hotkey to start");
     }
 }
 
@@ -970,7 +970,7 @@ static void TryAutoStop_(_BattleMgr_* mgr)
 
     g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
     ClearOneShotManual_();
-    WriteLog("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
+    LogInfo("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
         elapsed, g_enemy_hp_value[0], hp, left, threshold);
     RefreshControlStatusHint_();
 }
@@ -1003,7 +1003,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     if (side < 0 || side > 1) return false;
     if (GetHeroCasted_(mgr, side)) {
         if (once_per_turn)
-            WriteLog("[Protect] turn=%d hero already casted; skip", turn);
+            LogWarn("[Protect] turn=%d hero already casted; skip", turn);
         return false;
     }
 
@@ -1014,7 +1014,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     // 复活/聚灵固定耗魔 10（SoD，不随等级变化）。
     if (GetHeroMana_(mgr, side) < 10) {
         if (once_per_turn)
-            WriteLog("[Protect] turn=%d mana<10; skip", turn);
+            LogWarn("[Protect] turn=%d mana<10; skip", turn);
         return false;
     }
     const int spell_power = cm->heroSpellPower[side];
@@ -1190,13 +1190,13 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (g_active_rules[i].action != AA_MANUAL) ++action_rules;
         if (g_active_rules[i].spellSlotCount > 0) {
             ++spell_rules;
-            WriteLog("[Auto] commit slot=%d action=%d spells=%d first=%d",
+            LogInfo("[Auto] commit slot=%d action=%d spells=%d first=%d",
                 i, (int)g_active_rules[i].action,
                 (int)g_active_rules[i].spellSlotCount,
                 (int)g_active_rules[i].spellSlots[0]);
         }
     }
-    WriteLog("[Auto] 5 profiles committed; active profile=%d actions=%d spells=%d",
+    LogInfo("[Auto] 5 profiles committed; active profile=%d actions=%d spells=%d",
         g_active_profile + 1, action_rules, spell_rules);
     // 提交后立即绑定本场部队身份；后续执行依赖跟踪校验。
     BindStackTrackingFromBattle_();
@@ -1288,7 +1288,7 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         scored, count, rule.target.selector,
         static_cast<uint32_t>(rand()));
     if (selected < 0) {
-        WriteLog("[Auto] target selector rejected count=%d selector=%d side=%d wounded=%d",
+        LogWarn("[Auto] target selector rejected count=%d selector=%d side=%d wounded=%d",
             count, (int)rule.target.selector, side_filter, require_wounded ? 1 : 0);
         return nullptr;
     }
@@ -1319,7 +1319,7 @@ static bool SubmitDefend_(_BattleMgr_* mgr, _BattleStack_* self)
     mgr->action_parameter2 = 0;
     g_pipeline_stage = PS_HANDLED;   // 本回合已处理，防重复下命令
     g_pipeline_stack = self;
-    WriteLog("[Auto] submit DEFEND slot=%d creature=0x%X",
+    LogDebug("[Auto] submit DEFEND slot=%d creature=0x%X",
         self->army_slot_ix, self->creature_id);
     return true;
 }
@@ -1343,20 +1343,20 @@ static bool SubmitRanged_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStack
 {
     _BattleStack_* target = SelectStackTarget_(mgr, self, rule, 1, false);
     if (!target) {
-        WriteLog("[Auto] ranged target unavailable slot=%d cid=0x%X selector=%d",
+        LogWarn("[Auto] ranged target unavailable slot=%d cid=0x%X selector=%d",
             self->army_slot_ix, self->creature_id, (int)rule.target.selector);
         return false;
     }
     const int target_hex = StackHex_(target);
     if (target_hex < 0) {
-        WriteLog("[Auto] ranged target hex invalid slot=%d target_slot=%d cid=0x%X",
+        LogWarn("[Auto] ranged target hex invalid slot=%d target_slot=%d cid=0x%X",
             self->army_slot_ix, target->army_slot_ix, target->creature_id);
         return false;
     }
     // 与近战一致：目标格走 actionTarget；actionParameter 不承载射击落点。
     if (!WriteAction_(mgr, self, BA_SHOOT, -1, target_hex))
         return false;
-    WriteLog("[Auto] submit SHOOT slot=%d -> hex=%d target_slot=%d",
+    LogDebug("[Auto] submit SHOOT slot=%d -> hex=%d target_slot=%d",
         self->army_slot_ix, target_hex, target->army_slot_ix);
     return true;
 }
@@ -1382,11 +1382,11 @@ static bool IsMoveTargetReachable_(_BattleMgr_* mgr, _BattleStack_* self, int he
         const int access = static_cast<int>(cm->accessibleSquares2[hex]);
         const bool reachable = (move_type == 1 || move_type == 2)
             && (access & 2) != 0; // eSquareAccess::CAN_REACH
-        WriteLog("[Auto] move reachability slot=%d hex=%d type=%d reachable=%d access=%d",
+        LogDebug("[Auto] move reachability slot=%d hex=%d type=%d reachable=%d access=%d",
             self->army_slot_ix, hex, move_type, reachable ? 1 : 0, access);
         return reachable;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Auto] move reachability exception slot=%d hex=%d",
+        LogError("[Auto] move reachability exception slot=%d hex=%d",
             self->army_slot_ix, hex);
         return false;
     }
@@ -1427,14 +1427,14 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
         int hex = wps[cur];
         if (hex == StackHex_(self)) return false; // 所有点都在脚下
         if (!IsMoveTargetReachable_(mgr, self, hex)) {
-            WriteLog("[Auto] WALK target unreachable slot=%d hex=%d cursor=%d/%d; no cursor advance",
+            LogWarn("[Auto] WALK target unreachable slot=%d hex=%d cursor=%d/%d; no cursor advance",
                 self->army_slot_ix, hex, cur, n);
             return false;
         }
         if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
             return false;
         runtime.move_cursor = cur;
-        WriteLog("[Auto] submit WALK(patrol) slot=%d -> hex=%d cursor=%d/%d",
+        LogDebug("[Auto] submit WALK(patrol) slot=%d -> hex=%d cursor=%d/%d",
             self->army_slot_ix, hex, cur, n);
         return true;
     }
@@ -1444,13 +1444,13 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     if (hex < 1 || hex > 185) return false;
     if (hex == StackHex_(self)) return false;
     if (!IsMoveTargetReachable_(mgr, self, hex)) {
-        WriteLog("[Auto] WALK target unreachable slot=%d hex=%d; player/fallback path",
+        LogWarn("[Auto] WALK target unreachable slot=%d hex=%d; player/fallback path",
             self->army_slot_ix, hex);
         return false;
     }
     if (!WriteAction_(mgr, self, BA_WALK, -1, hex))
         return false;
-    WriteLog("[Auto] submit WALK slot=%d -> hex=%d",
+    LogDebug("[Auto] submit WALK slot=%d -> hex=%d",
         self->army_slot_ix, hex);
     return true;
 }
@@ -1502,20 +1502,20 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
         ? target.meleeStandHex : target.meleeStandHexes[cursor];
     if (attack_hex < 1 || attack_hex > 185
         || stand_hex < 1 || stand_hex > 185) {
-        WriteLog("[Auto] melee pair invalid slot=%d cursor=%d/%d stand=%d attack=%d",
+        LogWarn("[Auto] melee pair invalid slot=%d cursor=%d/%d stand=%d attack=%d",
             self->army_slot_ix, cursor, count, stand_hex, attack_hex);
         return false;
     }
 
     _BattleStack_* enemy = FindEnemyOccupyingHex_(mgr, self, attack_hex);
     if (!enemy) {
-        WriteLog("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
+        LogInfo("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
             attack_hex, self->army_slot_ix);
         return false;
     }
     if (!IsMoveTargetReachable_(mgr, self, stand_hex)
         && StackHex_(self) != stand_hex) {
-        WriteLog("[Auto] melee stand unreachable slot=%d stand=%d attack=%d",
+        LogWarn("[Auto] melee stand unreachable slot=%d stand=%d attack=%d",
             self->army_slot_ix, stand_hex, attack_hex);
         return false;
     }
@@ -1530,7 +1530,7 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
     // 只在成功提交后推进；失败时保持当前组合不变。
     if (!legacy && count > 0)
         runtime.melee_cursor = (cursor + 1) % count;
-    WriteLog("[Auto] submit MELEE(loop) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
+    LogDebug("[Auto] submit MELEE(loop) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
         cursor, count, stand_hex, attack_hex, enemy->army_slot_ix, StackHex_(enemy),
         legacy ? 0 : runtime.melee_cursor);
     return true;
@@ -1541,7 +1541,7 @@ static bool SubmitWait_(_BattleMgr_* mgr, _BattleStack_* self)
 {
     if (!WriteAction_(mgr, self, BA_WAIT, -1, -1))
         return false;
-    WriteLog("[Auto] submit WAIT slot=%d", self->army_slot_ix);
+    LogDebug("[Auto] submit WAIT slot=%d", self->army_slot_ix);
     return true;
 }
 
@@ -1554,7 +1554,7 @@ static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoSta
     if (target_hex < 0) return false;
     if (!WriteAction_(mgr, self, BA_FIRST_AID, target_hex, -1))
         return false;
-    WriteLog("[Auto] submit FIRST_AID slot=%d -> hex=%d target_slot=%d",
+    LogDebug("[Auto] submit FIRST_AID slot=%d -> hex=%d target_slot=%d",
         self->army_slot_ix, target_hex, target->army_slot_ix);
     return true;
 }
@@ -1631,7 +1631,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         static void* s_last_mismatch = nullptr;
         if (s_last_mismatch != self) {
             s_last_mismatch = self;
-            WriteLog("[Track] skip action: mismatch side=%d slot=%d cid=0x%X count=%d",
+            LogWarn("[Track] skip action: mismatch side=%d slot=%d cid=0x%X count=%d",
                 self->def_group_ix, self->army_slot_ix,
                 self->creature_id, self->count_current);
         }
@@ -1656,7 +1656,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         && !(g_pipeline_stage == PS_SPELL_DONE && g_pipeline_stack == self)) {
         // 本英雄本回合已施过法：跳过施法，直接进入部队动作。
         if (GetHeroCasted_(mgr, side) != 0) {
-            WriteLog("[Spell] already cast this turn side=%d; skip quick key=%d",
+            LogWarn("[Spell] already cast this turn side=%d; skip quick key=%d",
                 side, spell_key);
             // 英雄每回合只能施法一次；本部队没有实际尝试，不消费循环槽位。
             g_pipeline_stage = PS_SPELL_DONE;
@@ -1666,7 +1666,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
             g_auto_state.spell_casted_before = GetHeroCasted_(mgr, side);
             g_auto_state.spell_wait_started = GetTickCount();
             if (!TriggerQuickSpellDigit_(spell_key)) {
-                WriteLog("[Spell] trigger failed digit=%d; fallthrough to unit action",
+                LogWarn("[Spell] trigger failed digit=%d; fallthrough to unit action",
                     spell_key);
                 AdvanceSpellCursor_(runtime, rule.spellSlotCount);
                 g_pipeline_stage = PS_SPELL_DONE;
@@ -1677,7 +1677,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
                 g_auto_state.spell_wait_slot = idx;
                 g_auto_state.spell_wait_key = spell_key;
                 g_auto_state.spell_wait_frames = 0;
-                WriteLog("[Spell] wait start slot=%d key=%d mana=%d casted=%d",
+                LogDebug("[Spell] wait start slot=%d key=%d mana=%d casted=%d",
                     idx, spell_key, g_auto_state.spell_mana_before,
                     g_auto_state.spell_casted_before);
                 return false; // 本帧只投键，不提交部队动作
@@ -1700,7 +1700,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         if (!cast_done && !timed_out)
             return false; // 继续等
 
-        WriteLog("[Spell] wait end slot=%d key=%d calls=%d elapsed=%lu cast_done=%d timed_out=%d mana %d->%d casted %d->%d",
+        LogDebug("[Spell] wait end slot=%d key=%d calls=%d elapsed=%lu cast_done=%d timed_out=%d mana %d->%d casted %d->%d",
             idx, g_auto_state.spell_wait_key, g_auto_state.spell_wait_frames,
             (unsigned long)elapsed,
             cast_done ? 1 : 0, timed_out ? 1 : 0,
@@ -1730,7 +1730,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 
     const bool ok = SubmitConfiguredUnitAction_(mgr, self, rule, runtime);
     if (ok) {
-        WriteLog("[Auto] action consumed wake slot=%d action=%d",
+        LogDebug("[Auto] action consumed wake slot=%d action=%d",
             self->army_slot_ix, mgr->action);
         g_auto_state.action_wake_stack = nullptr;
     } else if (!rule.allowDefendFallback
@@ -1740,7 +1740,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         g_pipeline_stage = PS_HANDLED;
         g_pipeline_stack = self;
         g_auto_state.action_wake_stack = nullptr;
-        WriteLog("[Auto] configured action failed; yield to player slot=%d cid=0x%X action=%d",
+        LogWarn("[Auto] configured action failed; yield to player slot=%d cid=0x%X action=%d",
             self->army_slot_ix, self->creature_id, (int)rule.action);
     }
     return ok;
@@ -1774,7 +1774,7 @@ int DecideTakeover(_BattleMgr_* mgr)
             const int slot = stack->army_slot_ix;
             const StackTrackEntry* expected =
                 (slot >= 0 && slot < 21) ? &g_stack_track[slot] : nullptr;
-            WriteLog("[Track] takeover mismatch ptr=%p side=%d slot=%d cid=0x%X count=%d track_active=%d expected_bound=%d expected_alive=%d expected_side=%d expected_cid=0x%X",
+            LogWarn("[Track] takeover mismatch ptr=%p side=%d slot=%d cid=0x%X count=%d track_active=%d expected_bound=%d expected_alive=%d expected_side=%d expected_cid=0x%X",
                 stack, stack->def_group_ix, slot, stack->creature_id,
                 stack->count_current, g_track_active ? 1 : 0,
                 expected && expected->bound ? 1 : 0,
@@ -1831,7 +1831,7 @@ int DecideTakeover(_BattleMgr_* mgr)
             static void* s_last_spell_takeover = nullptr;
             if (s_last_spell_takeover != stack) {
                 s_last_spell_takeover = stack;
-                WriteLog("[Spell] takeover slot=%d spells=%d first=%d",
+                LogDebug("[Spell] takeover slot=%d spells=%d first=%d",
                     idx, (int)rule.spellSlotCount,
                     (int)rule.spellSlots[0]);
             }

@@ -7,6 +7,10 @@
 
 static void DrawMeleePickMarker_();
 static void GetHelpModalCloseRect_(int* out_x, int* out_y, int* out_w, int* out_h);
+static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_h);
+static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
+    int* out_w, int* out_h);
+static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void GetProtectDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);

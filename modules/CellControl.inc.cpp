@@ -5,7 +5,7 @@
 #ifndef _CELL_CONTROL_INC_CPP
 #define _CELL_CONTROL_INC_CPP
 
-static void WriteLog(const char* fmt, ...);
+static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, int b);
 H3Font* GetSmallFont();
@@ -55,15 +55,15 @@ static const int CC_ICON_FRAME_H = 66;
 static const int CC_LABEL_H  = 11;
 
 // 一行一格（宽格 568×99）横排布局：
-//   图标列（位置左下/数量右下） | 第二小列（仅够「行动前循环施法:」+ 行动/降级）
+//   图标列（位置左下/数量右下） | 第二小列（仅够「行动前循环快捷施法:」+ 行动/降级）
 //   | 第三小列（循环施法槽 + 选择器/近战/移动，吃掉剩余宽度）
 // 第二小列左缘贴图标金框右缘，留 4px 间距。
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
 static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68
-static const int CC_COL2_W   = 118; // 刚好放下「行动前循环施法:」
-static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈192
-static const int CC_COL3_RIGHT = 560; // 卡片右内边距
-static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈368
+static const int CC_COL2_W   = 132; // 刚好放下「行动前循环快捷施法:」
+static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈206
+static const int CC_COL3_RIGHT = 564; // 卡片右内边距
+static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈358
 static const int CC_ROW_H    = 22;
 // 顶部循环施法行；行动/目标两行居中，底部加首动保活行，适配 110 高。
 static const int CC_SPELL_Y  = 5;
@@ -81,11 +81,11 @@ static const int CC_PROTECT_LABEL_W  = 118;
 // 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
 static const int CC_SPELL_SLOT_GAP = 3;
-static const int CC_SPELL_SLOT_W = 34; // 刚好显示一位数字
+static const int CC_SPELL_SLOT_W = 30; // 刚好显示一位数字
 // 循环移动/近战槽：按文本宽度定槽宽，再反算每行/总容量（两行）。
 static const int CC_PATH_SLOT_GAP = 3;
-static const int CC_MOVE_SLOT_W = 43;  // A01
-static const int CC_MELEE_SLOT_W = 71; // A01→B02
+static const int CC_MOVE_SLOT_W = 40;  // A01
+static const int CC_MELEE_SLOT_W = 66; // A01→B02
 static const int CC_MOVE_SLOTS_PER_ROW =
     (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MOVE_SLOT_W + CC_PATH_SLOT_GAP); // 8
 static const int CC_MELEE_SLOTS_PER_ROW =
@@ -397,15 +397,15 @@ static const char* CellControl_FixedSideHint(AutoActionKind action)
 {
     switch (action) {
     case AA_MELEE_ATTACK:
-        return "循环站立位+攻击位";
+        return T("cell.target_melee_pair");
     case AA_RANGED_ATTACK:
         return nullptr; // 远程攻击不显示固定说明
     case AA_FIRST_AID:
-        return "己方伤员";
+        return T("cell.target_wounded");
     case AA_MOVE:
         return nullptr; // 用阵营下拉
     default:
-        return "无目标";
+        return T("cell.target_none");
     }
 }
 
@@ -888,14 +888,14 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             Fill(scr, cb_x + 6, cb_y + 4, 2, 2, 235, 205, 116);
             Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
         }
-        CellControl_DrawText(scr, fntS, "允许降级为防御",
+        CellControl_DrawText(scr, fntS, T("cell.allow_fallback"),
             cb_x + cb_box + 4, cb_y - 1, CC_COL2_W - cb_box - 8, CC_CHECKBOX_H,
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 
-    // ---- 顶部：行动前循环施法（标签 + 单行最多 SPELL_SLOT_CAPACITY 个快捷键槽）----
+    // ---- 顶部：行动前循环快捷施法（标签 + 单行最多 SPELL_SLOT_CAPACITY 个快捷键槽）----
     {
-        CellControl_DrawText(scr, fntS, "行动前循环施法:",
+        CellControl_DrawText(scr, fntS, T("cell.pre_cast_label"),
             CC_COL2_X, CC_SPELL_Y, CC_SPELL_LABEL_W, CC_ROW_H,
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
 
@@ -946,7 +946,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
         }
 
-        CellControl_DrawText(scr, fntS, "加入保活队列",
+        CellControl_DrawText(scr, fntS, T("cell.protect_join"),
             CC_PROTECT_LABEL_X, CC_PROTECT_Y, CC_PROTECT_LABEL_W, CC_ROW_H,
             (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
             eTextAlignment::MIDDLE_LEFT);
@@ -1288,25 +1288,24 @@ static const char* CellControl_TipForHit(CellHitArea hit)
 {
     switch (hit) {
     case CELL_HIT_ACTION:
-        return "行动：本部队轮到时自动执行的动作；手动=交给玩家";
+        return T("tips.cell_action");
     case CELL_HIT_SELECTOR:
-        return "目标选择：多个候选时按此排序挑选（远程/急救各有自己的选项）";
+        return T("tips.cell_selector");
     case CELL_HIT_CHECKBOX:
-        return "允许降级为防御：目标不可达或动作失败时自动防御，否则交回玩家";
+        return T("tips.cell_fallback");
     case CELL_HIT_PROTECT_CHECKBOX:
-        return "加入保活队列：勾选后参与方案级保活策略的复活判定";
+        return T("tips.cell_protect");
     case CELL_HIT_DROP:
-        return "选择一项；点外部或再点一次收起";
+        return T("tips.cell_drop");
     default:
         break;
     }
     if (hit >= CELL_HIT_SPELL_BASE && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY)
-        return "行动前循环施法：本部队行动前按槽位顺序投快捷施法键（1-9,0）；"
-               "英雄每回合只施一次，已施法则跳过；右键槽位删除";
+        return T("tips.cell_spell");
     if (hit >= CELL_HIT_MOVE_WP_BASE && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY)
-        return "循环移动：按槽位顺序走向战场格，走完一轮从头再来；右键槽位删除";
+        return T("tips.cell_move");
     if (hit >= CELL_HIT_MELEE_PAIR_BASE && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY)
-        return "循环近战：每槽一对「站立格→攻击格」，按序循环执行；右键槽位删除";
+        return T("tips.cell_melee");
     return nullptr;
 }
 

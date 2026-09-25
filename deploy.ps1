@@ -11,6 +11,16 @@ try {
     Copy-Item "$src\H3Auto.dll" $packsDst -Force
     Copy-Item "$PSScriptRoot\H3Auto.ini" $packsDst -Force
 
+    # 语言文案：lang 目录整体覆盖（文案随版本更新；玩家深度定制请另存副本并改 Language）。
+    $langSrc = "$PSScriptRoot\lang"
+    $langDst = "$packsDst\lang"
+    if (Test-Path $langSrc) {
+        New-Item -ItemType Directory -Path $langDst -Force | Out-Null
+        Get-ChildItem "$langSrc\*.ini" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName $langDst -Force
+        }
+    }
+
     $imgSrc = "$PSScriptRoot\img"
     $imgDst = "$packsDst\img"
     if (Test-Path $imgSrc) {
