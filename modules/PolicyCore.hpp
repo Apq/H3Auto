@@ -144,6 +144,8 @@ enum StableStackIdentityKind : uint8_t {
     STACK_ID_NONE = 0,
     STACK_ID_ARMY_SLOT,
     STACK_ID_WAR_MACHINE,
+    // 召唤物/克隆：仅本场内有效，重打/跨场不迁移（remap 视为不可匹配）。
+    STACK_ID_SUMMON,
 };
 
 struct StableStackIdentity {
@@ -155,7 +157,8 @@ struct StableStackIdentity {
 
 // Original army stacks keep source_army_slot (0..6) across a quick-battle
 // retry. War machines do not have one, so identify them by kind and ordinal.
-// Summons and clones intentionally have no cross-attempt identity.
+// Summons and clones only carry a within-battle identity (type + ordinal);
+// BuildStableStackSlotRemap refuses to carry their rules across a retry.
 inline StableStackIdentity MakeStableStackIdentity(int side,
     int source_army_slot, int creature_type, int occurrence)
 {
@@ -169,6 +172,12 @@ inline StableStackIdentity MakeStableStackIdentity(int side,
     }
     if (IsWarMachineType(creature_type)) {
         id.kind = STACK_ID_WAR_MACHINE;
+        id.value = static_cast<int16_t>(creature_type);
+        id.occurrence = static_cast<int8_t>(occurrence < 0 ? 0 : occurrence);
+        return id;
+    }
+    if (creature_type >= 0) {
+        id.kind = STACK_ID_SUMMON;
         id.value = static_cast<int16_t>(creature_type);
         id.occurrence = static_cast<int8_t>(occurrence < 0 ? 0 : occurrence);
     }
@@ -185,6 +194,7 @@ inline bool StableStackIdentityEquals(const StableStackIdentity& a,
 
 // For each current battle slot, return the previous slot holding its rule.
 // Unmatched slots remain -1 and receive defaults in the integration layer.
+// 召唤物/克隆没有跨重打身份：不参与重排，重打后回到默认规则。
 inline void BuildStableStackSlotRemap(const StableStackIdentity* previous,
     int previous_count, const StableStackIdentity* current, int current_count,
     int* previous_slot_for_current)
@@ -193,7 +203,9 @@ inline void BuildStableStackSlotRemap(const StableStackIdentity* previous,
     for (int i = 0; i < current_count; ++i) {
         previous_slot_for_current[i] = -1;
         if (!current || current[i].kind == STACK_ID_NONE) continue;
+        if (current[i].kind == STACK_ID_SUMMON) continue;
         for (int j = 0; previous && j < previous_count; ++j) {
+            if (previous[j].kind == STACK_ID_SUMMON) continue;
             if (StableStackIdentityEquals(previous[j], current[i])) {
                 previous_slot_for_current[i] = j;
                 break;
@@ -523,11 +535,12 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 }
 
 // 5 套方案的磁盘存档（加载/保存按钮）。
-// 纯编解码：一行文本 "H3AP1 <方案1策略> ... <方案5策略> <105×规则>"，
+// 纯编解码：一行文本 "H3AP2 <21×部队表> <方案1策略> ... <方案5策略> <105×规则>"，
 // 规则按方案优先、槽位其次排列，每条 59 个十进制整数。
-// 存档只承载规则本身，不含生物身份（身份重排由运行时稳定身份完成）。
-// 文本在 5 个策略之后还有 5 个自动停止回合（0..99）。
-// 存档格式：5 策略 + 5 停止回合 + 5*21 条规则（每条 59 个整数）。
+// 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
+// 部队表供读档时做三轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
+// 文本在部队表之后有 5 个策略、5 个自动停止回合（0..999）。
+// 存档格式：21*2 部队 + 5 策略 + 5 停止回合 + 5*21 条规则（每条 59 个整数）。
 static constexpr int PROFILE_STORE_COUNT = 5;
 static constexpr int PROFILE_STORE_SLOTS = 21;
 // 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
@@ -540,10 +553,93 @@ static constexpr int PROFILE_STORE_RULE_FIELDS =
 // 旧档（3575/3580 整数）由越界写堆的坏版本写出：交错覆盖、不可靠且
 // 按新步进读会越界读，一律拒绝（读档失败，需重新配置）。
 static constexpr int PROFILE_STORE_LEGACY_INTS = 3575;
+// H3AP1（6205 整数，无部队表）：格式已废弃，同样拒绝。
+static constexpr int PROFILE_STORE_ARMY_INTS =
+    PROFILE_STORE_SLOTS * 2;
 static constexpr int PROFILE_STORE_INTS =
-    PROFILE_STORE_COUNT + PROFILE_STORE_COUNT
+    PROFILE_STORE_ARMY_INTS
+    + PROFILE_STORE_COUNT + PROFILE_STORE_COUNT
     + PROFILE_STORE_COUNT * PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
+
+// 读档四轮关联（存档部队 → 当前部队槽）：
+//   轮 1：槽位 + 生物类型 + 初始数量（三项全等，零误配）
+//   轮 2：生物类型 + 初始数量（换了槽、规模没变；数量相等天然消歧）
+//   轮 3：槽位 + 生物类型（没换槽、规模变了；同类型多组时降级跳过）
+//   轮 4：只按生物类型（兜底，先到先得）
+// 每轮跳过两边已被匹配的槽位；arch_for_cur[cur] = 存档槽号，-1 = 未匹配。
+// 空槽（类型 < 0）不参与。未匹配的存档规则由调用方丢弃。
+inline void BuildArchiveSlotMapByRounds(const int* arch_type,
+    const int* arch_count, const int* cur_type, const int* cur_count,
+    int* arch_for_cur)
+{
+    if (!arch_type || !arch_count || !cur_type || !cur_count || !arch_for_cur)
+        return;
+    bool cur_used[PROFILE_STORE_SLOTS] = {};
+    bool arch_used[PROFILE_STORE_SLOTS] = {};
+    for (int i = 0; i < PROFILE_STORE_SLOTS; ++i)
+        arch_for_cur[i] = -1;
+
+    // 某类型在数组中的出现次数（仅有效槽）。O(21^2)，规模固定无所谓。
+    auto count_type = [](const int* types, int t) -> int {
+        int n = 0;
+        for (int i = 0; i < PROFILE_STORE_SLOTS; ++i)
+            if (types[i] == t) ++n;
+        return n;
+    };
+
+    // 轮 1：槽位 + 生物类型 + 初始数量。
+    for (int i = 0; i < PROFILE_STORE_SLOTS; ++i) {
+        if (cur_used[i] || arch_used[i]) continue;
+        if (cur_type[i] < 0 || arch_type[i] < 0) continue;
+        if (cur_type[i] == arch_type[i]
+            && cur_count[i] == arch_count[i]) {
+            arch_for_cur[i] = i;
+            cur_used[i] = true;
+            arch_used[i] = true;
+        }
+    }
+    // 轮 2：生物类型 + 初始数量（当前槽升序，存档槽取第一个命中）。
+    for (int c = 0; c < PROFILE_STORE_SLOTS; ++c) {
+        if (cur_used[c] || cur_type[c] < 0) continue;
+        for (int a = 0; a < PROFILE_STORE_SLOTS; ++a) {
+            if (arch_used[a] || arch_type[a] < 0) continue;
+            if (arch_type[a] == cur_type[c]
+                && arch_count[a] == cur_count[c]) {
+                arch_for_cur[c] = a;
+                cur_used[c] = true;
+                arch_used[a] = true;
+                break;
+            }
+        }
+    }
+    // 轮 3：槽位 + 生物类型。同类型在任一边出现多组时降级跳过
+    // （此时槽位是仅剩信号但不可靠，交给轮 4 按类型先到先得）。
+    for (int i = 0; i < PROFILE_STORE_SLOTS; ++i) {
+        if (cur_used[i] || arch_used[i]) continue;
+        if (cur_type[i] < 0 || arch_type[i] < 0) continue;
+        if (cur_type[i] != arch_type[i]) continue;
+        if (count_type(cur_type, cur_type[i]) > 1
+            || count_type(arch_type, arch_type[i]) > 1)
+            continue;
+        arch_for_cur[i] = i;
+        cur_used[i] = true;
+        arch_used[i] = true;
+    }
+    // 轮 4：只按生物类型（先到先得）。
+    for (int c = 0; c < PROFILE_STORE_SLOTS; ++c) {
+        if (cur_used[c] || cur_type[c] < 0) continue;
+        for (int a = 0; a < PROFILE_STORE_SLOTS; ++a) {
+            if (arch_used[a] || arch_type[a] < 0) continue;
+            if (arch_type[a] == cur_type[c]) {
+                arch_for_cur[c] = a;
+                cur_used[c] = true;
+                arch_used[a] = true;
+                break;
+            }
+        }
+    }
+}
 
 inline void EncodeRuleInts(const AutoStackRule& rule, int* out)
 {
@@ -607,13 +703,16 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP1 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
-inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
+// Decode 只接受以 "H3AP2 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
+    const int army_counts[PROFILE_STORE_SLOTS],
+    const uint8_t strategies[PROFILE_STORE_COUNT],
     const AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
     const uint16_t stop_turns[PROFILE_STORE_COUNT],
     char* buffer, int buffer_size)
 {
-    if (!strategies || !rules || !stop_turns || !buffer || buffer_size <= 0)
+    if (!army_types || !army_counts || !strategies || !rules || !stop_turns
+        || !buffer || buffer_size <= 0)
         return -1;
     int written = 0;
     auto append = [&](const char* s) -> bool {
@@ -623,9 +722,13 @@ inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
         }
         return true;
     };
-    if (!append("H3AP1")) return -1;
+    if (!append("H3AP2")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
+    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
+        ints[n++] = army_types[s];
+        ints[n++] = army_counts[s];
+    }
     for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
         ints[n++] = strategies[p];
     for (int p = 0; p < PROFILE_STORE_COUNT; ++p) {
@@ -665,12 +768,15 @@ inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
 }
 
 inline bool DecodeProfileStoreText(const char* text,
+    int army_types[PROFILE_STORE_SLOTS],
+    int army_counts[PROFILE_STORE_SLOTS],
     uint8_t strategies[PROFILE_STORE_COUNT],
     AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
     uint16_t stop_turns[PROFILE_STORE_COUNT])
 {
-    if (!text || !strategies || !rules || !stop_turns) return false;
-    const char* magic = "H3AP1";
+    if (!text || !army_types || !army_counts || !strategies || !rules
+        || !stop_turns) return false;
+    const char* magic = "H3AP2";
     for (int i = 0; magic[i]; ++i)
         if (text[i] != magic[i]) return false;
     const char* p = text + 5;
@@ -700,8 +806,16 @@ inline bool DecodeProfileStoreText(const char* text,
 
     uint8_t decoded_strategy[PROFILE_STORE_COUNT] = {};
     uint16_t decoded_stop[PROFILE_STORE_COUNT] = {};
+    int decoded_army_types[PROFILE_STORE_SLOTS] = {};
+    int decoded_army_counts[PROFILE_STORE_SLOTS] = {};
     AutoStackRule decoded[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
     int n = 0;
+    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
+        decoded_army_types[s] = ints[n];
+        decoded_army_counts[s] = ints[n + 1];
+        if (ints[n] < -1 || ints[n + 1] < 0) { delete[] ints; return false; }
+        n += 2;
+    }
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
         if (ints[n] < PS_NONE || ints[n] >= PS_COUNT) { delete[] ints; return false; }
         decoded_strategy[i] = static_cast<uint8_t>(ints[n++]);
@@ -716,6 +830,10 @@ inline bool DecodeProfileStoreText(const char* text,
             n += PROFILE_STORE_RULE_FIELDS;
         }
     delete[] ints;
+    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
+        army_types[s] = decoded_army_types[s];
+        army_counts[s] = decoded_army_counts[s];
+    }
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
         strategies[i] = decoded_strategy[i];
         stop_turns[i] = decoded_stop[i];

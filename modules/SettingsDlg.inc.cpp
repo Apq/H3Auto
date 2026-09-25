@@ -2807,6 +2807,39 @@ static void LoadSelectedProfileIntoCells_()
     RebindVisibleCells_();
 }
 
+// 枚举本场人类侧 21 槽部队表（存档部队表 + 读档关联的当前侧）。
+// 初始数量的权威来源是英雄军队 H3Hero::army（战斗中不写回，战后才结算
+// 伤亡，全程保持战前值——ALT+右键看英雄初始部队即读这里）；战斗单位
+// 的 slotIndex 就是军队槽 0..6 下标，按它回查。召唤物/克隆/战争机器
+// 不在军队里，退回 numberAtStart。空槽写 -1/0；界面不显示初始数量。
+static void BuildPanelArmyTable_(int out_types[21], int out_counts[21])
+{
+    for (int i = 0; i < 21; ++i) { out_types[i] = -1; out_counts[i] = 0; }
+    H3CombatManager* mgr = GetCombatMgr();
+    if (!mgr) return;
+    int side = 0;
+    if (mgr->isHuman[0]) side = 0;
+    else if (mgr->isHuman[1]) side = 1;
+    else return;
+    H3Hero* hero = mgr->hero[side];
+    for (int i = 0; i < 21; ++i) {
+        H3CombatCreature& stack = mgr->stacks[side][i];
+        if (stack.type < 0 || stack.numberAlive <= 0) continue;
+        out_types[i] = stack.type;
+        int initial = -1;
+        if (hero) {
+            const int army_slot = stack.slotIndex;
+            if (army_slot >= 0 && army_slot < 7
+                && hero->army.type[army_slot] == stack.type)
+                initial = hero->army.count[army_slot];
+        }
+        if (initial <= 0)
+            initial = (stack.numberAtStart > 0)
+                ? stack.numberAtStart : stack.numberAlive;
+        out_counts[i] = initial;
+    }
+}
+
 // 存档：把当前草稿（含未回写的可见行）写入 DLL 同目录 H3Auto.profiles。
 // 读档：读回 5 套方案草稿并刷新当前方案的卡片。两者都不改生效方案、不暂停。
 static void SaveProfilesToDisk_()
@@ -2814,8 +2847,11 @@ static void SaveProfilesToDisk_()
     // WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
     //     &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
     SaveCurrentCellsToDraft_();
-    const bool ok = SaveProfileStore_(s_p.draft_rules,
-        s_p.draft_protect_strategy, s_p.draft_stop_turns);
+    int army_types[21] = {};
+    int army_counts[21] = {};
+    BuildPanelArmyTable_(army_types, army_counts);
+    const bool ok = SaveProfileStore_(army_types, army_counts,
+        s_p.draft_rules, s_p.draft_protect_strategy, s_p.draft_stop_turns);
     WriteLog("[Panel] 方案%s：%s", ok ? "已存档" : "存档失败", g_profiles_path);
     snprintf(s_status_text, sizeof(s_status_text), "%s",
         ok ? "存档成功" : "存档失败");
@@ -2830,9 +2866,27 @@ static void LoadProfilesFromDisk_()
     AutoStackRule (*loaded)[MAX_STACKS] = new AutoStackRule[PROFILE_COUNT][MAX_STACKS]();
     uint8_t strategies[PROFILE_COUNT] = {};
     uint16_t stop_turns[PROFILE_COUNT] = {};
-    const bool ok = LoadProfileStore_(loaded, strategies, stop_turns);
+    int arch_types[21] = {};
+    int arch_counts[21] = {};
+    const bool ok = LoadProfileStore_(arch_types, arch_counts, loaded,
+        strategies, stop_turns);
     if (ok) {
-        memcpy(s_p.draft_rules, loaded, sizeof(s_p.draft_rules));
+        // 三轮关联：存档部队 → 当前部队槽。未匹配的当前槽保留原草稿
+        // （含打开面板时的初始化），未匹配的存档规则直接丢弃。
+        int cur_types[21] = {};
+        int cur_counts[21] = {};
+        BuildPanelArmyTable_(cur_types, cur_counts);
+        int arch_for_cur[21] = {};
+        H3AutoPolicy::BuildArchiveSlotMapByRounds(arch_types, arch_counts,
+            cur_types, cur_counts, arch_for_cur);
+        int matched = 0;
+        for (int cur = 0; cur < 21; ++cur) {
+            const int arch = arch_for_cur[cur];
+            if (arch < 0) continue;
+            ++matched;
+            for (int p = 0; p < PROFILE_COUNT; ++p)
+                s_p.draft_rules[p][cur] = loaded[p][arch];
+        }
         memcpy(s_p.draft_protect_strategy, strategies,
             sizeof(s_p.draft_protect_strategy));
         memcpy(s_p.draft_stop_turns, stop_turns, sizeof(s_p.draft_stop_turns));
@@ -2844,6 +2898,8 @@ static void LoadProfilesFromDisk_()
         s_protect_dd_open = false;
         s_protect_dd_hover = -1;
         LoadSelectedProfileIntoCells_();
+        WriteLog("[Panel] 读档关联：三轮匹配 %d/21 槽，未匹配存档槽已忽略",
+            matched);
     }
     delete[] loaded;
     WriteLog("[Panel] 方案%s：%s", ok ? "已读档" : "读档失败（文件不存在或损坏）",

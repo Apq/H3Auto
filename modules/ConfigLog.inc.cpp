@@ -288,13 +288,14 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 
 // 成功返回 true。文件不存在或内容损坏返回 false（草稿保持原样）。
 // SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
-static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
+static bool SaveProfileStoreRaw_(const int army_types[21],
+    const int army_counts[21], const AutoStackRule rules[5][21],
     const uint8_t strategies[5], const uint16_t stop_turns[5])
 {
     char* text = new char[64 * 1024];
     // WriteLog("[Panel] 保存：开始编码");
-    const int n = H3AutoPolicy::EncodeProfileStoreText(strategies, rules,
-        stop_turns, text, 64 * 1024);
+    const int n = H3AutoPolicy::EncodeProfileStoreText(army_types,
+        army_counts, strategies, rules, stop_turns, text, 64 * 1024);
     // WriteLog("[Panel] 保存：编码完成 n=%d", n);
     bool ok = false;
     if (n > 0) {
@@ -308,14 +309,16 @@ static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
     return ok;
 }
 
-static bool SaveProfileStore_(const AutoStackRule rules[5][21],
+static bool SaveProfileStore_(const int army_types[21],
+    const int army_counts[21], const AutoStackRule rules[5][21],
     const uint8_t strategies[5], const uint16_t stop_turns[5])
 {
     bool ok = false;
     DWORD code = 0;
     void* fault = nullptr;
     __try {
-        ok = SaveProfileStoreRaw_(rules, strategies, stop_turns);
+        ok = SaveProfileStoreRaw_(army_types, army_counts, rules,
+            strategies, stop_turns);
     } __except (code = GetExceptionCode(),
                 fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
                 EXCEPTION_EXECUTE_HANDLER) {
@@ -325,8 +328,8 @@ static bool SaveProfileStore_(const AutoStackRule rules[5][21],
     return ok;
 }
 
-static bool LoadProfileStore_(AutoStackRule rules[5][21],
-    uint8_t strategies[5], uint16_t stop_turns[5])
+static bool LoadProfileStore_(int army_types[21], int army_counts[21],
+    AutoStackRule rules[5][21], uint8_t strategies[5], uint16_t stop_turns[5])
 {
     FILE* fp = nullptr;
     if (fopen_s(&fp, g_profiles_path, "rb") != 0 || !fp) return false;
@@ -337,8 +340,8 @@ static bool LoadProfileStore_(AutoStackRule rules[5][21],
     bool ok = false;
     if (n > 0 && !truncated) {
         text[n] = 0;
-        ok = H3AutoPolicy::DecodeProfileStoreText(text, strategies, rules,
-            stop_turns);
+        ok = H3AutoPolicy::DecodeProfileStoreText(text, army_types,
+            army_counts, strategies, rules, stop_turns);
     }
     delete[] text;
     return ok;

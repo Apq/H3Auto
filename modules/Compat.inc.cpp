@@ -23,7 +23,9 @@ struct _CreatureInfoCompat {
 };
 
 struct _BattleStack_ {
-    char _pad0[0x34];
+    char _pad0[0x28];
+    int  clone_id;            // 0x28 = H3CombatCreature::cloneId；>0 视为克隆/镜像体
+    char _pad2C[0x34 - 0x2C];
     int  creature_id;
     int  hex_ix;
     int  animation_ix;

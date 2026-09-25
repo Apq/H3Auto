@@ -222,8 +222,10 @@ void TestStableStackIdentity()
         "war machine identity uses machine kind");
     Check(tower1.occurrence == 1,
         "duplicate war machines use occurrence");
-    Check(summon.kind == STACK_ID_NONE,
-        "summon has no cross-attempt identity");
+    Check(summon.kind == STACK_ID_SUMMON,
+        "summon gets within-battle identity");
+    Check(StableStackIdentityEquals(summon, MakeStableStackIdentity(0, -1, 10, 0)),
+        "summon identity comparable within battle");
 
     const StableStackIdentity previous[5] = {
         army0, ballista, army6, tower1, summon
@@ -235,7 +237,151 @@ void TestStableStackIdentity()
     BuildStableStackSlotRemap(previous, 5, current, 5, remap);
     Check(remap[0] == 3 && remap[1] == 2 && remap[3] == 0
         && remap[4] == 1, "stable identities remap reordered battle slots");
-    Check(remap[2] == -1, "dynamic stack does not inherit a rule");
+    Check(remap[2] == -1, "summon does not carry rule across retry");
+}
+
+void TestArchiveSlotMapRounds()
+{
+    // 完全相同：第一轮全中，映射恒等。空槽用 -1（真实存档口径）。
+    {
+        int types[21]; int counts[21];
+        for (int i = 0; i < 21; ++i) { types[i] = -1; counts[i] = 0; }
+        types[0] = 10; counts[0] = 20;
+        types[1] = 11; counts[1] = 30;
+        types[2] = 12; counts[2] = 40;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(types, counts, types, counts, map);
+        Check(map[0] == 0 && map[1] == 1 && map[2] == 2,
+            "identical armies map identity");
+        Check(map[3] == -1, "empty slots stay unmatched");
+    }
+    // 换槽 + 数量区分：槽位 0/1 互换类型，第一轮全不中；
+    // 第二轮按类型+数量把各自规则搬回原部队。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 20; arch_t[1] = 11; arch_c[1] = 30;
+        cur_t[0] = 11; cur_c[0] = 30; cur_t[1] = 10; cur_c[1] = 20;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 1 && map[1] == 0,
+            "swapped stacks remap by type+count");
+    }
+    // 同类型多组：当前侧同槽类型错开时，第二轮按数量配对。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 11; arch_c[0] = 50;
+        arch_t[1] = 10; arch_c[1] = 9;
+        arch_t[2] = 10; arch_c[2] = 7;
+        cur_t[0] = 10; cur_c[0] = 9;
+        cur_t[1] = 99; cur_c[1] = 1;
+        cur_t[2] = 10; cur_c[2] = 7;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 1 && map[2] == 2 && map[1] == -1,
+            "same-type stacks pair by count");
+    }
+    // 第三轮兜底：同类型不同数量仍关联；同槽换类型走第二轮。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 20;
+        arch_t[1] = 11; arch_c[1] = 1;
+        cur_t[0] = 11; cur_c[0] = 1;
+        cur_t[1] = 10; cur_c[1] = 15;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 1 && map[1] == 0,
+            "type-only fallback matches across slots");
+    }
+    // 同类型两组互换：第一轮降级（类型出现 2 次），第二轮按数量把
+    // 规则带回原部队。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 20;
+        arch_t[1] = 10; arch_c[1] = 30;
+        cur_t[0] = 10; cur_c[0] = 30;
+        cur_t[1] = 10; cur_c[1] = 20;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 1 && map[1] == 0,
+            "duplicate-type swap pairs by count, not slot");
+    }
+    // 同类型两组 + 槽位数量全对：轮 1 三项全等直配，不降级。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 20;
+        arch_t[1] = 10; arch_c[1] = 30;
+        cur_t[0] = 10; cur_c[0] = 20;
+        cur_t[1] = 10; cur_c[1] = 30;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 0 && map[1] == 1,
+            "slot+type+count triple matches without demotion");
+    }
+    // 没换槽、规模变了：轮 2 配不上（数量不等）→ 轮 3 按槽位配。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 20;
+        arch_t[1] = 11; arch_c[1] = 5;
+        cur_t[0] = 10; cur_c[0] = 25;
+        cur_t[1] = 11; cur_c[1] = 5;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 0 && map[1] == 1,
+            "same-slot resized stack pairs by slot");
+    }
+    // 存档多出的部队：丢弃（当前侧找不到映射）。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 1;
+        arch_t[1] = 11; arch_c[1] = 1;
+        arch_t[2] = 12; arch_c[2] = 1;
+        cur_t[0] = 11; cur_c[0] = 1;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == 1 && map[1] == -1 && map[2] == -1,
+            "extra archive stacks are dropped");
+    }
+    // 第一轮要求同槽同类型：同槽不同类型不给身份，避免错配。
+    {
+        int arch_t[21]; int arch_c[21];
+        int cur_t[21]; int cur_c[21];
+        for (int i = 0; i < 21; ++i) {
+            arch_t[i] = -1; arch_c[i] = 0; cur_t[i] = -1; cur_c[i] = 0;
+        }
+        arch_t[0] = 10; arch_c[0] = 5;
+        cur_t[0] = 11; cur_c[0] = 5;
+        int map[21] = {};
+        BuildArchiveSlotMapByRounds(arch_t, arch_c, cur_t, cur_c, map);
+        Check(map[0] == -1, "different creature types never match");
+    }
 }
 
 void TestFailedActionPlayerHandoffEligibility()
@@ -389,17 +535,30 @@ void TestProfileStoreRoundtrip()
     rules[4][20].action = AA_RANGED_ATTACK;
     rules[4][20].target.selector = SEL_RANGED_SPEED;
     uint16_t stop_turns[PROFILE_STORE_COUNT] = { 10, 0, 25, 999, 7 };
+    int army_types[PROFILE_STORE_SLOTS];
+    int army_counts[PROFILE_STORE_SLOTS] = {};
+    for (int i = 0; i < PROFILE_STORE_SLOTS; ++i) army_types[i] = -1;
+    army_types[0] = 10; army_counts[0] = 20;
+    army_types[1] = 11; army_counts[1] = 30;
+    army_types[2] = 12; army_counts[2] = 40;
 
     char text[64 * 1024] = {};
-    const int written = EncodeProfileStoreText(strategies, rules, stop_turns,
-        text, sizeof(text));
+    const int written = EncodeProfileStoreText(army_types, army_counts,
+        strategies, rules, stop_turns, text, sizeof(text));
     Check(written > 0, "profile store encodes");
 
     uint8_t out_strategies[PROFILE_STORE_COUNT] = {};
     uint16_t out_stop[PROFILE_STORE_COUNT] = {};
+    int out_types[PROFILE_STORE_SLOTS] = {};
+    int out_counts[PROFILE_STORE_SLOTS] = {};
     AutoStackRule out_rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
-    Check(DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
+    Check(DecodeProfileStoreText(text, out_types, out_counts, out_strategies,
+            out_rules, out_stop),
         "profile store decodes");
+    Check(out_types[0] == 10 && out_counts[0] == 20
+        && out_types[2] == 12 && out_counts[2] == 40,
+        "army table roundtrip");
+    Check(out_types[3] == -1 && out_counts[3] == 0, "empty slot roundtrip");
     for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
         Check(out_strategies[p] == strategies[p], "strategy roundtrip");
     Check(out_rules[2][7].action == AA_MELEE_ATTACK, "rule action roundtrip");
@@ -419,11 +578,12 @@ void TestProfileStoreRoundtrip()
     for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
         Check(out_stop[p] == stop_turns[p], "stop turns roundtrip");
 
-    Check(!DecodeProfileStoreText("H3AP1 1 2 3", out_strategies, out_rules,
-            out_stop),
+    Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
+            out_strategies, out_rules, out_stop),
         "truncated store rejected");
     text[0] = 'X';
-    Check(!DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
+    Check(!DecodeProfileStoreText(text, out_types, out_counts, out_strategies,
+            out_rules, out_stop),
         "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
     Check(!AutoStopShouldYield(10, 1000, 990, 1), "slow damage stays running");
@@ -445,6 +605,7 @@ int main()
     TestTargetNormalization();
     TestResultLifecycle();
     TestStableStackIdentity();
+TestArchiveSlotMapRounds();
     TestFailedActionPlayerHandoffEligibility();
     TestLegacySpellSlotCompatibility();
     TestProtect();

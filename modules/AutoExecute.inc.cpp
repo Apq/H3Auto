@@ -299,6 +299,11 @@ static int  g_protect_checked_turn = -1;
 static int g_enemy_hp_turn[2] = { -1, -1 };
 static int g_enemy_hp_value[2] = {};
 
+static bool CreatureInfoIndexValid_(int creature_id)
+{
+    return creature_id >= 0 && creature_id <= 150;
+}
+
 static int ResolveHumanSide_(_BattleMgr_* mgr)
 {
     if (!mgr) return -1;
@@ -328,27 +333,23 @@ static void BuildStableIdentitiesFromBattle_(_BattleMgr_* mgr, int side,
     memset(out, 0, sizeof(H3AutoPolicy::StableStackIdentity) * 21);
     if (!mgr || side < 0 || side > 1) return;
 
-    int occurrences[5] = {};
+    // 同类型出现序号：战争机器与召唤物共用（按生物 id 计数）。
+    int occurrences[151 + 1] = {};
     for (int i = 0; i < 21; ++i) {
         _BattleStack_* s = &mgr->stack[side][i];
         if (s->creature_id < 0) continue;
+        if (!CreatureInfoIndexValid_(s->creature_id)) continue;
         if (s->count_at_start <= 0 && s->count_current <= 0) continue;
 
         int occurrence = 0;
-        if (H3AutoPolicy::IsWarMachineType(s->creature_id)) {
-            int kind = 0;
-            switch (s->creature_id) {
-            case H3AutoPolicy::CREATURE_CATAPULT:       kind = 0; break;
-            case H3AutoPolicy::CREATURE_BALLISTA:       kind = 1; break;
-            case H3AutoPolicy::CREATURE_FIRST_AID_TENT: kind = 2; break;
-            case H3AutoPolicy::CREATURE_AMMO_CART:      kind = 3; break;
-            case H3AutoPolicy::CREATURE_ARROW_TOWER:    kind = 4; break;
-            default: break;
-            }
-            occurrence = occurrences[kind]++;
-        }
+        const int cid = s->creature_id;
+        if (cid <= 150)
+            occurrence = occurrences[cid]++;
+        // 克隆体可能继承本体的 source_army_slot：先判克隆，一律按召唤物
+        // 身份（本场内执行，重打丢弃），避免与本体身份冲突。
+        const int army_slot = (s->clone_id > 0) ? -1 : s->source_army_slot;
         out[i] = H3AutoPolicy::MakeStableStackIdentity(side,
-            s->source_army_slot, s->creature_id, occurrence);
+            army_slot, s->creature_id, occurrence);
     }
 }
 
@@ -469,12 +470,8 @@ static void UpdateStackTracking_()
 static bool ActiveStackMatchesTrack_(_BattleStack_* self)
 {
     if (!self) return false;
-    // 尚未绑定本场跟踪时：仅允许人类侧活动单位走旧逻辑。
-    if (!g_track_active) {
-        _BattleMgr_* mgr = o_BattleMgr;
-        const int human = ResolveHumanSide_(mgr);
-        return human >= 0 && self->def_group_ix == human && self->count_current > 0;
-    }
+    if (!g_track_active)
+        return false;
 
     const int idx = self->army_slot_ix;
     if (idx < 0 || idx >= 21) return false;
@@ -1213,6 +1210,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         if (!te.bound || te.side != side) continue;
         _BattleStack_* st = &mgr->stack[side][slot];
         if (!st || st->count_at_start <= 0) continue;
+        if (!CreatureInfoIndexValid_(st->creature_id)) continue;
         const bool dead = st->count_current <= 0;
         if (dead && StackHex_(st) < 0) continue;          // 没有可施法的尸体格
 
@@ -1254,12 +1252,13 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     const int best_wound = H3AutoPolicy::WoundValue(cands[picked]);
 
     _BattleStack_* st = &mgr->stack[side][best_slot];
-    // WriteLog("[Protect] turn=%d strategy=%d slot=%d cid=0x%X wound=%d hp=%d spell=%d exp=%d; casting",
-    //     turn, strategy, best_slot, st->creature_id, best_wound, best_remaining,
-    //     best_spell, best_exp);
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
-    cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
-    // WriteLog("[Protect] cast returned slot=%d", best_slot);
+    // 原版施法失败不能逃出战斗回调。
+    __try {
+        cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
+    } __except (1) {
+        return false;
+    }
     return true;
 }
 
@@ -1357,9 +1356,11 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         g_stop_turns[p] = static_cast<uint16_t>(turns);
     }
     g_active_profile = active_profile;
-    memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
+
+    // 身份按本场现编（含召唤物：本场内可执行，重打重排自动丢弃其规则）。
     const int side = ResolveHumanSide_(o_BattleMgr);
     BuildStableIdentitiesFromBattle_(o_BattleMgr, side, g_rule_identities);
+    memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     if (g_battle_attempt_id <= 0) g_battle_attempt_id = 1;
     int spell_rules = 0;
     int action_rules = 0;
@@ -1411,6 +1412,7 @@ static H3AutoPolicy::TargetCandidate TargetCandidateOf_(_BattleStack_* t)
 {
     H3AutoPolicy::TargetCandidate c = {};
     if (!t) return c;
+    if (!CreatureInfoIndexValid_(t->creature_id)) return c;
     c.count_current = t->count_current;
     c.count_at_start = t->count_at_start;
     c.hit_points = t->creature.hit_points;
@@ -1447,7 +1449,8 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
             _BattleStack_* t = &mgr->stack[side][i];
             if (t == self) continue;
             if (t->count_current <= 0 || t->count_at_start <= 0) continue;
-            if (t->creature_id < 0 || IsWarMachineCid_(t->creature_id)) continue;
+            if (!CreatureInfoIndexValid_(t->creature_id)
+                || IsWarMachineCid_(t->creature_id)) continue;
             if (require_wounded
                 && t->lost_hp <= 0 && t->count_current >= t->count_at_start)
                 continue;
@@ -1686,6 +1689,12 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
     if (!enemy) {
         WriteLog("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
             attack_hex, self->army_slot_ix);
+        return false;
+    }
+    if (!IsMoveTargetReachable_(mgr, self, stand_hex)
+        && StackHex_(self) != stand_hex) {
+        WriteLog("[Auto] melee stand unreachable slot=%d stand=%d attack=%d",
+            self->army_slot_ix, stand_hex, attack_hex);
         return false;
     }
 
