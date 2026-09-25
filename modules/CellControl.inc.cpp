@@ -1282,6 +1282,34 @@ enum CellHitArea
     CELL_HIT_SPELL_BASE      = 300,
 };
 
+// 命中区 → 状态栏提示文案（方案 A tips 的表格内细分）。
+// 返回静态字符串；未命中返回 nullptr。
+static const char* CellControl_TipForHit(CellHitArea hit)
+{
+    switch (hit) {
+    case CELL_HIT_ACTION:
+        return "行动：本部队轮到时自动执行的动作；手动=交给玩家";
+    case CELL_HIT_SELECTOR:
+        return "目标选择：多个候选时按此排序挑选（远程/急救各有自己的选项）";
+    case CELL_HIT_CHECKBOX:
+        return "允许降级为防御：目标不可达或动作失败时自动防御，否则交回玩家";
+    case CELL_HIT_PROTECT_CHECKBOX:
+        return "加入保活队列：勾选后参与方案级保活策略的复活判定";
+    case CELL_HIT_DROP:
+        return "选择一项；点外部或再点一次收起";
+    default:
+        break;
+    }
+    if (hit >= CELL_HIT_SPELL_BASE && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY)
+        return "行动前循环施法：本部队行动前按槽位顺序投快捷施法键（1-9,0）；"
+               "英雄每回合只施一次，已施法则跳过；右键槽位删除";
+    if (hit >= CELL_HIT_MOVE_WP_BASE && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY)
+        return "循环移动：按槽位顺序走向战场格，走完一轮从头再来；右键槽位删除";
+    if (hit >= CELL_HIT_MELEE_PAIR_BASE && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY)
+        return "循环近战：每槽一对「站立格→攻击格」，按序循环执行；右键槽位删除";
+    return nullptr;
+}
+
 static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int local_y)
 {
     if (!ctrl) return CELL_HIT_NONE;

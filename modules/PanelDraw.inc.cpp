@@ -323,9 +323,27 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 }
 
 // ===== 方案 A tips：悬停目标 → 状态栏提示文案 =====
-// 标题带的热键行键名读配置，动态拼装；其余矩形表驱动。
+// 表格内按可见卡片细分到控件（行动/施法槽/近战/移动/保活勾选等），
+// 命不中控件再退回面板级矩形表。
 static const char* PanelTipAt_(int px, int py)
 {
+    const int first_item = s_p.scroll_row * COLS;
+    for (int i = 0; i < CELL_COUNT; ++i) {
+        if (first_item + i >= s_p.count) break;
+        RECT cRc = CellRect(i);
+        if (px < cRc.left || px >= cRc.right || py < cRc.top || py >= cRc.bottom)
+            continue;
+        CellControl* ctrl = &s_p.cells[i];
+        if (!ctrl->has_data) continue;
+        const CellHitArea hit = CellControl_HitTestInCell(ctrl, px - cRc.left, py - cRc.top);
+        if (const char* tip = CellControl_TipForHit(hit))
+            return tip;
+        // 标签「行动前循环施法:」本身不在槽位命中区内，整行都给施法说明。
+        if (py >= cRc.top + CC_SPELL_Y && py < cRc.top + CC_SPELL_Y + CC_ROW_H
+            && px >= cRc.left + CC_COL2_X && px < cRc.left + CC_COL3_RIGHT)
+            return CellControl_TipForHit(
+                static_cast<CellHitArea>(CELL_HIT_SPELL_BASE));
+    }
     if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
         static char title_tip[192];
         char t1[16], t2[16], t3[16];
@@ -348,8 +366,6 @@ static const char* PanelTipAt_(int px, int py)
           "保活策略：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量" },
         { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30,
           "停止：敌方预计剩余回合 ≤ 此值时切回手动；0=关闭，最大 999" },
-        { GRID_FRAME_X, GRID_FRAME_Y, GRID_FRAME_W, GRID_FRAME_H,
-          "＋ 添加规则：施法/近战/移动按提示设置；删除：槽位上右键" },
         { OK_X, BTN_Y, BTN_W, BTN_H,
           "勾号：草稿生效并关闭面板（不写盘）；有效期同一场战斗（含取消重打）" },
         { CANCEL_X, BTN_Y, BTN_W, BTN_H,
