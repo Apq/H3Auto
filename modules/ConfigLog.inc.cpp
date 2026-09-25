@@ -57,11 +57,11 @@ static char* g_profiles_prefix = new char[kPathCap_]; // 每槽一文件：前�
 static char* g_last_profile_path = new char[kPathCap_]; // 编号记忆：H3Auto.last.ini
 static wchar_t* g_log_path_w = new wchar_t[kPathCap_ / 2];
 
-// 拼出编号 N（1..5）的存档文件全路径。
+// 拼出编号 N（1..5）的存档文件全路径：H3Auto.profilesN.ini。
 void ProfileSlotPath(int slot, char* buf, int buf_size)
 {
     if (slot < 0 || slot >= 5) slot = 0;
-    _snprintf(buf, buf_size - 1, "%s%d", g_profiles_prefix, slot + 1);
+    _snprintf(buf, buf_size - 1, "%s%d.ini", g_profiles_prefix, slot + 1);
     if (buf_size > 0) buf[buf_size - 1] = 0;
 }
 
