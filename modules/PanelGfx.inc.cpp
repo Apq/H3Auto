@@ -60,8 +60,8 @@ static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
         x, y, w, h, (eTextColor)color, align);
 }
 
-// 富文本：{颜色名} 或 {XX} 切换颜色，整行居中绘制。
-// 颜色名：金 绿 红 白 普通 灰 黄 蓝 青 高亮；XX 为两位十六进制 eTextColor 值。
+// 富文本：{颜色名}、{#RRGGBB}、{0xRRGGBB}、{rgb(R,G,B)} 或 {XX} 切换颜色，整行居中绘制。
+// RGB 格式映射到当前字体调色板中距离最近的颜色（TextDraw 本质是调色板索引）。
 // 段数有上限，超出的标记按普通文字处理。
 static void DrawRichTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     int x, int y, int w, int h, INT32 default_color)
@@ -92,14 +92,48 @@ static void DrawRichTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
         return -1;
     };
 
+    // RGB → 当前字体调色板中距离最近的颜色索引。
+    // 254/255 在 union 里是 palette32 指针而非颜色，只遍历 0..253。
+    auto rgb_color = [&](int r, int g, int b) -> INT32 {
+        INT32 best = (INT32)eTextColor::REGULAR;
+        uint64_t best_dist = UINT64_MAX;
+        for (int i = 0; i < 254; ++i) {
+            const DWORD got = fnt->palette.color[i].GetRGB888();
+            const int dr = (int)((got >> 16) & 0xFF) - r;
+            const int dg = (int)((got >> 8) & 0xFF) - g;
+            const int db = (int)(got & 0xFF) - b;
+            const uint64_t dist = (uint64_t)(dr * dr + dg * dg + db * db);
+            if (dist < best_dist) { best_dist = dist; best = i; }
+        }
+        return best;
+    };
+
+    // {#RRGGBB} / {0xRRGGBB} / {rgb(R,G,B)} → 最近字体调色板索引。
+    auto rgb_mark_color = [&](const char* s, int len) -> INT32 {
+        unsigned int hex = 0;
+        if (len == 7 && s[0] == '#'
+            && sscanf(s + 1, "%06x", &hex) == 1)
+            return rgb_color((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF);
+        if (len == 8 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
+            && sscanf(s + 2, "%06x", &hex) == 1)
+            return rgb_color((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF);
+        int r = -1, g = -1, b = -1;
+        if (len >= 10 && sscanf(s, "rgb(%d,%d,%d)", &r, &g, &b) == 3
+            && r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255)
+            return rgb_color(r, g, b);
+        return -1;
+    };
+
     // 当前位置若是颜色标记，返回标记长度并写出颜色；否则返回 0。
     auto color_mark = [&](const char* p, INT32* out_color) -> int {
         if (p[0] != '{') return 0;
         const char* end = strchr(p + 1, '}');
-        if (!end || end - p > 9) return 0;
+        if (!end || end - p > 18) return 0;
         const int len = (int)(end - (p + 1));
         const INT32 named = named_color(p + 1, len);
         if (named >= 0) { *out_color = named; return len + 2; }
+        const INT32 rgb = rgb_mark_color(p + 1, len);
+        if (rgb >= 0) { *out_color = rgb; return len + 2; }
         if (len == 2 && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
             *out_color = (INT32)strtol(p + 1, nullptr, 16);
             return 4;
