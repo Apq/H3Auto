@@ -349,7 +349,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         }
     }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
+        // WriteLog("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -496,8 +496,8 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
                     }
                 }
             }
-            WriteLog("[Panel] pick click abs=(%d,%d) rel=(%d,%d) hex=%d",
-                abs_x, abs_y, rel_x, rel_y, hex);
+            // WriteLog("[Panel] pick click abs=(%d,%d) rel=(%d,%d) hex=%d",
+            //     abs_x, abs_y, rel_x, rel_y, hex);
             DoPickCapture_(hex, false);
         }
         // 其他鼠标消息（包括 LCLICK_OUTSIDE）统统吞掉，不传透。
@@ -1536,9 +1536,9 @@ static void DrawMeleePickMarker_()
         static int s_marker_log_hex = -1;
         if (s_marker_log_hex != s_melee_pick_stand_hex) {
             s_marker_log_hex = s_melee_pick_stand_hex;
-            WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
-                s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
-                abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
+            // WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
+            //     s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
+            //     abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         WriteLog("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
@@ -2716,8 +2716,8 @@ static void LoadSelectedProfileIntoCells_()
 // 读档：读回 5 套方案草稿并刷新当前方案的卡片。两者都不改生效方案、不暂停。
 static void SaveProfilesToDisk_()
 {
-    WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
-        &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
+    // WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
+    //     &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
     SaveCurrentCellsToDraft_();
     const bool ok = SaveProfileStore_(s_p.draft_rules,
         s_p.draft_protect_strategy, s_p.draft_stop_turns);
@@ -2820,7 +2820,7 @@ void OpenSettingsPanel_()
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 
     H3CombatManager* mgr = GetCombatMgr();
-    WriteLog("[Panel] 打开阶段：开始枚举部队");
+    // WriteLog("[Panel] 打开阶段：开始枚举部队");
     if (mgr) {
         // 当前人类玩家侧：优先 currentActiveSide，否则 0。
         int side = 0;
@@ -2852,14 +2852,14 @@ void OpenSettingsPanel_()
         }
     }
     RebindVisibleCells_();
-    WriteLog("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
+    // WriteLog("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
     InstallBattleInputBlocker_();
-    WriteLog("[Panel] 打开阶段：输入屏障完成");
+    // WriteLog("[Panel] 打开阶段：输入屏障完成");
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
-    WriteLog("[Panel] 打开阶段：开始绘制");
+    // WriteLog("[Panel] 打开阶段：开始绘制");
     DrawPanelToBuffer_();
-    WriteLog("[Panel] 打开阶段：绘制完成");
+    // WriteLog("[Panel] 打开阶段：绘制完成");
     // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
     const DWORD panel_thread = GetWindowThreadProcessId(
         *reinterpret_cast<HWND*>(0x699650), nullptr);
@@ -2870,8 +2870,8 @@ void OpenSettingsPanel_()
     if (!s_mouse_hook)
         s_mouse_hook = SetWindowsHookExA(WH_MOUSE, PanelMouseHook_, g_hModule,
             panel_thread);
-    WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d) s_p=%p",
-        s_p.count, s_p.x, s_p.y, &s_p);
+    // WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d) s_p=%p",
+    //     s_p.count, s_p.x, s_p.y, &s_p);
 }
 
 void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer_(); }

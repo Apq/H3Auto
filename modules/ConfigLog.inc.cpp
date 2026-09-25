@@ -292,10 +292,10 @@ static bool SaveProfileStoreRaw_(const AutoStackRule rules[5][21],
     const uint8_t strategies[5], const uint8_t stop_turns[5])
 {
     char* text = new char[64 * 1024];
-    WriteLog("[Panel] 保存：开始编码");
+    // WriteLog("[Panel] 保存：开始编码");
     const int n = H3AutoPolicy::EncodeProfileStoreText(strategies, rules,
         stop_turns, text, 64 * 1024);
-    WriteLog("[Panel] 保存：编码完成 n=%d", n);
+    // WriteLog("[Panel] 保存：编码完成 n=%d", n);
     bool ok = false;
     if (n > 0) {
         FILE* fp = nullptr;
@@ -319,7 +319,7 @@ static bool SaveProfileStore_(const AutoStackRule rules[5][21],
     } __except (code = GetExceptionCode(),
                 fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
                 EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
+        // WriteLog("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
         ok = false;
     }
     return ok;

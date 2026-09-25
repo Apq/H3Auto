@@ -1005,11 +1005,11 @@ static bool TriggerQuickSpellDigit_(int digit)
         is_human = (side >= 0 && side <= 1) ? raw[0x54A6 + side] : -1;
         tactics = raw[0x13D68];
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    WriteLog("[Spell] request digit=%d slot=%d spell=%d targetHex=%d targetStack=%p flags=0x%X side=%d human=%d tactics=%d hero=%p casted=%d mana=%d action=%d",
-        digit, slot, spell_id, target_hex, target_stack, spell_flags,
-        side, is_human, tactics,
-        (side >= 0 && side <= 1) ? mgr->hero[side] : nullptr,
-        GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
+    // WriteLog("[Spell] request digit=%d slot=%d spell=%d targetHex=%d targetStack=%p flags=0x%X side=%d human=%d tactics=%d hero=%p casted=%d mana=%d action=%d",
+    //     digit, slot, spell_id, target_hex, target_stack, spell_flags,
+    //     side, is_human, tactics,
+    //     (side >= 0 && side <= 1) ? mgr->hero[side] : nullptr,
+    //     GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
 
     if (spell_id < 0 || spell_id >= 70 || (spell_flags & 1) == 0)
         WriteLog("[Spell] SoD_SP slot appears empty/invalid; still posting digit for other hooks slot=%d spell=%d flags=0x%X",
@@ -1028,8 +1028,8 @@ static bool TriggerQuickSpellDigit_(int digit)
     __try {
         const BOOL down_ok = PostMessageA(hwnd, WM_KEYDOWN, win_vk, key_down);
         const BOOL up_ok = PostMessageA(hwnd, WM_KEYUP, win_vk, key_up);
-        WriteLog("[Spell] posted quick key digit=%d h3vk=%d spell=%d hwnd=%p down=%d up=%d",
-            digit, h3vk, spell_id, hwnd, down_ok ? 1 : 0, up_ok ? 1 : 0);
+        // WriteLog("[Spell] posted quick key digit=%d h3vk=%d spell=%d hwnd=%p down=%d up=%d",
+        //     digit, h3vk, spell_id, hwnd, down_ok ? 1 : 0, up_ok ? 1 : 0);
         if (!down_ok || !up_ok)
             return false;
         return true;
@@ -1254,12 +1254,12 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     const int best_wound = H3AutoPolicy::WoundValue(cands[picked]);
 
     _BattleStack_* st = &mgr->stack[side][best_slot];
-    WriteLog("[Protect] turn=%d strategy=%d slot=%d cid=0x%X wound=%d hp=%d spell=%d exp=%d; casting",
-        turn, strategy, best_slot, st->creature_id, best_wound, best_remaining,
-        best_spell, best_exp);
+    // WriteLog("[Protect] turn=%d strategy=%d slot=%d cid=0x%X wound=%d hp=%d spell=%d exp=%d; casting",
+    //     turn, strategy, best_slot, st->creature_id, best_wound, best_remaining,
+    //     best_spell, best_exp);
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
-    WriteLog("[Protect] cast returned slot=%d", best_slot);
+    // WriteLog("[Protect] cast returned slot=%d", best_slot);
     return true;
 }
 
@@ -2064,7 +2064,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0（控制权在玩家路径）。
         // 若需代发动作，在 Hook_BattleMsgProc 入口提交。
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        WriteLog("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
+        // WriteLog("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
     }
     return 0;
 }
