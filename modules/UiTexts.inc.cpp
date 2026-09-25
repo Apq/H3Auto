@@ -54,8 +54,8 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.log_level_opt4", "错误" },
     { "help.pack_btn", "打包日志" },
     { "help.pack_title", "日志已打包" },
-    { "help.pack_ok", "日志已打包成 .7z 并复制为文件，直接到 QQ 聊天框粘贴发送即可。|QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。|（QQ号已同时写在压缩包内的 readme.txt 里，解压即可复制）|%s" },
-    { "help.pack_note", "请把同目录的日志文件发送到：\r\nQQ群：1042362808 / 740338251\r\n或加 QQ：712999712 私发\r\n" },
+    { "help.pack_ok", "日志已打包成 .7z 并复制为文件，直接到 QQ 聊天框粘贴发送即可。|QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。|（QQ号已同时写在压缩包内的 00_说明.txt 里，解压即可复制）|%s" },
+    { "help.pack_note", "请把同目录的日志文件发送到：|QQ群：1042362808 / 740338251|或加 QQ：712999712 私发|" },
     { "help.pack_fail", "{红}打包日志失败：%s" },
     { "help.pack_no_logs", "没有找到日志文件" },
     { "help.pack_clipboard_fail", "zip 已生成但复制路径失败（剪贴板被占用），请手动复制" },
@@ -99,8 +99,9 @@ static const UiTextEntry kUiTextDefaults[] = {
 };
 static const int kUiTextCount = (int)(sizeof(kUiTextDefaults) / sizeof(kUiTextDefaults[0]));
 
-// 覆盖缓冲（lang 文件命中才非空）。
-static char s_ui_overrides[kUiTextCount][192];
+// 覆盖缓冲（lang 文件命中才非空）。512：单条文案含多行说明与路径占位
+// （help.pack_ok 原文 233 字节），192 会在「压缩包内的」处截断。
+static char s_ui_overrides[kUiTextCount][512];
 
 // 取界面文案。键不存在返回 "!!键!!"（开发期立即可见）。
 static const char* T(const char* key)

@@ -184,11 +184,11 @@ static BYTE* LogPackLzma_(const BYTE* src, size_t src_len,
     return dst;
 }
 
-// 复制到剪贴板：CF_HDROP（Explorer 式文件复制，QQ 聊天框 Ctrl+V 直接
-// 发送 zip 文件）+ CF_TEXT（地址栏/记事本可粘贴路径）。失败重试，被占用常见。
+// 复制到剪贴板：只放 CF_HDROP（Explorer 式文件复制，QQ 聊天框 Ctrl+V
+// 直接发送 .7z 文件）。不再附 CF_TEXT：同一次打开剪贴板里再放文本格式，
+// QQ 会优先粘贴路径文字而不是文件。失败重试，被占用常见。
 static bool LogPackCopyToClipboard_(const char* path)
 {
-    const size_t len = strlen(path);
     for (int attempt = 0; attempt < 5; ++attempt) {
         if (!OpenClipboard(nullptr)) {
             Sleep(30);
@@ -221,19 +221,6 @@ static bool LogPackCopyToClipboard_(const char* path)
                 }
             } else {
                 ok = false;
-            }
-        }
-        if (ok) {
-            HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len + 1);
-            if (mem) {
-                char* dst = (char*)GlobalLock(mem);
-                if (dst) {
-                    memcpy(dst, path, len + 1);
-                    GlobalUnlock(mem);
-                    if (SetClipboardData(CF_TEXT, mem) == nullptr) GlobalFree(mem);
-                } else {
-                    GlobalFree(mem);
-                }
             }
         }
         CloseClipboard();
@@ -322,18 +309,26 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         done = i + 1;
     }
     // 发送说明：UTF-8 带 BOM 的 txt（记事本双击即正确显示，QQ 号可复制）。
+    // 文案键用 | 记换行位（ini 值存不了真换行），写入前还原成 CRLF。
     {
         char note[512];
         _snprintf(note, sizeof(note) - 1, "%s", T("help.pack_note"));
         note[sizeof(note) - 1] = 0;
-        const int note_len = (int)strlen(note);
-        const int total_len = 3 + note_len;
+        char expanded[768];
+        int elen = 0;
+        for (const char* c = note; *c && elen < (int)sizeof(expanded) - 2; ++c) {
+            if (*c == '|') { expanded[elen++] = (char)13; expanded[elen++] = (char)10; }
+            else expanded[elen++] = *c;
+        }
+        expanded[elen] = 0;
+        const int total_len = 3 + elen;
         BYTE* nd = new(std::nothrow) BYTE[total_len];
         if (!nd) { _snprintf(fail_reason, reason_size - 1, "alloc"); goto bail; }
         nd[0] = 0xEF; nd[1] = 0xBB; nd[2] = 0xBF;
-        memcpy(nd + 3, note, note_len);
+        memcpy(nd + 3, expanded, elen);
         const int idx = nLogs;
-        strncpy(entries[idx].name, "readme.txt", sizeof(entries[idx].name) - 1);
+        strncpy(entries[idx].name, "00_说明.txt", sizeof(entries[idx].name) - 1);
+        entries[idx].name[sizeof(entries[idx].name) - 1] = 0;
         datas[idx] = nd;
         unpack_sizes[idx] = (DWORD)total_len;
         crcs[idx] = LogPackCrc_(nd, total_len);
@@ -351,7 +346,10 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         size_t names_bytes = 0;
         for (int i = 0; i < n; ++i) {
             pack_total += pack_lens[i];
-            names_bytes += (strlen(entries[i].name) + 1) * 2; // UTF-16LE + 终止
+            // 名字流是 UTF-16：按宽字符计（含终止 0），不能用 strlen 的字节数。
+            wchar_t wname[64] = {};
+            const int wlen = MultiByteToWideChar(CP_UTF8, 0, entries[i].name, -1, wname, 64);
+            names_bytes += (size_t)(wlen > 0 ? wlen : 1) * 2;
         }
         const size_t header_cap = 128 + (size_t)n * (16 + LZMA_PROPS_SIZE + 24)
             + names_bytes + 16;
@@ -403,8 +401,9 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         h = LogPackPutNum_(h, 1 + names_bytes);        // property size（External+名字流）
         *h++ = 0x00;                                   // External=0
         for (int i = 0; i < n; ++i) {
+            // 文件名是源码 UTF-8 字面量（含中文说明文件名），按 UTF-8 转宽字符。
             wchar_t wname[64] = {};
-            MultiByteToWideChar(CP_ACP, 0, entries[i].name, -1, wname, 64);
+            MultiByteToWideChar(CP_UTF8, 0, entries[i].name, -1, wname, 64);
             for (const wchar_t* w = wname; *w; ++w) {
                 memcpy(h, w, 2); h += 2;
             }
