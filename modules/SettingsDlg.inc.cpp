@@ -2301,13 +2301,18 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         HotkeyDisplayName_(cfg.one_shot_manual_vk),
         HotkeyDisplayName_(cfg.open_settings_vk));
 
+    // 打开方法单独一行：右键「自动战斗」或按配置的打开设置键（键名读配置）。
+    char open_line[160];
+    snprintf(open_line, sizeof(open_line), "打开设置：右键“自动战斗”按钮，或按 %s 键",
+        HotkeyDisplayName_(cfg.open_settings_vk));
+
     const char* help_lines[] = {
-        "打开设置窗口：右键“自动战斗”或按上方的打开设置键",
-        "方案：5 套本场有效，确定才保存",
+        open_line,
+        "方案：5 套本场有效，点勾号才生效",
         "施法/近战/移动：点 ＋ 后按提示设置",
         "保活：卡片勾选入队，策略在方案行下方",
         "停止：敌方预计剩余回合内全灭时交回",
-        "读档/存档：5 套方案写入文件，确定才生效",
+        "读档/存档：仅更新界面显示，点勾号才生效",
         "删除：槽位上右键",
         hotkey_line,
         "设置有效期：取消重打保留，接受结果清除",
