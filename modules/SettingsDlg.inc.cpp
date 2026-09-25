@@ -143,10 +143,10 @@ static const INT32 COL_TARGET_TEXT = 0x0D;
 static struct Panel {
     bool active;
     int x, y;
-    AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS];
+    AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS]; // 5 套草稿（每编号一份，切走不丢）
     uint8_t draft_protect_strategy[PROFILE_COUNT]; // 保活策略草稿（方案级）
-    uint16_t draft_stop_turns[PROFILE_COUNT];     // 自动停止回合草稿，0=关闭，0..999
-    int selected_profile;
+    uint16_t draft_stop_turns[PROFILE_COUNT];       // 自动停止回合草稿，0=关闭，0..999
+    int selected_profile;                           // 当前编号 0..4（存档文件编号 = 界面方案 1-5）
     int pressed_profile;
     int count;                 // 可配置部队总数（可大于可见行）
     CellData items[MAX_STACKS]; // 全部部队快照；可见行从这里按 scroll_row 绑定
@@ -211,6 +211,10 @@ static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到
 static char s_status_text[96] = {};
 static DWORD s_status_until = 0;
 static bool s_status_error = false;
+// 悬停提示（方案 A tips）：命中提示区期间每帧刷新 3 秒保持期；移开后
+// 到期自动清空。结果文字（成功/失败）绘制优先级高于提示，即被新状态替换。
+static char s_tip_text[192] = {};
+static DWORD s_tip_deadline = 0;
 static HHOOK s_kb_hook = nullptr;
 
 // ===== 保活策略下拉（方案级）与数字键拦截 =====
@@ -2364,7 +2368,7 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 
     const char* help_lines[] = {
         open_line,
-        "方案：5 套本场有效，点勾号才生效",
+        "方案 1-5：独立草稿与存档文件，读档/存档针对选中编号",
         "施法/近战/移动：点 ＋ 后按提示设置",
         "停止：敌方预计剩余回合内全灭时交回",
         "读档/存档：仅更新界面显示，点勾号才生效",
@@ -2388,6 +2392,46 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
     DrawTxt(scr, small_font, "关闭",
         bx, by, bw, bh, (INT32)eTextColor::WHITE,
         eTextAlignment::MIDDLE_CENTER);
+}
+
+// ===== 方案 A tips：悬停目标 → 状态栏提示文案 =====
+// 标题带的热键行键名读配置，动态拼装；其余矩形表驱动。
+static const char* PanelTipAt_(int px, int py)
+{
+    if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
+        static char title_tip[192];
+        char t1[16], t2[16], t3[16];
+        snprintf(title_tip, sizeof(title_tip),
+            "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置 · 右键“自动战斗”按钮也可打开",
+            HotkeyDisplayName_(cfg.toggle_manual_vk, t1, sizeof(t1)),
+            HotkeyDisplayName_(cfg.one_shot_manual_vk, t2, sizeof(t2)),
+            HotkeyDisplayName_(cfg.open_settings_vk, t3, sizeof(t3)));
+        return title_tip;
+    }
+    struct TipRect { int x, y, w, h; const char* text; };
+    static const TipRect kTips[] = {
+        { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
+          "读档：从选中编号的存档槽读入草稿（四轮部队关联）；仅更新界面，点勾号才生效" },
+        { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
+          "存档：把草稿写入选中编号的存档槽（其他槽不变）；不改变已生效方案" },
+        { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H,
+          "方案 1-5：各编号独立草稿与存档文件；切换编号各自保留，读档/存档针对选中编号" },
+        { 20, PROTECT_DD_Y - 4, STOP_LABEL_X - 24, 30,
+          "保活策略：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量" },
+        { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30,
+          "停止：敌方预计剩余回合 ≤ 此值时切回手动；0=关闭，最大 999" },
+        { GRID_FRAME_X, GRID_FRAME_Y, GRID_FRAME_W, GRID_FRAME_H,
+          "＋ 添加规则：施法/近战/移动按提示设置；删除：槽位上右键" },
+        { OK_X, BTN_Y, BTN_W, BTN_H,
+          "勾号：草稿生效并关闭面板（不写盘）；有效期同一场战斗（含取消重打）" },
+        { CANCEL_X, BTN_Y, BTN_W, BTN_H,
+          "取消：丢弃全部修改并关闭面板" },
+    };
+    for (const TipRect& t : kTips) {
+        if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
+            return t.text;
+    }
+    return nullptr;
 }
 
 static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
@@ -2656,6 +2700,18 @@ static void DrawPanelToBuffer_()
 
     DrawPanelButtons_(scr);
 
+    // 方案 A tips：命中提示区即刷新文本与 3 秒保持期；移开后不刷新，
+    // 到期自动消失（静止悬停也保持——每帧按光标位置判定，不依赖移动事件）。
+    {
+        const H3POINT cursor = H3POINT::GetCursorPosition();
+        const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y);
+        if (tip) {
+            strncpy(s_tip_text, tip, sizeof(s_tip_text) - 1);
+            s_tip_text[sizeof(s_tip_text) - 1] = 0;
+            s_tip_deadline = GetTickCount() + 3000;
+        }
+    }
+
     if (s_status_text[0]) {
         if (GetTickCount() >= s_status_until)
             s_status_text[0] = 0;
@@ -2665,6 +2721,14 @@ static void DrawPanelToBuffer_()
                 s_status_error ? (INT32)eTextColor::RED
                                : (INT32)eTextColor::LIGHT_GREEN,
                 eTextAlignment::MIDDLE_CENTER);
+    } else if (s_tip_text[0]) {
+        // 提示色用金色：区别于成功（绿）/失败（红）；结果文字出现时优先。
+        if (GetTickCount() >= s_tip_deadline)
+            s_tip_text[0] = 0;
+        else
+            DrawTxt(scr, GetSmallFont(), s_tip_text,
+                20, BTN_Y + BTN_H + 14, PANEL_W - 40, 20,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
     }
 
     // 保活策略展开列表：盖住金框上缘/第一行格子，画在格子之后。
@@ -2795,7 +2859,7 @@ static void LoadSelectedProfileIntoCells_()
 {
     const int profile = s_p.selected_profile;
     if (profile < 0 || profile >= PROFILE_COUNT) return;
-    // 方案切换后，全量快照与可见行都按新方案草稿重绑。
+    // 编号切换/读档后：全量快照与可见行都按该编号草稿重绑。
     for (int i = 0; i < s_p.count; ++i) {
         const int slot = s_p.items[i].army_slot_ix;
         if (slot < 0 || slot >= MAX_STACKS) continue;
@@ -2840,8 +2904,8 @@ static void BuildPanelArmyTable_(int out_types[21], int out_counts[21])
     }
 }
 
-// 存档：把当前草稿（含未回写的可见行）写入 DLL 同目录 H3Auto.profiles。
-// 读档：读回 5 套方案草稿并刷新当前方案的卡片。两者都不改生效方案、不暂停。
+// 存档：把当前草稿（含未回写的可见行）写入选中编号的存档槽（读-改-写，
+// 其余槽保持原样），并记忆该编号。不改生效方案、不暂停。
 static void SaveProfilesToDisk_()
 {
     // WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
@@ -2851,8 +2915,15 @@ static void SaveProfilesToDisk_()
     int army_counts[21] = {};
     BuildPanelArmyTable_(army_types, army_counts);
     const bool ok = SaveProfileStore_(army_types, army_counts,
-        s_p.draft_rules, s_p.draft_protect_strategy, s_p.draft_stop_turns);
-    WriteLog("[Panel] 方案%s：%s", ok ? "已存档" : "存档失败", g_profiles_path);
+        s_p.draft_rules[s_p.selected_profile],
+        s_p.draft_protect_strategy[s_p.selected_profile],
+        s_p.draft_stop_turns[s_p.selected_profile],
+        s_p.selected_profile);
+    if (ok) RememberProfileSlot(s_p.selected_profile);
+    char slot_path[MAX_PATH] = {};
+    ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
+    WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
+        ok ? "已存档" : "存档失败", slot_path);
     snprintf(s_status_text, sizeof(s_status_text), "%s",
         ok ? "存档成功" : "存档失败");
     s_status_error = !ok;
@@ -2860,18 +2931,20 @@ static void SaveProfilesToDisk_()
     DrawPanelToBuffer_();
 }
 
+// 读档：从选中编号的存档槽读一套草稿（四轮部队关联对位），并记忆该编号。
+// 不改生效方案、不暂停。
 static void LoadProfilesFromDisk_()
 {
-    // 105 条规则约 8KB，堆分配避免游戏线程栈溢出。
-    AutoStackRule (*loaded)[MAX_STACKS] = new AutoStackRule[PROFILE_COUNT][MAX_STACKS]();
-    uint8_t strategies[PROFILE_COUNT] = {};
-    uint16_t stop_turns[PROFILE_COUNT] = {};
+    // 21 条规则约 1.7KB，堆分配避免游戏线程栈溢出。
+    AutoStackRule* loaded = new AutoStackRule[MAX_STACKS]();
+    uint8_t strategy = 0;
+    uint16_t stop_turns = 0;
     int arch_types[21] = {};
     int arch_counts[21] = {};
     const bool ok = LoadProfileStore_(arch_types, arch_counts, loaded,
-        strategies, stop_turns);
+        &strategy, &stop_turns, s_p.selected_profile);
     if (ok) {
-        // 三轮关联：存档部队 → 当前部队槽。未匹配的当前槽保留原草稿
+        // 四轮关联：存档部队 → 当前部队槽。未匹配的当前槽保留原草稿
         // （含打开面板时的初始化），未匹配的存档规则直接丢弃。
         int cur_types[21] = {};
         int cur_counts[21] = {};
@@ -2884,12 +2957,10 @@ static void LoadProfilesFromDisk_()
             const int arch = arch_for_cur[cur];
             if (arch < 0) continue;
             ++matched;
-            for (int p = 0; p < PROFILE_COUNT; ++p)
-                s_p.draft_rules[p][cur] = loaded[p][arch];
+            s_p.draft_rules[s_p.selected_profile][cur] = loaded[arch];
         }
-        memcpy(s_p.draft_protect_strategy, strategies,
-            sizeof(s_p.draft_protect_strategy));
-        memcpy(s_p.draft_stop_turns, stop_turns, sizeof(s_p.draft_stop_turns));
+        s_p.draft_protect_strategy[s_p.selected_profile] = strategy;
+        s_p.draft_stop_turns[s_p.selected_profile] = stop_turns;
         s_stop_turns_editing = false;
         for (int k = 0; k < CELL_COUNT; ++k) {
             s_p.cells[k].expanded = CEX_NONE;
@@ -2898,12 +2969,15 @@ static void LoadProfilesFromDisk_()
         s_protect_dd_open = false;
         s_protect_dd_hover = -1;
         LoadSelectedProfileIntoCells_();
-        WriteLog("[Panel] 读档关联：三轮匹配 %d/21 槽，未匹配存档槽已忽略",
+        WriteLog("[Panel] 读档关联：四轮匹配 %d/21 槽，未匹配存档槽已忽略",
             matched);
     }
+    if (ok) RememberProfileSlot(s_p.selected_profile);
     delete[] loaded;
-    WriteLog("[Panel] 方案%s：%s", ok ? "已读档" : "读档失败（文件不存在或损坏）",
-        g_profiles_path);
+    char slot_path[MAX_PATH] = {};
+    ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
+    WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
+        ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path);
     snprintf(s_status_text, sizeof(s_status_text), "%s",
         ok ? "读档成功" : "读档失败");
     s_status_error = !ok;
@@ -2911,6 +2985,8 @@ static void LoadProfilesFromDisk_()
     DrawPanelToBuffer_();
 }
 
+// 切换方案编号：先存回当前编号草稿，再把面板切到新编号的草稿
+// （未存档/未读档的编号是默认空配置；切回来草稿仍在）。
 static void SelectProfile_(int profile)
 {
     if (profile < 0 || profile >= PROFILE_COUNT
@@ -2919,7 +2995,7 @@ static void SelectProfile_(int profile)
     SaveCurrentCellsToDraft_();
     if (s_stop_turns_editing) CommitStopTurnsEdit_();
     s_p.selected_profile = profile;
-    s_protect_dd_open = false;   // 策略下拉跟随方案切换，收起重开
+    s_protect_dd_open = false;
     s_protect_dd_hover = -1;
     LoadSelectedProfileIntoCells_();
     DrawPanelToBuffer_();
@@ -2961,7 +3037,8 @@ void OpenSettingsPanel_()
     s_p.hover_idx = -1;
     s_p.pressed_button = 0;
     s_p.pressed_profile = -1;
-    s_p.selected_profile = g_active_profile;
+    // 自动选中上次存/读档的编号（INI 记忆，无值默认 1）；不自动读档。
+    s_p.selected_profile = g_last_profile;
     if (s_p.selected_profile < 0 || s_p.selected_profile >= PROFILE_COUNT)
         s_p.selected_profile = 0;
     memcpy(s_p.draft_rules, g_profiles, sizeof(s_p.draft_rules));
@@ -2974,9 +3051,9 @@ void OpenSettingsPanel_()
 
     if (o_WndMgr && o_WndMgr->screenPcx16) {
         s_p.x = (o_WndMgr->screenPcx16->width  - PANEL_W) / 2;
-        s_p.y = (o_WndMgr->screenPcx16->height - PANEL_H) / 2;
+        s_p.y = (o_WndMgr->screenPcx16->height - PANEL_H) / 2 - 50;
     } else {
-        s_p.x = (800 - PANEL_W) / 2; s_p.y = (600 - PANEL_H) / 2;
+        s_p.x = (800 - PANEL_W) / 2; s_p.y = (600 - PANEL_H) / 2 - 50;
     }
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 
@@ -3041,9 +3118,9 @@ static void CommitAndCloseSettingsPanel_()
 {
     if (!s_p.active) return;
 
-    // 保存当前表格到当前方案副本，再一次性提交全部5套。
+    // 保存当前表格到当前编号草稿，再一次性提交全部 5 套（选中编号生效）。
     // 保活勾选在 AutoStackRule 内随 draft_rules 一起提交；
-    // 保活策略是方案级，随 draft_protect_strategy 提交。
+    // 保活策略/停止阈值是方案级，随 draft 数组提交。
     SaveCurrentCellsToDraft_();
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
         s_p.draft_protect_strategy, s_p.draft_stop_turns);

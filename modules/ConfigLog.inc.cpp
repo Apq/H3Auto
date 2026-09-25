@@ -6,34 +6,41 @@ static AutoStackRule MakeDefaultRule_()
 {
     return H3AutoPolicy::MakeDefaultRule();
 }
-// 五套仅驻留内存的已确认方案；默认全为手动。
+// 5 套方案驻留内存（每个编号一份草稿/已确认方案）：切换编号时各自的
+// 草稿独立保留，未存档也不丢。方案编号 1-5 同时是存档文件编号
+// （H3Auto.profiles.N）。
 // 首动保活的勾选（protectEnable）在 AutoStackRule 内随方案走；策略是方案级。
 AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;
 
-// 当前生效方案（运行时视图）
+// 当前生效方案（运行时视图 = g_profiles[g_active_profile]）
 AutoStackRule g_active_rules[21] = {};
+
+// 上次存/读档的槽位（0..4），独立文件 H3Auto.last 持久化；进面板自动选中，
+// 不自动读档。跨战斗保留。
+int g_last_profile = 0;
 
 // 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
 uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
-uint16_t g_stop_turns[5] = { 10, 10, 10, 10, 10 }; // 自动停止阈值，0=关闭，0..999
+uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
+    H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS,
+    H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS }; // 0=关闭，0..999
 
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
+// g_last_profile 不清：下次进面板仍选中最后存/读档编号。
 void ClearConfirmedProfiles()
 {
     const AutoStackRule def = MakeDefaultRule_();
     for (int p = 0; p < 5; ++p) {
         for (int s = 0; s < 21; ++s)
             g_profiles[p][s] = def;
+        g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
+        g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
     }
     g_active_profile = 0;
     for (int s = 0; s < 21; ++s)
         g_active_rules[s] = def;
-    for (int p = 0; p < 5; ++p)
-        g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
-    for (int p = 0; p < 5; ++p)
-        g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
 }
 
 static struct Config {
@@ -45,8 +52,31 @@ static struct Config {
 
 static char g_ini_path[MAX_PATH];
 static char g_log_path[MAX_PATH];
-static char g_profiles_path[MAX_PATH];   // 5 套方案存档：DLL 同目录 H3Auto.profiles
+static char g_profiles_prefix[MAX_PATH]; // 每槽一文件：前缀 + 编号（1..5）
+static char g_last_profile_path[MAX_PATH]; // 编号记忆：独立文件 H3Auto.last
 static wchar_t g_log_path_w[MAX_PATH * 2];
+
+// 拼出编号 N（1..5）的存档文件全路径。
+void ProfileSlotPath(int slot, char* buf, int buf_size)
+{
+    if (slot < 0 || slot >= 5) slot = 0;
+    _snprintf(buf, buf_size - 1, "%s%d", g_profiles_prefix, slot + 1);
+    if (buf_size > 0) buf[buf_size - 1] = 0;
+}
+
+// 存/读档成功后记忆槽位：更新内存值并写 H3Auto.last（跨战斗/跨场保留）。
+void RememberProfileSlot(int slot)
+{
+    if (slot < 0 || slot >= 5) return;
+    g_last_profile = slot;
+    char buf[8] = {};
+    _snprintf(buf, sizeof(buf) - 1, "%d", slot + 1);
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, g_last_profile_path, "wb") == 0 && fp) {
+        fwrite(buf, 1, strlen(buf), fp);
+        fclose(fp);
+    }
+}
 static HMODULE g_hModule = nullptr;
 static bool g_disable_log = false;
 
@@ -282,25 +312,26 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
     return default_vk;
 }
 
-// 5 套方案存档：DLL 同目录 H3Auto.profiles（文本一行，格式见 PolicyCore）。
+// 方案存档：DLL 同目录，每个编号一个独立文件（H3Auto.profiles.1 .. .5，
+// 文本一行，格式见 PolicyCore H3AP3）。
 // 保存/加载的是面板草稿，不改变当前生效方案，也不暂停自动执行。
-// g_profiles_path 定义在 ConfigLog，路径在 Entry 的 DllMain 里初始化。
+// g_profiles_prefix 在 Entry 的 DllMain 里初始化。
 
 // 成功返回 true。文件不存在或内容损坏返回 false（草稿保持原样）。
 // SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
 static bool SaveProfileStoreRaw_(const int army_types[21],
-    const int army_counts[21], const AutoStackRule rules[5][21],
-    const uint8_t strategies[5], const uint16_t stop_turns[5])
+    const int army_counts[21], const AutoStackRule rules[21],
+    uint8_t strategy, uint16_t stop_turns, int slot)
 {
-    char* text = new char[64 * 1024];
-    // WriteLog("[Panel] 保存：开始编码");
+    char* text = new char[32 * 1024];
     const int n = H3AutoPolicy::EncodeProfileStoreText(army_types,
-        army_counts, strategies, rules, stop_turns, text, 64 * 1024);
-    // WriteLog("[Panel] 保存：编码完成 n=%d", n);
+        army_counts, strategy, rules, stop_turns, text, 32 * 1024);
     bool ok = false;
     if (n > 0) {
+        char path[MAX_PATH] = {};
+        ProfileSlotPath(slot, path, MAX_PATH);
         FILE* fp = nullptr;
-        if (fopen_s(&fp, g_profiles_path, "wb") == 0 && fp) {
+        if (fopen_s(&fp, path, "wb") == 0 && fp) {
             ok = fwrite(text, 1, n, fp) == static_cast<size_t>(n);
             fclose(fp);
         }
@@ -310,15 +341,15 @@ static bool SaveProfileStoreRaw_(const int army_types[21],
 }
 
 static bool SaveProfileStore_(const int army_types[21],
-    const int army_counts[21], const AutoStackRule rules[5][21],
-    const uint8_t strategies[5], const uint16_t stop_turns[5])
+    const int army_counts[21], const AutoStackRule rules[21],
+    uint8_t strategy, uint16_t stop_turns, int slot)
 {
     bool ok = false;
     DWORD code = 0;
     void* fault = nullptr;
     __try {
         ok = SaveProfileStoreRaw_(army_types, army_counts, rules,
-            strategies, stop_turns);
+            strategy, stop_turns, slot);
     } __except (code = GetExceptionCode(),
                 fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
                 EXCEPTION_EXECUTE_HANDLER) {
@@ -328,20 +359,24 @@ static bool SaveProfileStore_(const int army_types[21],
     return ok;
 }
 
+// 读档：读选中编号的独立文件（槽号 0..4，越界取 0）。
 static bool LoadProfileStore_(int army_types[21], int army_counts[21],
-    AutoStackRule rules[5][21], uint8_t strategies[5], uint16_t stop_turns[5])
+    AutoStackRule out_rules[21], uint8_t* strategy, uint16_t* stop_turns,
+    int slot)
 {
+    char path[MAX_PATH] = {};
+    ProfileSlotPath(slot, path, MAX_PATH);
     FILE* fp = nullptr;
-    if (fopen_s(&fp, g_profiles_path, "rb") != 0 || !fp) return false;
-    char* text = new char[64 * 1024];
-    const size_t n = fread(text, 1, 64 * 1024 - 1, fp);
+    if (fopen_s(&fp, path, "rb") != 0 || !fp) return false;
+    char* text = new char[32 * 1024];
+    const size_t n = fread(text, 1, 32 * 1024 - 1, fp);
     const int truncated = fgetc(fp) != EOF;
     fclose(fp);
     bool ok = false;
     if (n > 0 && !truncated) {
         text[n] = 0;
         ok = H3AutoPolicy::DecodeProfileStoreText(text, army_types,
-            army_counts, strategies, rules, stop_turns);
+            army_counts, strategy, out_rules, stop_turns);
     }
     delete[] text;
     return ok;
@@ -352,6 +387,23 @@ static void ReadConfig()
     const char* f = g_ini_path;
     cfg.disable_on_start = GetPrivateProfileIntA("General", "DisableOnStart", 0, f);
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
+
+    // 上次存/读档的槽位（面板自动选中该编号，不自动读档）。
+    // 从独立文件 H3Auto.last 读（一行数字 1..5），无文件/坏值默认 1。
+    {
+        int last = 1;
+        FILE* fp = nullptr;
+        if (fopen_s(&fp, g_last_profile_path, "rb") == 0 && fp) {
+            char buf[8] = {};
+            const size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+            fclose(fp);
+            if (n > 0) {
+                buf[n] = 0;
+                last = atoi(buf);
+            }
+        }
+        g_last_profile = ClampInt(last, 1, 5) - 1;
+    }
 
     char toggle_buf[64] = {};
     char oneshot_buf[64] = {};

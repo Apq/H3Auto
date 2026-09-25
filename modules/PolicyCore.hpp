@@ -534,14 +534,13 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
     return best;
 }
 
-// 5 套方案的磁盘存档（加载/保存按钮）。
-// 纯编解码：一行文本 "H3AP2 <21×部队表> <方案1策略> ... <方案5策略> <105×规则>"，
-// 规则按方案优先、槽位其次排列，每条 59 个十进制整数。
+// 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profiles.N）。
+// 纯编解码：一行文本 "H3AP3 <21×部队表> <策略> <停止回合> <21×规则>"，
+// 规则按槽位排列，每条 59 个十进制整数。
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
-// 部队表供读档时做三轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
-// 文本在部队表之后有 5 个策略、5 个自动停止回合（0..999）。
-// 存档格式：21*2 部队 + 5 策略 + 5 停止回合 + 5*21 条规则（每条 59 个整数）。
-static constexpr int PROFILE_STORE_COUNT = 5;
+// 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
+// 文本在部队表之后有 1 个策略、1 个自动停止回合（0..999）。
+// 存档格式：21*2 部队 + 1 策略 + 1 停止回合 + 21 条规则（每条 59 个整数）。
 static constexpr int PROFILE_STORE_SLOTS = 21;
 // 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
 // （曾因手写 34 与实写 59 脱节导致越界写堆 = 保存后崩溃的根因）。
@@ -558,8 +557,8 @@ static constexpr int PROFILE_STORE_ARMY_INTS =
     PROFILE_STORE_SLOTS * 2;
 static constexpr int PROFILE_STORE_INTS =
     PROFILE_STORE_ARMY_INTS
-    + PROFILE_STORE_COUNT + PROFILE_STORE_COUNT
-    + PROFILE_STORE_COUNT * PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
+    + 1 + 1
+    + PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
 
 // 读档四轮关联（存档部队 → 当前部队槽）：
@@ -703,15 +702,15 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP2 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+// Decode 只接受以 "H3AP3 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
 inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     const int army_counts[PROFILE_STORE_SLOTS],
-    const uint8_t strategies[PROFILE_STORE_COUNT],
-    const AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
-    const uint16_t stop_turns[PROFILE_STORE_COUNT],
+    uint8_t strategy,
+    const AutoStackRule rules[PROFILE_STORE_SLOTS],
+    uint16_t stop_turns,
     char* buffer, int buffer_size)
 {
-    if (!army_types || !army_counts || !strategies || !rules || !stop_turns
+    if (!army_types || !army_counts || !rules
         || !buffer || buffer_size <= 0)
         return -1;
     int written = 0;
@@ -722,32 +721,28 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
         }
         return true;
     };
-    if (!append("H3AP2")) return -1;
+    if (!append("H3AP3")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
         ints[n++] = army_types[s];
         ints[n++] = army_counts[s];
     }
-    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
-        ints[n++] = strategies[p];
-    for (int p = 0; p < PROFILE_STORE_COUNT; ++p) {
-        int turns = stop_turns[p];
-        if (turns < 0) turns = 0;
-        if (turns > 999) turns = 999;
-        ints[n++] = turns;
-    }
+    ints[n++] = strategy;
+    int turns = stop_turns;
+    if (turns < 0) turns = 0;
+    if (turns > 999) turns = 999;
+    ints[n++] = turns;
     bool ok = true;
-    for (int p = 0; ok && p < PROFILE_STORE_COUNT; ++p)
-        for (int s = 0; ok && s < PROFILE_STORE_SLOTS; ++s) {
-            __try {
-                EncodeRuleInts(rules[p][s], ints + n);
-            } __except (1) {
-                delete[] ints;
-                return -100000 - p * 100 - s;
-            }
-            n += PROFILE_STORE_RULE_FIELDS;
+    for (int s = 0; ok && s < PROFILE_STORE_SLOTS; ++s) {
+        __try {
+            EncodeRuleInts(rules[s], ints + n);
+        } __except (1) {
+            delete[] ints;
+            return -100000 - s;
         }
+        n += PROFILE_STORE_RULE_FIELDS;
+    }
     for (int i = 0; ok && i < n; ++i) {
         char num[16];
         int v = ints[i];
@@ -770,13 +765,13 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
 inline bool DecodeProfileStoreText(const char* text,
     int army_types[PROFILE_STORE_SLOTS],
     int army_counts[PROFILE_STORE_SLOTS],
-    uint8_t strategies[PROFILE_STORE_COUNT],
-    AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS],
-    uint16_t stop_turns[PROFILE_STORE_COUNT])
+    uint8_t* strategy,
+    AutoStackRule rules[PROFILE_STORE_SLOTS],
+    uint16_t* stop_turns)
 {
-    if (!text || !army_types || !army_counts || !strategies || !rules
+    if (!text || !army_types || !army_counts || !strategy || !rules
         || !stop_turns) return false;
-    const char* magic = "H3AP2";
+    const char* magic = "H3AP3";
     for (int i = 0; magic[i]; ++i)
         if (text[i] != magic[i]) return false;
     const char* p = text + 5;
@@ -799,16 +794,16 @@ inline bool DecodeProfileStoreText(const char* text,
         ints[count++] = sign * v;
     }
     if (bad || count != PROFILE_STORE_INTS) {
-        // 含旧坏档（3575/3580 整数：越界写堆版本交错的产物），一律拒绝。
+        // 含旧格式（H3AP2 6247 整数 / 3575/3580 交错坏档），一律拒绝。
         delete[] ints;
         return false;
     }
 
-    uint8_t decoded_strategy[PROFILE_STORE_COUNT] = {};
-    uint16_t decoded_stop[PROFILE_STORE_COUNT] = {};
+    uint8_t decoded_strategy = 0;
+    uint16_t decoded_stop = 0;
     int decoded_army_types[PROFILE_STORE_SLOTS] = {};
     int decoded_army_counts[PROFILE_STORE_SLOTS] = {};
-    AutoStackRule decoded[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
+    AutoStackRule decoded[PROFILE_STORE_SLOTS] = {};
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
         decoded_army_types[s] = ints[n];
@@ -816,30 +811,22 @@ inline bool DecodeProfileStoreText(const char* text,
         if (ints[n] < -1 || ints[n + 1] < 0) { delete[] ints; return false; }
         n += 2;
     }
-    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
-        if (ints[n] < PS_NONE || ints[n] >= PS_COUNT) { delete[] ints; return false; }
-        decoded_strategy[i] = static_cast<uint8_t>(ints[n++]);
+    if (ints[n] < PS_NONE || ints[n] >= PS_COUNT) { delete[] ints; return false; }
+    decoded_strategy = static_cast<uint8_t>(ints[n++]);
+    if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
+    decoded_stop = static_cast<uint16_t>(ints[n++]);
+    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
+        if (!DecodeRuleInts(ints + n, &decoded[s])) { delete[] ints; return false; }
+        n += PROFILE_STORE_RULE_FIELDS;
     }
-    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
-        if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
-        decoded_stop[i] = static_cast<uint16_t>(ints[n++]);
-    }
-    for (int i = 0; i < PROFILE_STORE_COUNT; ++i)
-        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-            if (!DecodeRuleInts(ints + n, &decoded[i][s])) { delete[] ints; return false; }
-            n += PROFILE_STORE_RULE_FIELDS;
-        }
     delete[] ints;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
         army_types[s] = decoded_army_types[s];
         army_counts[s] = decoded_army_counts[s];
+        rules[s] = decoded[s];
     }
-    for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
-        strategies[i] = decoded_strategy[i];
-        stop_turns[i] = decoded_stop[i];
-        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
-            rules[i][s] = decoded[i][s];
-    }
+    *strategy = decoded_strategy;
+    *stop_turns = decoded_stop;
     return true;
 }
 

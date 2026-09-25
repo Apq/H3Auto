@@ -49,12 +49,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         GetModuleFileNameA(hModule, g_ini_path, MAX_PATH);
         char* dot = strrchr(g_ini_path, '.');
         if (dot) strcpy(dot, ".ini");
-        // 方案存档与 DLL 同目录，固定名 H3Auto.profiles。
-        GetModuleFileNameA(hModule, g_profiles_path, MAX_PATH);
-        char* slash = strrchr(g_profiles_path, (char)92);
-        if (!slash) slash = strrchr(g_profiles_path, '/');
-        if (slash) strcpy(slash + 1, "H3Auto.profiles");
-        else strcpy(g_profiles_path, "H3Auto.profiles");
+        // 方案存档与 DLL 同目录：每个编号一个独立文件（前缀 H3Auto.profiles. + 编号）。
+        GetModuleFileNameA(hModule, g_profiles_prefix, MAX_PATH);
+        char* slash = strrchr(g_profiles_prefix, (char)92);
+        if (!slash) slash = strrchr(g_profiles_prefix, '/');
+        if (slash) strcpy(slash + 1, "H3Auto.profiles.");
+        else strcpy(g_profiles_prefix, "H3Auto.profiles.");
+        // 编号记忆：独立文件 H3Auto.last（一行数字 1..5），不写 INI。
+        GetModuleFileNameA(hModule, g_last_profile_path, MAX_PATH);
+        char* slash2 = strrchr(g_last_profile_path, (char)92);
+        if (!slash2) slash2 = strrchr(g_last_profile_path, '/');
+        if (slash2) strcpy(slash2 + 1, "H3Auto.last");
+        else strcpy(g_last_profile_path, "H3Auto.last");
         wchar_t ini_path_w[MAX_PATH];
         MultiByteToWideChar(CP_ACP, 0, g_ini_path, -1, ini_path_w, MAX_PATH);
         g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);

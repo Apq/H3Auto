@@ -516,25 +516,23 @@ void TestProtect()
 
 void TestProfileStoreRoundtrip()
 {
-    uint8_t strategies[PROFILE_STORE_COUNT] = { PS_NONE, PS_ON_DEAD,
-        PS_FIRST_ACTION, PS_LOSS_GT_RESTORE, PS_ON_DEAD };
-    AutoStackRule rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
-    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
-        for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
-            rules[p][s] = MakeDefaultRule();
-    rules[2][7].action = AA_MELEE_ATTACK;
-    rules[2][7].target.meleeStandHex = 125;
-    rules[2][7].target.meleeAttackHex = 108;
-    rules[2][7].target.moveWaypoints[0] = 42;
-    rules[2][7].target.moveWaypoints[15] = -1;
-    rules[2][7].target.moveWaypointCount = 1;
-    rules[2][7].spellSlots[0] = 3;
-    rules[2][7].spellSlotCount = 1;
-    rules[2][7].protectEnable = 1;
-    rules[2][7].allowDefendFallback = true;
-    rules[4][20].action = AA_RANGED_ATTACK;
-    rules[4][20].target.selector = SEL_RANGED_SPEED;
-    uint16_t stop_turns[PROFILE_STORE_COUNT] = { 10, 0, 25, 999, 7 };
+    uint8_t strategy = PS_FIRST_ACTION;
+    AutoStackRule rules[PROFILE_STORE_SLOTS] = {};
+    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
+        rules[s] = MakeDefaultRule();
+    rules[7].action = AA_MELEE_ATTACK;
+    rules[7].target.meleeStandHex = 125;
+    rules[7].target.meleeAttackHex = 108;
+    rules[7].target.moveWaypoints[0] = 42;
+    rules[7].target.moveWaypoints[15] = -1;
+    rules[7].target.moveWaypointCount = 1;
+    rules[7].spellSlots[0] = 3;
+    rules[7].spellSlotCount = 1;
+    rules[7].protectEnable = 1;
+    rules[7].allowDefendFallback = true;
+    rules[20].action = AA_RANGED_ATTACK;
+    rules[20].target.selector = SEL_RANGED_SPEED;
+    uint16_t stop_turns = 25;
     int army_types[PROFILE_STORE_SLOTS];
     int army_counts[PROFILE_STORE_SLOTS] = {};
     for (int i = 0; i < PROFILE_STORE_SLOTS; ++i) army_types[i] = -1;
@@ -542,48 +540,49 @@ void TestProfileStoreRoundtrip()
     army_types[1] = 11; army_counts[1] = 30;
     army_types[2] = 12; army_counts[2] = 40;
 
-    char text[64 * 1024] = {};
+    char text[32 * 1024] = {};
     const int written = EncodeProfileStoreText(army_types, army_counts,
-        strategies, rules, stop_turns, text, sizeof(text));
+        strategy, rules, stop_turns, text, sizeof(text));
     Check(written > 0, "profile store encodes");
 
-    uint8_t out_strategies[PROFILE_STORE_COUNT] = {};
-    uint16_t out_stop[PROFILE_STORE_COUNT] = {};
+    uint8_t out_strategy = 0;
+    uint16_t out_stop = 0;
     int out_types[PROFILE_STORE_SLOTS] = {};
     int out_counts[PROFILE_STORE_SLOTS] = {};
-    AutoStackRule out_rules[PROFILE_STORE_COUNT][PROFILE_STORE_SLOTS] = {};
-    Check(DecodeProfileStoreText(text, out_types, out_counts, out_strategies,
-            out_rules, out_stop),
+    AutoStackRule out_rules[PROFILE_STORE_SLOTS] = {};
+    Check(DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+            out_rules, &out_stop),
         "profile store decodes");
     Check(out_types[0] == 10 && out_counts[0] == 20
         && out_types[2] == 12 && out_counts[2] == 40,
         "army table roundtrip");
     Check(out_types[3] == -1 && out_counts[3] == 0, "empty slot roundtrip");
-    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
-        Check(out_strategies[p] == strategies[p], "strategy roundtrip");
-    Check(out_rules[2][7].action == AA_MELEE_ATTACK, "rule action roundtrip");
-    Check(out_rules[2][7].target.meleeStandHex == 125, "melee stand roundtrip");
-    Check(out_rules[2][7].target.meleeAttackHex == 108, "melee attack roundtrip");
-    Check(out_rules[2][7].target.moveWaypoints[0] == 42, "waypoint roundtrip");
-    Check(out_rules[2][7].target.moveWaypoints[15] == -1, "empty waypoint roundtrip");
-    Check(out_rules[2][7].target.moveWaypointCount == 1, "waypoint count roundtrip");
-    Check(out_rules[2][7].spellSlots[0] == 3, "spell slot roundtrip");
-    Check(out_rules[2][7].spellSlotCount == 1, "spell count roundtrip");
-    Check(out_rules[2][7].protectEnable == 1, "protect enable roundtrip");
-    Check(out_rules[2][7].allowDefendFallback, "fallback roundtrip");
-    Check(out_rules[4][20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
-    Check(out_rules[4][20].target.selector == SEL_RANGED_SPEED,
+    Check(out_strategy == strategy, "strategy roundtrip");
+    Check(out_rules[7].action == AA_MELEE_ATTACK, "rule action roundtrip");
+    Check(out_rules[7].target.meleeStandHex == 125, "melee stand roundtrip");
+    Check(out_rules[7].target.meleeAttackHex == 108, "melee attack roundtrip");
+    Check(out_rules[7].target.moveWaypoints[0] == 42, "waypoint roundtrip");
+    Check(out_rules[7].target.moveWaypoints[15] == -1, "empty waypoint roundtrip");
+    Check(out_rules[7].target.moveWaypointCount == 1, "waypoint count roundtrip");
+    Check(out_rules[7].spellSlots[0] == 3, "spell slot roundtrip");
+    Check(out_rules[7].spellSlotCount == 1, "spell count roundtrip");
+    Check(out_rules[7].protectEnable == 1, "protect enable roundtrip");
+    Check(out_rules[7].allowDefendFallback, "fallback roundtrip");
+    Check(out_rules[20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
+    Check(out_rules[20].target.selector == SEL_RANGED_SPEED,
         "last slot selector roundtrip");
-    Check(out_rules[0][0].action == AA_MANUAL, "default slot stays manual");
-    for (int p = 0; p < PROFILE_STORE_COUNT; ++p)
-        Check(out_stop[p] == stop_turns[p], "stop turns roundtrip");
+    Check(out_rules[0].action == AA_MANUAL, "default slot stays manual");
+    Check(out_stop == stop_turns, "stop turns roundtrip");
 
-    Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
-            out_strategies, out_rules, out_stop),
+    Check(!DecodeProfileStoreText("H3AP3 1 2 3", out_types, out_counts,
+            &out_strategy, out_rules, &out_stop),
         "truncated store rejected");
+    Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
+            &out_strategy, out_rules, &out_stop),
+        "legacy five-slot magic rejected");
     text[0] = 'X';
-    Check(!DecodeProfileStoreText(text, out_types, out_counts, out_strategies,
-            out_rules, out_stop),
+    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+            out_rules, &out_stop),
         "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
     Check(!AutoStopShouldYield(10, 1000, 990, 1), "slow damage stays running");
