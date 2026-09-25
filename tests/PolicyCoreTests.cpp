@@ -426,7 +426,7 @@ void TestProfileStoreRoundtrip()
     Check(!DecodeProfileStoreText(text, out_strategies, out_rules, out_stop),
         "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
-    Check(!AutoStopShouldYield(10, 1000, 900, 1), "slow damage stays running");
+    Check(!AutoStopShouldYield(10, 1000, 990, 1), "slow damage stays running");
     Check(!AutoStopShouldYield(0, 1000, 1, 9), "zero threshold disables stop");
     Check(!AutoStopShouldYield(10, 1000, 1000, 5), "no damage does not stop");
     Check(!AutoStopShouldYield(10, 1000, 1100, 5), "enemy hp gain does not stop");

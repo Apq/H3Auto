@@ -14,38 +14,260 @@ extern uint8_t g_stop_turns[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
+// ===== 战场状态机（设计文档 §15 / 重构步骤.md §1.1）=====
+// 唯一迁移出口 SetPhase_：合法边查表 + 边动作 + 日志；非法组合记日志保持原状。
+enum BattlePhase {
+    BP_PEACE,          // 战斗前
+    BP_COMBAT_CLOSED,  // 战斗中·面板关
+    BP_COMBAT_OPEN,    // 战斗中·面板开
+    BP_RESULT,         // 战斗结算
+    BP_ENDED,          // 战斗结束（瞬态：进入即清理后续转 BP_PEACE）
+};
+enum BattleEvent {
+    BE_BATTLE_UI_APPEARED,   // 战斗 UI 出现（BltComplete 每帧扫描）
+    BE_PANEL_OPEN_REQUESTED, // 右键自动战斗 / P 键（面板打开成功后）
+    BE_PANEL_COMMIT,         // 面板「确定」
+    BE_PANEL_CANCEL,         // 面板「取消」/ESC
+    BE_RESULT_SHOWN,         // CPResult 结果窗出现
+    BE_RESULT_RETRY,         // 结算→取消/重打
+    BE_RESULT_ACCEPTED,      // 结算→接受
+    BE_BATTLE_UI_GONE,       // 战斗 UI 消失且未经结算（兜底）
+};
+
+// 文件后部的清理函数：SetPhase_ 边动作需要，先声明（C2065 预防）。
+static void ClearSpellWait_();
+static void ClearOneShotManual_();
+static void RefreshControlStatusHint_();
+
+BattlePhase g_phase = BP_PEACE;
+// 兜底边（BE_BATTLE_UI_GONE）宽限：重打销毁重建战斗 UI 常超 3 帧，
+// RETRY 边置 3 秒宽限，期间 UI 消失不视为「未经结算消失」（重构步骤 S4.2）。
+DWORD g_ui_gone_grace_until = 0;
+
+// ===== 控制权子状态（重构步骤 §1.2；仅战斗中·面板关内有效）=====
+enum ControlMode {
+    CM_AUTO,           // 自动执行
+    CM_MANUAL,         // F9 全手动：本场所有已配置部队交回玩家
+    CM_ONESHOT_WAIT,   // J 单次接管待命：等下一支可接管部队
+    CM_ONESHOT_LOCKED, // J 单次接管锁定中：锁定部队完成玩家动作后回 AUTO
+};
+static ControlMode g_control = CM_AUTO;
+
+// ===== 单位管线子状态（重构步骤 §1.2；锚定 g_pipeline_stack 活动单位）=====
+// 取代旧 spell_waiting/spell_wait_stack/spell_done_stack/last_handled_stack 四标志。
+enum PipelineStage {
+    PS_IDLE,         // 当前单位无未完成管线
+    PS_SPELL_POSTED, // 已投递快捷施法键，等待结果（超时数据在 g_auto_state.spell_wait_*）
+    PS_SPELL_DONE,   // 本单位本回合施法阶段已结束，不再投键
+    PS_HANDLED,      // 本单位本回合已处理（已下命令或交回玩家），不再重复处理
+};
+static PipelineStage g_pipeline_stage = PS_IDLE;
+static void* g_pipeline_stack = nullptr; // 管线锚定的活动单位
+
+static const char* ControlModeName_(ControlMode m)
+{
+    switch (m) {
+    case CM_AUTO:           return "AUTO";
+    case CM_MANUAL:         return "MANUAL";
+    case CM_ONESHOT_WAIT:   return "ONESHOT_WAIT";
+    case CM_ONESHOT_LOCKED: return "ONESHOT_LOCKED";
+    default:                return "?";
+    }
+}
+
+// 用户可见的模式切换（F9/J/面板打开/边动作）：日志 + 状态提示。
+static void SetControlMode_(ControlMode m)
+{
+    if (g_control == m) return;
+    g_control = m;
+    WriteLog("[Control] control=%s", ControlModeName_(m));
+    RefreshControlStatusHint_();
+}
+
+bool InCombat_()
+{
+    return g_phase == BP_COMBAT_CLOSED || g_phase == BP_COMBAT_OPEN;
+}
+
+bool PanelOpen_()
+{
+    return g_phase == BP_COMBAT_OPEN;
+}
+
+static const char* PhaseName_(BattlePhase p)
+{
+    switch (p) {
+    case BP_PEACE:         return "PEACE";
+    case BP_COMBAT_CLOSED: return "COMBAT_CLOSED";
+    case BP_COMBAT_OPEN:   return "COMBAT_OPEN";
+    case BP_RESULT:        return "RESULT";
+    case BP_ENDED:         return "ENDED";
+    default:               return "?";
+    }
+}
+
+static const char* EventName_(BattleEvent e)
+{
+    switch (e) {
+    case BE_BATTLE_UI_APPEARED:   return "UI_APPEARED";
+    case BE_PANEL_OPEN_REQUESTED: return "PANEL_OPEN";
+    case BE_PANEL_COMMIT:         return "PANEL_COMMIT";
+    case BE_PANEL_CANCEL:         return "PANEL_CANCEL";
+    case BE_RESULT_SHOWN:         return "RESULT_SHOWN";
+    case BE_RESULT_RETRY:         return "RESULT_RETRY";
+    case BE_RESULT_ACCEPTED:      return "RESULT_ACCEPTED";
+    case BE_BATTLE_UI_GONE:       return "UI_GONE";
+    default:                      return "?";
+    }
+}
+
+// 边动作：定义在 g_auto_state 之后（要引用运行时状态），此处只声明。
+// 按 (from, ev) 分派：ENDED→PEACE 的续转边不重复清理。
+static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev);
+
+// 状态机边动作用到的文件后部函数。
+void ResetAutoState();
+void EnsureStackTrackingBound();
+
+void SetPhase_(BattlePhase next, BattleEvent ev)
+{
+    if (next == g_phase) return; // 幂等：同状态重复事件不算迁移
+    struct PhaseEdge { BattlePhase from, to; BattleEvent ev; };
+    static const PhaseEdge legal[] = {
+        { BP_PEACE,         BP_COMBAT_CLOSED, BE_BATTLE_UI_APPEARED },
+        { BP_PEACE,         BP_RESULT,        BE_RESULT_SHOWN },   // 快速战斗：未经战斗 UI 直接结算
+        { BP_COMBAT_CLOSED, BP_COMBAT_OPEN,   BE_PANEL_OPEN_REQUESTED },
+        { BP_COMBAT_OPEN,   BP_COMBAT_CLOSED, BE_PANEL_COMMIT },
+        { BP_COMBAT_OPEN,   BP_COMBAT_CLOSED, BE_PANEL_CANCEL },
+        { BP_COMBAT_CLOSED, BP_RESULT,        BE_RESULT_SHOWN },
+        { BP_COMBAT_OPEN,   BP_RESULT,        BE_RESULT_SHOWN },
+        { BP_RESULT,        BP_COMBAT_CLOSED, BE_RESULT_RETRY },
+        { BP_RESULT,        BP_ENDED,         BE_RESULT_ACCEPTED },
+        { BP_COMBAT_CLOSED, BP_ENDED,         BE_BATTLE_UI_GONE },
+        { BP_COMBAT_OPEN,   BP_ENDED,         BE_BATTLE_UI_GONE },
+        { BP_RESULT,        BP_ENDED,         BE_BATTLE_UI_GONE },  // 结算中读档/退出
+        { BP_ENDED,         BP_PEACE,         BE_RESULT_ACCEPTED }, // 瞬态续转
+        { BP_ENDED,         BP_PEACE,         BE_BATTLE_UI_GONE },  // 瞬态续转
+    };
+    bool ok = false;
+    for (int i = 0; i < (int)(sizeof(legal) / sizeof(legal[0])); ++i) {
+        if (legal[i].from == g_phase && legal[i].to == next
+            && legal[i].ev == ev) {
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        WriteLog("[Phase] illegal %s -> %s (ev=%s)",
+            PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
+        return;
+    }
+
+    WriteLog("[Phase] %s -> %s (ev=%s)",
+        PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
+    PhaseEdgeAction_(g_phase, ev);
+    g_phase = next;
+
+    // ENDED 是瞬态：清理已做，立即续转回 PEACE（合法表含同事件的续转边）。
+    if (g_phase == BP_ENDED)
+        SetPhase_(BP_PEACE, ev);
+}
+
 // 接管模型（收敛后）：
 // 1) 只在“控制权交给玩家”时介入（HH_ShouldAutoExecute 返回 0 的路径）。
 //    被蛊惑/敌方回合等本就不会把控制权交给玩家，无需单独状态机。
 // 2) 普通部队：有非手动设置 → 代为提交动作；手动 → 原样留给玩家。
 // 3) 仅战争机器有特殊分支（技能条件 / 交回 AI / 可选主动执行）。
-// last_handled_stack 防止同一活动单位在一个回合内被重复下达命令。
-// 循环施法两阶段：先投递快捷键 1-9/0，等英雄施法结束（或超时）再提交部队动作。
+// 管线四标志（waiting/wait_stack/done_stack/last_handled）已并入
+// g_pipeline_stage + g_pipeline_stack；此处只留超时观测与单次接管数据。
 static struct {
-    void* last_handled_stack;   // 上次已处理的活动单位指针
     void* action_wake_stack;    // 已投递唤醒消息、等待在 0x4746B0 提交主动作的单位
-    void* spell_wait_stack;     // 等待快捷施法完成的活动单位
-    void* spell_done_stack;     // 本单位本回合施法阶段已结束，避免重复投键
     int   spell_wait_slot;      // 对应 army_slot
     int   spell_wait_key;       // 已投递的快捷键 0..9
     int   spell_wait_frames;    // 已等待帧数
     DWORD spell_wait_started;   // GetTickCount，避免高频 BltComplete 把调用次数误当帧数
     int   spell_mana_before;    // 投递前法力
     int   spell_casted_before;  // 投递前 hero_casted[side]
-    bool  spell_waiting;        // true=已投递快捷键，等待结果
 
     // 战斗级人工接管：只改执行权，不改 5 套方案/游标。
-    bool  battle_manual;        // true=本场全手动
-    bool  oneshot_active;       // true=单次接管锁定中
+    // 控制权模式在 g_control（CM_AUTO/CM_MANUAL/CM_ONESHOT_WAIT/CM_ONESHOT_LOCKED）。
+    // 以下仅保留单次接管的锁定目标数据。
     void* oneshot_stack;        // 锁定到的活动部队指针
     int   oneshot_side;         // 锁定部队 side
     int   oneshot_slot;         // 锁定部队 army_slot
     int   oneshot_creature;     // 锁定部队 creature_id
-    bool  oneshot_pending;      // 当前不可接管时，等下一支
     bool  kb_toggle_seen;       // 键盘钩子捕获的启停键按下（待消费）
     bool  kb_oneshot_seen;      // 键盘钩子捕获的单次接管键按下（待消费）
+    bool  kb_open_panel_seen;   // 键盘钩子捕获的打开面板键按下（待消费）
     char  last_status_text[64]; // 状态提示去重
 } g_auto_state;
+
+// 状态机边动作（§15）。在合法迁移确认后、g_phase 赋值前执行；
+// from=迁移前状态。ENDED→PEACE 瞬态续转边不执行任何动作——清理已在
+// 进入 ENDED 的主边做过，重复执行依赖边动作幂等是侥幸而非结构保证。
+static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
+{
+    if (from == BP_ENDED)
+        return; // 续转边：无动作
+
+    if (ev == BE_PANEL_OPEN_REQUESTED) {
+        // 打开面板=强制停自动执行（§15.3：面板开时不得存在在跑的子流程）。
+        // 切停走与 F9 相同的清理；已停则不动。
+        if (g_control != CM_MANUAL) {
+            ClearOneShotManual_();
+            SetControlMode_(CM_MANUAL);
+            WriteLog("[Control] 面板打开：切换为全手动");
+        }
+        // GetTickCount 相对超时挂在面板关闭后会瞬间误超时，清空而非冻结。
+        ClearSpellWait_();
+        return;
+    }
+
+    if (from == BP_ENDED)
+        return; // 瞬态续转：清理已在进入 ENDED 时做过
+
+    if (ev == BE_RESULT_SHOWN) {
+        // 面板开时战斗推进到结算（如敌方清场）：静默关面板，草稿丢弃。
+        if (IsPanelActive()) {
+            WriteLog("[Phase] 结算出现：静默关闭设置面板");
+            CloseSettingsPanel();
+        }
+        return;
+    }
+
+    if (ev == BE_RESULT_RETRY) {
+        // 取消/重打：重排身份+重绑+清运行时（EnsureStackTrackingBound 内含）；
+        // CM 保留——全手动是玩家显式选择，重打不清（设计文档 §10.1）。
+        g_ui_gone_grace_until = GetTickCount() + 3000;
+        EnsureStackTrackingBound();
+        return;
+    }
+
+    if (ev == BE_RESULT_ACCEPTED || ev == BE_BATTLE_UI_GONE) {
+        // 战斗终了（ENDED→PEACE 续转边不重复）：钩子捕获的待消费热键全部丢弃，
+        // PollControlHotkeys_ 在 PEACE 不运行，不清会横跨两场战斗。
+        g_auto_state.kb_toggle_seen = false;
+        g_auto_state.kb_oneshot_seen = false;
+        g_auto_state.kb_open_panel_seen = false;
+    }
+
+    if (ev == BE_RESULT_ACCEPTED) {
+        // 接受：清方案+清运行时+跟踪（OnBattleResultAccepted 内含）；
+        // 决策③：跨场不残留全手动，下一场恢复自动。
+        ClearConfirmedProfiles();
+        ResetAutoState();
+        SetControlMode_(CM_AUTO);
+        return;
+    }
+
+    if (ev == BE_BATTLE_UI_GONE) {
+        // 兜底（读档/中途退出）：清运行时+跟踪+面板（ResetAutoState 内含静默关面板）；
+        // 决策②：5 套方案保留；CM 重置同接受。
+        ResetAutoState();
+        SetControlMode_(CM_AUTO);
+        return;
+    }
+}
 
 // 当前战斗的人类侧部队跟踪表（辅助正确套用设置，不是第二套控制权逻辑）。
 // 设置提交时绑定“槽位 + 生物类型”；之后刷新存活/位置/数量。
@@ -321,6 +543,8 @@ static LRESULT CALLBACK CombatHotkeyKbHook_(int code, WPARAM wParam, LPARAM lPar
             g_auto_state.kb_toggle_seen = true;
         else if ((int)wParam == cfg.one_shot_manual_vk)
             g_auto_state.kb_oneshot_seen = true;
+        else if ((int)wParam == cfg.open_settings_vk)
+            g_auto_state.kb_open_panel_seen = true;
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -348,12 +572,11 @@ void ShutdownCombatHotkeys()
 
 static void ClearOneShotManual_()
 {
-    g_auto_state.oneshot_active = false;
+    // 只清锁定目标数据；控制权模式由调用方经 SetControlMode_/直接赋值归位。
     g_auto_state.oneshot_stack = nullptr;
     g_auto_state.oneshot_side = -1;
     g_auto_state.oneshot_slot = -1;
     g_auto_state.oneshot_creature = -1;
-    g_auto_state.oneshot_pending = false;
 }
 
 static void ShowControlStatus_(const char* text)
@@ -395,10 +618,12 @@ static void ShowControlStatus_(const char* text)
 
 static const char* ControlModeLabel_()
 {
-    if (g_auto_state.oneshot_active) return "单次接管";
-    if (g_auto_state.oneshot_pending) return "单次待命";
-    if (g_auto_state.battle_manual) return "全手动";
-    return "自动";
+    switch (g_control) {
+    case CM_ONESHOT_LOCKED: return "单次接管";
+    case CM_ONESHOT_WAIT:   return "单次待命";
+    case CM_MANUAL:         return "全手动";
+    default:                return "自动";
+    }
 }
 
 static void RefreshControlStatusHint_()
@@ -412,11 +637,11 @@ static void RefreshControlStatusHint_()
 static bool HasInFlightAutoAction_(_BattleMgr_* mgr)
 {
     if (!mgr) return false;
-    if (g_auto_state.spell_waiting) return true;
-    if (g_auto_state.action_wake_stack) return true;
-    if (mgr->action != 0 && g_auto_state.last_handled_stack
-        && mgr->active_stack == g_auto_state.last_handled_stack)
+    if (g_pipeline_stage == PS_SPELL_POSTED) return true;
+    if (mgr->action != 0 && g_pipeline_stage == PS_HANDLED
+        && mgr->active_stack == g_pipeline_stack)
         return true;
+    if (g_auto_state.action_wake_stack) return true;
     return false;
 }
 
@@ -437,27 +662,27 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
     if (!ActiveStackMatchesTrack_(stack)) return false;
     if (HasInFlightAutoAction_(mgr)) {
         // 已投递施法/动作：不能半途打断，记为待命，等下一支。
-        g_auto_state.oneshot_pending = true;
+        g_control = CM_ONESHOT_WAIT;
         WriteLog("[Control] oneshot deferred (in-flight) slot=%d action=%d spell_wait=%d",
-            stack->army_slot_ix, mgr->action, g_auto_state.spell_waiting ? 1 : 0);
+            stack->army_slot_ix, mgr->action,
+            g_pipeline_stage == PS_SPELL_POSTED ? 1 : 0);
         return false;
     }
 
-    g_auto_state.oneshot_active = true;
+    g_control = CM_ONESHOT_LOCKED;
     g_auto_state.oneshot_stack = stack;
     g_auto_state.oneshot_side = stack->def_group_ix;
     g_auto_state.oneshot_slot = stack->army_slot_ix;
     g_auto_state.oneshot_creature = stack->creature_id;
-    g_auto_state.oneshot_pending = false;
-    // 单次接管期间清掉本单位自动状态，避免残留游标/等待干扰人工。
-    if (g_auto_state.spell_waiting && g_auto_state.spell_wait_stack == stack)
-        ClearSpellWait_();
-    if (g_auto_state.spell_done_stack == stack)
-        g_auto_state.spell_done_stack = nullptr;
+    // 单次接管期间清掉本单位管线，避免残留游标/等待干扰人工。
+    if (g_pipeline_stack == stack) {
+        if (g_pipeline_stage == PS_SPELL_POSTED)
+            ClearSpellWait_();
+        g_pipeline_stage = PS_IDLE;
+        g_pipeline_stack = nullptr;
+    }
     if (g_auto_state.action_wake_stack == stack)
         g_auto_state.action_wake_stack = nullptr;
-    if (g_auto_state.last_handled_stack == stack)
-        g_auto_state.last_handled_stack = nullptr;
 
     WriteLog("[Control] oneshot armed%s side=%d slot=%d cid=0x%X",
         from_pending ? " (pending)" : "",
@@ -470,43 +695,41 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
 static void ArmOneShotManual_(_BattleMgr_* mgr)
 {
     if (!mgr) {
-        g_auto_state.oneshot_pending = true;
+        g_control = CM_ONESHOT_WAIT;
         RefreshControlStatusHint_();
         return;
     }
     if (IsTacticsPhase_(mgr) || IsHiddenBattle(mgr) || mgr->auto_combat) {
-        g_auto_state.oneshot_pending = true;
+        g_control = CM_ONESHOT_WAIT;
         WriteLog("[Control] oneshot pending: tactics/hidden/auto_combat");
         RefreshControlStatusHint_();
         return;
     }
     _BattleStack_* stack = mgr->active_stack;
     if (!stack || stack->count_current <= 0 || !ActiveStackMatchesTrack_(stack)) {
-        g_auto_state.oneshot_pending = true;
+        g_control = CM_ONESHOT_WAIT;
         WriteLog("[Control] oneshot pending: no matching active stack");
         RefreshControlStatusHint_();
         return;
     }
     if (!TryArmOneShotOnStack_(mgr, stack, false)) {
-        g_auto_state.oneshot_pending = true;
+        g_control = CM_ONESHOT_WAIT;
         RefreshControlStatusHint_();
     }
 }
 
 static void ToggleBattleManual_()
 {
-    g_auto_state.battle_manual = !g_auto_state.battle_manual;
     // 切到全手动时，单次接管无意义；切回自动时也清掉未完成的单次锁定。
     ClearOneShotManual_();
-    WriteLog("[Control] battle_manual=%d", g_auto_state.battle_manual ? 1 : 0);
-    RefreshControlStatusHint_();
+    SetControlMode_(g_control == CM_MANUAL ? CM_AUTO : CM_MANUAL);
 }
 
 // 回合控制权判定/消息入口调用：消费钩子记录的热键按下 + 处理待命单次接管。
 static void PollControlHotkeys_(_BattleMgr_* mgr)
 {
     EnsureCombatKbHook_();
-    if (IsPanelActive()) {
+    if (PanelOpen_()) {
         // 设置面板打开期间的热键交给面板自身处理，不生效。
         g_auto_state.kb_toggle_seen = false;
         g_auto_state.kb_oneshot_seen = false;
@@ -523,15 +746,15 @@ static void PollControlHotkeys_(_BattleMgr_* mgr)
         ToggleBattleManual_();
     }
 
-    // 全手动时不需要单次接管；松键也不保留 pending。
-    if (!g_auto_state.battle_manual) {
+    // 全手动时不需要单次接管；松键也不保留待命。
+    if (g_control != CM_MANUAL) {
         if (g_auto_state.kb_oneshot_seen) {
             g_auto_state.kb_oneshot_seen = false;
-            if (!g_auto_state.oneshot_active)
+            if (g_control != CM_ONESHOT_LOCKED)
                 ArmOneShotManual_(mgr);
         }
         // 待命：下一支可接管人类部队出现时锁定。
-        if (g_auto_state.oneshot_pending && !g_auto_state.oneshot_active && mgr) {
+        if (g_control == CM_ONESHOT_WAIT && mgr) {
             _BattleStack_* stack = mgr->active_stack;
             if (stack && stack->count_current > 0
                 && ActiveStackMatchesTrack_(stack)
@@ -540,17 +763,17 @@ static void PollControlHotkeys_(_BattleMgr_* mgr)
                 TryArmOneShotOnStack_(mgr, stack, true);
             }
         }
-    } else if (g_auto_state.oneshot_active || g_auto_state.oneshot_pending) {
-        ClearOneShotManual_();
     }
+    // MANUAL 分支不做事：所有切 CM_MANUAL 的路径都先清后切，
+    // 残留即上游 bug，此处不做静默兜底（掩盖漏清路径）。
 }
 
 // 当前是否应把控制权留给玩家（最高优先级门）。
 static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
 {
     if (!mgr) return false;
-    if (g_auto_state.battle_manual) return true;
-    if (!g_auto_state.oneshot_active) return false;
+    if (g_control == CM_MANUAL) return true;
+    if (g_control != CM_ONESHOT_LOCKED) return false;
     _BattleStack_* stack = mgr->active_stack;
     if (!stack) return true; // 锁定中但活动单位暂不可见：仍不自动执行
     if (ActiveStackIdentityMatches_(stack,
@@ -561,7 +784,7 @@ static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
     WriteLog("[Control] oneshot expired by active change old_slot=%d new_side=%d new_slot=%d",
         g_auto_state.oneshot_slot, stack->def_group_ix, stack->army_slot_ix);
     ClearOneShotManual_();
-    RefreshControlStatusHint_();
+    SetControlMode_(CM_AUTO);
     return false;
 }
 
@@ -570,7 +793,7 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
 {
     __try {
         // action=1 是英雄施法，不结束单次接管：玩家可先施法再给该部队下命令。
-        if (This && g_auto_state.oneshot_active
+        if (This && g_control == CM_ONESHOT_LOCKED
             && This->action != 0 && This->action != 1)
         {
             _BattleStack_* stack = This->active_stack;
@@ -580,13 +803,13 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
                 && ActiveStackIdentityMatches_(stack,
                     g_auto_state.oneshot_side, g_auto_state.oneshot_slot,
                     g_auto_state.oneshot_creature);
-            const bool is_auto_submitted = g_auto_state.last_handled_stack
-                && g_auto_state.last_handled_stack == stack;
+            const bool is_auto_submitted = g_pipeline_stage == PS_HANDLED
+                && g_pipeline_stack == stack;
             if (is_locked && !is_auto_submitted) {
                 WriteLog("[Control] oneshot completed by player action=%d slot=%d",
                     This->action, stack ? stack->army_slot_ix : -1);
                 ClearOneShotManual_();
-                RefreshControlStatusHint_();
+                SetControlMode_(CM_AUTO);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -597,17 +820,15 @@ void ResetAutoState()
 {
     if (IsPanelActive())
         CloseSettingsPanel();
-    g_auto_state.last_handled_stack = nullptr;
     g_auto_state.action_wake_stack = nullptr;
-    g_auto_state.spell_wait_stack = nullptr;
-    g_auto_state.spell_done_stack = nullptr;
+    g_pipeline_stage = PS_IDLE;   // 管线整体清（含 done/handled 残留）
+    g_pipeline_stack = nullptr;
     g_auto_state.spell_wait_slot = -1;
     g_auto_state.spell_wait_key = -1;
     g_auto_state.spell_wait_frames = 0;
     g_auto_state.spell_wait_started = 0;
     g_auto_state.spell_mana_before = 0;
     g_auto_state.spell_casted_before = 0;
-    g_auto_state.spell_waiting = false;
     // F9 全手动是用户对"本场谁执行"的显式选择；取消重打/重绑不清，
     // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
     // 只清单次接管与施法等待等运行时数据。
@@ -617,6 +838,9 @@ void ResetAutoState()
     g_enemy_hp_value[0] = 0;
     g_enemy_hp_value[1] = 0;
     ClearOneShotManual_();
+    // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
+    if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
+        g_control = CM_AUTO;
     g_auto_state.kb_toggle_seen = false;
     g_auto_state.kb_oneshot_seen = false;
     g_auto_state.last_status_text[0] = 0;
@@ -628,6 +852,7 @@ void ResetAutoState()
 
 // 玩家点结果窗「确定/接受」：清空 5 套方案 + 运行时状态。
 // 「取消/重打」不得调用本函数。
+// 重构后由状态机 BE_RESULT_ACCEPTED 边动作取代（PhaseEdgeAction_），保留外壳兼容。
 void OnBattleResultAccepted()
 {
     ClearConfirmedProfiles();
@@ -671,8 +896,11 @@ void EnsureStackTrackingBound()
 
 static void ClearSpellWait_()
 {
-    g_auto_state.spell_waiting = false;
-    g_auto_state.spell_wait_stack = nullptr;
+    // 撤销投递：本回合已投过键的 done 语义保留（POSTED→DONE 不回 IDLE，
+    // 且锚定单位保留以拦截同回合重投）；管线整体清零由 ResetAutoState /
+    // 接管清单位负责。
+    if (g_pipeline_stage == PS_SPELL_POSTED)
+        g_pipeline_stage = PS_SPELL_DONE;
     g_auto_state.spell_wait_slot = -1;
     g_auto_state.spell_wait_key = -1;
     g_auto_state.spell_wait_frames = 0;
@@ -840,11 +1068,10 @@ void SyncActiveProtect()
 // 由 F9（启停打铁）启动。重复调用不重复记日志。
 void PauseAutoExecution()
 {
-    if (!g_auto_state.battle_manual) {
-        g_auto_state.battle_manual = true;
+    if (g_control != CM_MANUAL) {
         ClearOneShotManual_();
+        SetControlMode_(CM_MANUAL);
         WriteLog("[Control] paused after commit; press toggle hotkey to start");
-        RefreshControlStatusHint_();
     }
 }
 
@@ -892,9 +1119,12 @@ static int EnemyAliveHp_(_BattleMgr_* mgr)
 
 // 预计敌方会在阈值回合内全灭时切到全手动。
 // 只看最近两笔取样的掉血，不用更早的回合。
+// 守卫（S5）：仅战斗中·面板关 + 自动模式下判（设计文档 §3.1.2）。
 static void TryAutoStop_(_BattleMgr_* mgr)
 {
-    if (!mgr || g_auto_state.battle_manual) return;
+    if (g_phase != BP_COMBAT_CLOSED) return;
+    if (g_control != CM_AUTO) return;
+    if (!mgr) return;
     const int profile = g_active_profile;
     if (profile < 0 || profile >= 5) return;
     const int threshold = g_stop_turns[profile];
@@ -919,15 +1149,20 @@ static void TryAutoStop_(_BattleMgr_* mgr)
         threshold, g_enemy_hp_value[0], hp, elapsed);
     if (left < 0 || left > threshold) return;
 
-    g_auto_state.battle_manual = true;
+    g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
     ClearOneShotManual_();
     WriteLog("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
         elapsed, g_enemy_hp_value[0], hp, left, threshold);
     RefreshControlStatusHint_();
 }
 
+// 守卫（S5）：仅战斗中·面板关 + 自动模式下判（设计文档 §3.1.1：
+// 全手动、单次接管时不判、不施——原实现缺此守卫，本次修正）。
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
+    if (g_phase != BP_COMBAT_CLOSED) return false;
+    if (g_control != CM_AUTO) return false; // AUTO 才判保活/施法（§3.1.1）
+
     const int strategy = g_protect_strategy[g_active_profile];
     if (strategy == H3AutoPolicy::PS_NONE) return false;
 
@@ -1257,7 +1492,8 @@ static bool SubmitDefend_(_BattleMgr_* mgr, _BattleStack_* self)
     mgr->action_parameter = -1;
     mgr->action_target = -1;
     mgr->action_parameter2 = 0;
-    g_auto_state.last_handled_stack = self;
+    g_pipeline_stage = PS_HANDLED;   // 本回合已处理，防重复下命令
+    g_pipeline_stack = self;
     WriteLog("[Auto] submit DEFEND slot=%d creature=0x%X",
         self->army_slot_ix, self->creature_id);
     return true;
@@ -1272,7 +1508,8 @@ static bool WriteAction_(_BattleMgr_* mgr, _BattleStack_* self,
     mgr->action_parameter = param;
     mgr->action_target = target_hex;
     mgr->action_parameter2 = 0;
-    g_auto_state.last_handled_stack = self;
+    g_pipeline_stage = PS_HANDLED;   // 本回合已处理，防重复下命令
+    g_pipeline_stack = self;
     return true;
 }
 
@@ -1534,6 +1771,7 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
 static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 {
     if (!mgr) return false;
+    if (g_phase != BP_COMBAT_CLOSED) return false; // 状态机守卫（S5.3）
     if (mgr->auto_combat) return false;
     if (IsHiddenBattle(mgr)) return false;
     if (IsTacticsPhase_(mgr)) return false;
@@ -1542,24 +1780,22 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     _BattleStack_* self = mgr->active_stack;
     if (!self || self->count_current <= 0) return false;
 
-    // 活动单位变化：清空施法等待/完成标记与 last_handled。
-    if (g_auto_state.spell_waiting
-        && g_auto_state.spell_wait_stack
-        && g_auto_state.spell_wait_stack != self)
-        ClearSpellWait_();
-    if (g_auto_state.spell_done_stack
-        && g_auto_state.spell_done_stack != self)
-        g_auto_state.spell_done_stack = nullptr;
+    // 活动单位变化：旧单位的管线残留整体清掉（等待/完成/已处理）。
+    if (g_pipeline_stack && g_pipeline_stack != self) {
+        if (g_pipeline_stage == PS_SPELL_POSTED)
+            ClearSpellWait_();
+        g_pipeline_stage = PS_IDLE;
+        g_pipeline_stack = nullptr;
+    }
     if (g_auto_state.action_wake_stack
         && g_auto_state.action_wake_stack != self)
         g_auto_state.action_wake_stack = nullptr;
-    if (g_auto_state.last_handled_stack == self
-        && !g_auto_state.spell_waiting)
+    if (g_pipeline_stage == PS_HANDLED && g_pipeline_stack == self)
         return false; // 本单位已处理完
 
     // 必须是跟踪表中仍存活、身份匹配的人类侧部队。
     if (!ActiveStackMatchesTrack_(self)) {
-        if (g_auto_state.spell_waiting)
+        if (g_pipeline_stage == PS_SPELL_POSTED)
             ClearSpellWait_();
         static void* s_last_mismatch = nullptr;
         if (s_last_mismatch != self) {
@@ -1585,14 +1821,15 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         return false;
 
     // —— 阶段 1：投递快捷施法键 ——
-    if (want_spell && !g_auto_state.spell_waiting
-        && g_auto_state.spell_done_stack != self) {
+    if (want_spell && g_pipeline_stage != PS_SPELL_POSTED
+        && !(g_pipeline_stage == PS_SPELL_DONE && g_pipeline_stack == self)) {
         // 本英雄本回合已施过法：跳过施法，直接进入部队动作。
         if (GetHeroCasted_(mgr, side) != 0) {
             WriteLog("[Spell] already cast this turn side=%d; skip quick key=%d",
                 side, spell_key);
             // 英雄每回合只能施法一次；本部队没有实际尝试，不消费循环槽位。
-            g_auto_state.spell_done_stack = self;
+            g_pipeline_stage = PS_SPELL_DONE;
+            g_pipeline_stack = self;
         } else {
             g_auto_state.spell_mana_before = GetHeroMana_(mgr, side);
             g_auto_state.spell_casted_before = GetHeroCasted_(mgr, side);
@@ -1601,10 +1838,11 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
                 WriteLog("[Spell] trigger failed digit=%d; fallthrough to unit action",
                     spell_key);
                 AdvanceSpellCursor_(runtime, rule.spellSlotCount);
-                g_auto_state.spell_done_stack = self;
+                g_pipeline_stage = PS_SPELL_DONE;
+                g_pipeline_stack = self;
             } else {
-                g_auto_state.spell_waiting = true;
-                g_auto_state.spell_wait_stack = self;
+                g_pipeline_stage = PS_SPELL_POSTED;
+                g_pipeline_stack = self;
                 g_auto_state.spell_wait_slot = idx;
                 g_auto_state.spell_wait_key = spell_key;
                 g_auto_state.spell_wait_frames = 0;
@@ -1617,7 +1855,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     }
 
     // —— 阶段 2：等待施法结果 ——
-    if (g_auto_state.spell_waiting && g_auto_state.spell_wait_stack == self) {
+    if (g_pipeline_stage == PS_SPELL_POSTED && g_pipeline_stack == self) {
         ++g_auto_state.spell_wait_frames;
         const DWORD elapsed = GetTickCount() - g_auto_state.spell_wait_started;
         const int mana_now = GetHeroMana_(mgr, side);
@@ -1640,8 +1878,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 
         // 无论成功/失败/超时都推进游标，避免同一键卡死整场。
         AdvanceSpellCursor_(runtime, rule.spellSlotCount);
-        ClearSpellWait_();
-        g_auto_state.spell_done_stack = self;
+        ClearSpellWait_(); // POSTED→DONE，锚定保留
         // 施法动画/选择目标期间 action 可能被占用；若仍非 0 则下帧再提交主动作。
         if (mgr->action != 0)
             return false;
@@ -1650,7 +1887,8 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     // —— 阶段 3：提交部队主动作 ——
     if (!want_action) {
         // 仅循环施法、主动作为手动：施法流程结束后交回玩家。
-        g_auto_state.last_handled_stack = self;
+        g_pipeline_stage = PS_HANDLED;
+        g_pipeline_stack = self;
         return false;
     }
 
@@ -1668,7 +1906,8 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
         && CanYieldFailedActionToPlayer_(mgr, self->creature_id)) {
         // 不允许降级且配置动作无法落地：本回合停止插件重试，保留原版
         // 人工输入路径。战争机器须先通过对应技能资格判断。
-        g_auto_state.last_handled_stack = self;
+        g_pipeline_stage = PS_HANDLED;
+        g_pipeline_stack = self;
         g_auto_state.action_wake_stack = nullptr;
         WriteLog("[Auto] configured action failed; yield to player slot=%d cid=0x%X action=%d",
             self->army_slot_ix, self->creature_id, (int)rule.action);
@@ -1682,6 +1921,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 int DecideTakeover(_BattleMgr_* mgr)
 {
     if (!mgr) return CD_KEEP_ORIGINAL;
+    if (g_phase != BP_COMBAT_CLOSED) return CD_KEEP_ORIGINAL; // 状态机守卫（S5.3）
     if (mgr->auto_combat) return CD_KEEP_ORIGINAL;
     if (IsHiddenBattle(mgr)) return CD_KEEP_ORIGINAL;
     if (IsTacticsPhase_(mgr)) return CD_KEEP_ORIGINAL;
@@ -1776,6 +2016,7 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
 {
     _BattleMgr_* mgr = o_BattleMgr;
     if (!mgr) return false;
+    if (g_phase != BP_COMBAT_CLOSED) return false; // 状态机守卫（S5.3）
     __try {
         PollControlHotkeys_(mgr);
         const int decision = DecideTakeover(mgr);
@@ -1808,16 +2049,13 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         TryProtectCast_(This);
         TryAutoStop_(This);
         if (This && This->active_stack) {
-            if (g_auto_state.last_handled_stack
-                && g_auto_state.last_handled_stack != This->active_stack)
-                g_auto_state.last_handled_stack = nullptr;
-            if (g_auto_state.spell_done_stack
-                && g_auto_state.spell_done_stack != This->active_stack)
-                g_auto_state.spell_done_stack = nullptr;
-            if (g_auto_state.spell_waiting
-                && g_auto_state.spell_wait_stack
-                && g_auto_state.spell_wait_stack != This->active_stack)
-                ClearSpellWait_();
+            // 活动单位变化：旧单位管线残留整体清（等待/完成/已处理）。
+            if (g_pipeline_stack && g_pipeline_stack != This->active_stack) {
+                if (g_pipeline_stage == PS_SPELL_POSTED)
+                    ClearSpellWait_();
+                g_pipeline_stage = PS_IDLE;
+                g_pipeline_stack = nullptr;
+            }
         }
 
         const int decision = DecideTakeover(This);

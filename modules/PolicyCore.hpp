@@ -524,17 +524,25 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 
 // 5 套方案的磁盘存档（加载/保存按钮）。
 // 纯编解码：一行文本 "H3AP1 <方案1策略> ... <方案5策略> <105×规则>"，
-// 规则按方案优先、槽位其次排列，每条 34 个十进制整数。
+// 规则按方案优先、槽位其次排列，每条 59 个十进制整数。
 // 存档只承载规则本身，不含生物身份（身份重排由运行时稳定身份完成）。
 // 文本在 5 个策略之后还有 5 个自动停止回合（0..99）。
-// 旧档没有这 5 个数时按默认 10 读入。
+// 存档格式：5 策略 + 5 停止回合 + 5*21 条规则（每条 59 个整数）。
 static constexpr int PROFILE_STORE_COUNT = 5;
 static constexpr int PROFILE_STORE_SLOTS = 21;
-static constexpr int PROFILE_STORE_RULE_FIELDS = 34;
-static constexpr int PROFILE_STORE_LEGACY_INTS =
-    PROFILE_STORE_COUNT + PROFILE_STORE_COUNT * PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
+// 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
+// （曾因手写 34 与实写 59 脱节导致越界写堆 = 保存后崩溃的根因）。
+// 用表达式自校验：6 头 + 16 航点 + 1 计数 + 2*10 近战对 + 1 计数 + 3 杂项
+// + 10 施法槽 + 2 尾 = 59。
+static constexpr int PROFILE_STORE_RULE_FIELDS =
+    6 + MOVE_WAYPOINT_CAPACITY + 1 + 2 * MELEE_PAIR_CAPACITY + 1 + 3
+    + SPELL_SLOT_CAPACITY + 2;
+// 旧档（3575/3580 整数）由越界写堆的坏版本写出：交错覆盖、不可靠且
+// 按新步进读会越界读，一律拒绝（读档失败，需重新配置）。
+static constexpr int PROFILE_STORE_LEGACY_INTS = 3575;
 static constexpr int PROFILE_STORE_INTS =
-    PROFILE_STORE_LEGACY_INTS + PROFILE_STORE_COUNT;
+    PROFILE_STORE_COUNT + PROFILE_STORE_COUNT
+    + PROFILE_STORE_COUNT * PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
 
 inline void EncodeRuleInts(const AutoStackRule& rule, int* out)
@@ -632,6 +640,7 @@ inline int EncodeProfileStoreText(const uint8_t strategies[PROFILE_STORE_COUNT],
             __try {
                 EncodeRuleInts(rules[p][s], ints + n);
             } __except (1) {
+                delete[] ints;
                 return -100000 - p * 100 - s;
             }
             n += PROFILE_STORE_RULE_FIELDS;
@@ -683,8 +692,8 @@ inline bool DecodeProfileStoreText(const char* text,
         }
         ints[count++] = sign * v;
     }
-    const bool legacy = count == PROFILE_STORE_LEGACY_INTS;
-    if (bad || (count != PROFILE_STORE_INTS && !legacy)) {
+    if (bad || count != PROFILE_STORE_INTS) {
+        // 含旧坏档（3575/3580 整数：越界写堆版本交错的产物），一律拒绝。
         delete[] ints;
         return false;
     }
@@ -698,10 +707,6 @@ inline bool DecodeProfileStoreText(const char* text,
         decoded_strategy[i] = static_cast<uint8_t>(ints[n++]);
     }
     for (int i = 0; i < PROFILE_STORE_COUNT; ++i) {
-        if (legacy) {
-            decoded_stop[i] = DEFAULT_STOP_TURNS;
-            continue;
-        }
         if (ints[n] < 0 || ints[n] > 99) { delete[] ints; return false; }
         decoded_stop[i] = static_cast<uint8_t>(ints[n++]);
     }

@@ -40,6 +40,7 @@ static struct Config {
     int  disable_on_start;     // 0=不禁用（默认启用），1=禁用
     int  toggle_manual_vk;     // F9：本场自动/全手动切换
     int  one_shot_manual_vk;   // J：单次接管当前/下一支部队
+    int  open_settings_vk;     // P：战斗中打开设置面板（§10.1）
 } cfg;
 
 static char g_ini_path[MAX_PATH];
@@ -223,6 +224,21 @@ static bool IsAllowedOneShotVk_(int vk)
     return (vk >= 'A' && vk <= 'Z' && vk != 'E');
 }
 
+// 打开设置面板键（S8）：单个字母，排除原版战斗键 A C D E H I L O Q R S T W
+// 与本插件已用键（F9 启停、J 单次接管、1-0 施法）。
+static bool IsAllowedOpenPanelVk_(int vk)
+{
+    if (vk < 'A' || vk > 'Z') return false;
+    switch (vk) {
+    case 'A': case 'C': case 'D': case 'E': case 'H': case 'I':
+    case 'L': case 'O': case 'Q': case 'R': case 'S': case 'T':
+    case 'W': case 'J':
+        return false;
+    default:
+        return true;
+    }
+}
+
 static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 {
     if (!text) return default_vk;
@@ -336,19 +352,29 @@ static void ReadConfig()
 
     char toggle_buf[64] = {};
     char oneshot_buf[64] = {};
+    char openpanel_buf[64] = {};
     GetPrivateProfileStringA("Hotkeys", "ToggleManual", "F9",
         toggle_buf, sizeof(toggle_buf), f);
     GetPrivateProfileStringA("Hotkeys", "OneShotManual", "J",
         oneshot_buf, sizeof(oneshot_buf), f);
+    GetPrivateProfileStringA("Hotkeys", "OpenSettings", "P",
+        openpanel_buf, sizeof(openpanel_buf), f);
     cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F9, false);
     cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, 'J', true);
     if (!IsAllowedOneShotVk_(cfg.one_shot_manual_vk)) {
         WriteLog("配置警告：OneShotManual 只允许单个字母，已回退到 J");
         cfg.one_shot_manual_vk = 'J';
     }
+    cfg.open_settings_vk = ParseHotkeyVk_(openpanel_buf, 'P', true);
+    if (!IsAllowedOpenPanelVk_(cfg.open_settings_vk)
+        || cfg.open_settings_vk == cfg.one_shot_manual_vk) {
+        WriteLog("配置警告：OpenSettings 键位非法或与 OneShotManual 冲突，已回退到 P");
+        cfg.open_settings_vk = 'P';
+    }
 
-    WriteLog("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X",
-        cfg.disable_on_start, cfg.toggle_manual_vk, cfg.one_shot_manual_vk);
+    WriteLog("配置加载：DisableOnStart=%d ToggleManual=0x%X OneShotManual=0x%X OpenSettings=0x%X",
+        cfg.disable_on_start, cfg.toggle_manual_vk, cfg.one_shot_manual_vk,
+        cfg.open_settings_vk);
 }
 
 static const char* HotkeyDisplayName_(int vk)

@@ -244,8 +244,10 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 DrawPanelToBuffer_();
             } else if (s_spell_pick_cell >= 0)
                 EndSpellPick_();
-            else if (!s_panel_hidden_for_pick)
+            else if (!s_panel_hidden_for_pick) {
+                SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_CANCEL); // 状态机关闭边（S2.2）
                 CloseSettingsPanel();
+            }
             return 1;  // swallow
         }
         if (wParam == VK_RETURN && s_stop_turns_editing) {
@@ -257,6 +259,7 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && s_spell_pick_cell < 0 && !s_help_modal_open
             && !s_protect_dd_open) {
+            SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
         }
@@ -1951,6 +1954,8 @@ static void CheckBattleResultLifecycle_()
         s_result_closed_since = 0;
         if (!s_saw_cpresult) {
             s_saw_cpresult = true;
+            // 状态机事件源（S1）：结果窗出现（含快速战斗未经战斗 UI 的路径）。
+            SetPhase_(BP_RESULT, BE_RESULT_SHOWN);
             H3AutoPolicy::ApplyResultLifecycle(
                 &s_result_lifecycle, H3AutoPolicy::RESULT_SHOWN);
             s_result_accept_armed = false;
@@ -2008,7 +2013,8 @@ static void CheckBattleResultLifecycle_()
         s_result_cancel_armed = false;
         s_result_closed_since = 0;
         s_panel_popup_done = false;
-        EnsureStackTrackingBound();
+        // 状态机重打边（S3.2）：边动作=EnsureStackTrackingBound（重排+重绑+清运行时）。
+        SetPhase_(BP_COMBAT_CLOSED, BE_RESULT_RETRY);
         return;
     }
 
@@ -2023,7 +2029,8 @@ static void CheckBattleResultLifecycle_()
         s_result_cancel_armed = false;
         s_result_closed_since = 0;
         s_panel_popup_done = false;
-        OnBattleResultAccepted();
+        // 状态机接受边（S3.3）：清方案+运行时，ENDED 瞬态后续转 PEACE。
+        SetPhase_(BP_ENDED, BE_RESULT_ACCEPTED);
         return;
     }
 
@@ -2075,7 +2082,25 @@ static void CheckAutoFightDialogClosed()
 
     if (battle_ui_exists) {
         s_battle_ui_missing_frames = 0;
+        // 状态机事件源（S1）：战斗 UI 出现。
+        if (g_phase == BP_PEACE)
+            SetPhase_(BP_COMBAT_CLOSED, BE_BATTLE_UI_APPEARED);
+        // S8：打开面板热键消费（面板关分支；与右键路径同构：先开后迁）。
+        if (g_auto_state.kb_open_panel_seen) {
+            g_auto_state.kb_open_panel_seen = false;
+            if (g_phase == BP_COMBAT_CLOSED && !IsPanelActive()) {
+                WriteLog("[Panel] OpenSettings hotkey");
+                OpenSettingsPanel_();
+                if (s_p.active)
+                    SetPhase_(BP_COMBAT_OPEN, BE_PANEL_OPEN_REQUESTED);
+            }
+        }
     } else if (++s_battle_ui_missing_frames >= 3) {
+        // 状态机事件源（S1/S4）：战斗 UI 消失兜底（读档/中途退出等未经结算）。
+        // 重打宽限期内不视为兜底（UI 重建常超 3 帧，见重构步骤 S4.2）。
+        if ((InCombat_() || g_phase == BP_RESULT)
+            && GetTickCount() > g_ui_gone_grace_until)
+            SetPhase_(BP_ENDED, BE_BATTLE_UI_GONE);
         s_saw_explanation_dlg_in_battle = false;
         s_autofight_right_press_armed = false;
         s_panel_popup_done = false;
@@ -2096,6 +2121,9 @@ static void CheckAutoFightDialogClosed()
         s_autofight_right_press_armed = false;
         WriteLog("[AutoFight] 说明框已关闭且 BattleUI 仍在，打开设置面板。");
         OpenSettingsPanel_();
+        // 状态机打开边（S2.1）：面板确认打开后再迁移，杜绝「已迁移但没开」死状态。
+        if (s_p.active)
+            SetPhase_(BP_COMBAT_OPEN, BE_PANEL_OPEN_REQUESTED);
         s_panel_popup_done = true;
     } else if (!right_button_down && !s_saw_explanation_dlg_in_battle) {
         // 在目标按钮上按下但没有出现对应说明框时，不把状态带到下一次右键。
@@ -2267,13 +2295,14 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         x + 16, y + 12, w - 32, 26,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 
-    char hotkey_line[96];
-    snprintf(hotkey_line, sizeof(hotkey_line), "热键：%s 启停打铁 · %s 单次接管",
+    char hotkey_line[128];
+    snprintf(hotkey_line, sizeof(hotkey_line), "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置",
         HotkeyDisplayName_(cfg.toggle_manual_vk),
-        HotkeyDisplayName_(cfg.one_shot_manual_vk));
+        HotkeyDisplayName_(cfg.one_shot_manual_vk),
+        HotkeyDisplayName_(cfg.open_settings_vk));
 
     const char* help_lines[] = {
-        "打开设置窗口：右键点击“自动战斗”",
+        "打开设置窗口：右键“自动战斗”或按上方的打开设置键",
         "方案：5 套本场有效，确定才保存",
         "施法/近战/移动：点 ＋ 后按提示设置",
         "保活：卡片勾选入队，策略在方案行下方",
@@ -3345,8 +3374,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         s_p.scroll_dragging = false;
         if (activate) {
             if (pressed == 1) {
+                SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
                 CommitAndCloseSettingsPanel_();
             } else if (pressed == 2) {
+                SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_CANCEL); // 状态机关闭边（S2.2）
                 CloseSettingsPanel();
             } else if (pressed == 3) {
                 // 打开帮助前收起下拉，避免模态层下还有展开列表。
