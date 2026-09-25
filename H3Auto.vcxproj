@@ -64,6 +64,7 @@
     <ClInclude Include="modules\PolicyCore.hpp" />
     <ClInclude Include="modules\BattleState.hpp" />
     <ClInclude Include="modules\PanelDraw.hpp" />
+    <ClInclude Include="modules\PanelInput.hpp" />
     <ClInclude Include="modules\PanelLayout.hpp" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
