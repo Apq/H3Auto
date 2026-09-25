@@ -249,9 +249,11 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     out_path[0] = 0;
     fail_reason[0] = 0;
 
+    // 5 槽：最近 4 个日志 + 1 个发送说明（QQ 号写进包内 txt，解压即可复制；
+    // 剪贴板继续只放 .7z 文件本身，不被文本挤掉）。
     LogPackEntry entries[5];
-    const int n = LogPackCollectRecent_(entries, 5);
-    if (n <= 0) {
+    const int nLogs = LogPackCollectRecent_(entries, 4);
+    if (nLogs <= 0) {
         _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_no_logs"));
         fail_reason[reason_size - 1] = 0;
         return false;
@@ -268,7 +270,7 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     DWORD crcs[5] = {};
     BYTE props[LZMA_PROPS_SIZE] = {};
     int done = 0;
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < nLogs; ++i) {
         char path[MAX_PATH] = {};
         _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, entries[i].name);
         path[sizeof(path) - 1] = 0;
@@ -319,8 +321,32 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         }
         done = i + 1;
     }
+    // 发送说明：UTF-8 带 BOM 的 txt（记事本双击即正确显示，QQ 号可复制）。
+    {
+        char note[512];
+        _snprintf(note, sizeof(note) - 1, "%s", T("help.pack_note"));
+        note[sizeof(note) - 1] = 0;
+        const int note_len = (int)strlen(note);
+        const int total_len = 3 + note_len;
+        BYTE* nd = new(std::nothrow) BYTE[total_len];
+        if (!nd) { _snprintf(fail_reason, reason_size - 1, "alloc"); goto bail; }
+        nd[0] = 0xEF; nd[1] = 0xBB; nd[2] = 0xBF;
+        memcpy(nd + 3, note, note_len);
+        const int idx = nLogs;
+        strncpy(entries[idx].name, "readme.txt", sizeof(entries[idx].name) - 1);
+        datas[idx] = nd;
+        unpack_sizes[idx] = (DWORD)total_len;
+        crcs[idx] = LogPackCrc_(nd, total_len);
+        packs[idx] = LogPackLzma_(nd, total_len, &pack_lens[idx], props);
+        if (!packs[idx]) {
+            _snprintf(fail_reason, reason_size - 1, "readme");
+            goto bail;
+        }
+        done = idx + 1;
+    }
     {
         // ---- 组 .7z 容器：签名头(32) + pack 数据 + 明文 header ----
+        const int n = done;
         size_t pack_total = 0;
         size_t names_bytes = 0;
         for (int i = 0; i < n; ++i) {
@@ -441,14 +467,14 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             goto bail;
         }
         LogInfo("[LogPack] 已打包 %d 个日志（LZMA）→ %s（已文件式复制到剪贴板）",
-            n, zip_name);
+            done, zip_name);
         for (int i = 0; i < done; ++i) delete[] datas[i];
-        for (int i = 0; i < n; ++i) if (packs[i]) delete[] packs[i];
+        for (int i = 0; i < done; ++i) if (packs[i]) delete[] packs[i];
         return true;
     }
 
 bail:
     for (int i = 0; i < done; ++i) delete[] datas[i];
-    for (int i = 0; i < n; ++i) if (packs[i]) delete[] packs[i];
+    for (int i = 0; i < done; ++i) if (packs[i]) delete[] packs[i];
     return false;
 }

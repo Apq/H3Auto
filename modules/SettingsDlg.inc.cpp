@@ -64,7 +64,6 @@ static bool CommitSpellSlotPick_(int slot_value);
 static void DrawPanelToBuffer_();
 // 循环施法录入状态需在键盘钩子前声明。
 static bool s_help_modal_open = false;
-// 帮助模态里的日志级别下拉展开态（点击选项/外部收起）。
 static bool s_help_log_dd_open = false;
 static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
 static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
@@ -1244,15 +1243,27 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     char reason[192] = {};
                     if (PackRecentLogs_(zip_path, sizeof(zip_path),
                             reason, sizeof(reason))) {
-                        char msg[MAX_PATH + 128];
+                        // 系统对话框：文本可选中复制（玩家要复制 QQ 号），
+                        // 自绘状态栏/模态文字都做不到复制。
+                        char msg[MAX_PATH + 256];
                         _snprintf(msg, sizeof(msg) - 1, T("help.pack_ok"), zip_path);
                         msg[sizeof(msg) - 1] = 0;
-                        SetStatusText_(msg, 8000);
+                        // ini 值写不了真换行：| 记换行位，弹窗前还原。
+                        for (char* c = msg; *c; ++c) if (*c == '|') *c = '\n';
+                        wchar_t wmsg[MAX_PATH + 256] = {}, wtitle[32] = {};
+                        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wmsg, MAX_PATH + 256);
+                        MultiByteToWideChar(CP_UTF8, 0, T("help.pack_title"), -1, wtitle, 32);
+                        MessageBoxW(nullptr, wmsg, wtitle, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
                     } else {
                         char msg[512];
                         _snprintf(msg, sizeof(msg) - 1, T("help.pack_fail"), reason);
                         msg[sizeof(msg) - 1] = 0;
-                        SetStatusText_(msg, 8000);
+                        // ini 值写不了真换行：| 记换行位，弹窗前还原。
+                        for (char* c = msg; *c; ++c) if (*c == '|') *c = '\n';
+                        wchar_t wmsg[512] = {}, wtitle[32] = {};
+                        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wmsg, 512);
+                        MultiByteToWideChar(CP_UTF8, 0, T("help.pack_title"), -1, wtitle, 32);
+                        MessageBoxW(nullptr, wmsg, wtitle, MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
                         LogWarn("[LogPack] 打包失败：%s", reason);
                     }
                     return;
