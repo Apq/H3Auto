@@ -623,15 +623,14 @@ static void DrawPanelToBuffer_()
 
     DrawPanelButtons_(scr);
 
-    // 方案 A tips：命中提示区即刷新文本与 3 秒保持期；移开后不刷新，
-    // 到期自动消失（静止悬停也保持——每帧按光标位置判定，不依赖移动事件）。
+    // 状态栏：tips 与结果文字共用 SetStatusText_（富文本 + 统一延时消失）。
+    // 悬停命中每帧刷新保持期；移开后不再刷新，到期自动清空。
     {
         const H3POINT cursor = H3POINT::GetCursorPosition();
-        const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y);
-        if (tip) {
-            strncpy(s_tip_text, tip, sizeof(s_tip_text) - 1);
-            s_tip_text[sizeof(s_tip_text) - 1] = 0;
-            s_tip_deadline = GetTickCount() + 3000;
+        if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
+            char rich[256];
+            snprintf(rich, sizeof(rich), "{03}%s", tip);
+            SetStatusText_(rich, 3000);
         }
     }
 
@@ -639,19 +638,9 @@ static void DrawPanelToBuffer_()
         if (GetTickCount() >= s_status_until)
             s_status_text[0] = 0;
         else
-            DrawTxt(scr, GetSmallFont(), s_status_text,
+            DrawRichTxt(scr, GetSmallFont(), s_status_text,
                 20, BTN_Y + BTN_H + 14, PANEL_W - 40, 20,
-                s_status_error ? (INT32)eTextColor::RED
-                               : (INT32)eTextColor::LIGHT_GREEN,
-                eTextAlignment::MIDDLE_CENTER);
-    } else if (s_tip_text[0]) {
-        // 提示色用金色：区别于成功（绿）/失败（红）；结果文字出现时优先。
-        if (GetTickCount() >= s_tip_deadline)
-            s_tip_text[0] = 0;
-        else
-            DrawTxt(scr, GetSmallFont(), s_tip_text,
-                20, BTN_Y + BTN_H + 14, PANEL_W - 40, 20,
-                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+                (INT32)eTextColor::WHITE);
     }
 
     // 保活策略展开列表：盖住金框上缘/第一行格子，画在格子之后。

@@ -106,13 +106,21 @@ static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
 static int  s_stop_turns_caret = 0;        // 插入位置（0..文本长度）
 static DWORD s_stop_turns_caret_tick = 0;  // 光标闪烁基准（按键后重置，输入即可见）
 static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到 999
-static char s_status_text[96] = {};
+static char s_status_text[256] = {};
 static DWORD s_status_until = 0;
-static bool s_status_error = false;
-// 悬停提示（方案 A tips）：命中提示区期间每帧刷新 3 秒保持期；移开后
-// 到期自动清空。结果文字（成功/失败）绘制优先级高于提示，即被新状态替换。
-static char s_tip_text[192] = {};
-static DWORD s_tip_deadline = 0;
+
+// 状态栏统一入口：富文本（{XX} 颜色标记，XX 为两位十六进制 eTextColor 值，
+// 如 {1B}红 {0E}绿 {03}金），整段按 hold_ms 延时后自动消失；新文本立即替换旧文本。
+static void SetStatusText_(const char* rich_text, DWORD hold_ms)
+{
+    s_status_text[0] = 0;
+    if (rich_text && rich_text[0]) {
+        strncpy(s_status_text, rich_text, sizeof(s_status_text) - 1);
+        s_status_text[sizeof(s_status_text) - 1] = 0;
+        s_status_until = GetTickCount() + hold_ms;
+    }
+}
+
 static HHOOK s_kb_hook = nullptr;
 static HHOOK s_mouse_hook = nullptr;
 static int s_spell_pick_cell = -1;
@@ -818,10 +826,7 @@ static void SaveProfilesToDisk_()
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
     WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已存档" : "存档失败", slot_path);
-    snprintf(s_status_text, sizeof(s_status_text), "%s",
-        ok ? "存档成功" : "存档失败");
-    s_status_error = !ok;
-    s_status_until = GetTickCount() + 5000;
+    SetStatusText_(ok ? "{0E}存档成功" : "{1B}存档失败", 5000);
     DrawPanelToBuffer_();
 }
 
@@ -872,10 +877,7 @@ static void LoadProfilesFromDisk_()
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
     WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path);
-    snprintf(s_status_text, sizeof(s_status_text), "%s",
-        ok ? "读档成功" : "读档失败");
-    s_status_error = !ok;
-    s_status_until = GetTickCount() + 5000;
+    SetStatusText_(ok ? "{0E}读档成功" : "{1B}读档失败", 5000);
     DrawPanelToBuffer_();
 }
 

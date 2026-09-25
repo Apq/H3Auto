@@ -34,33 +34,81 @@ static void Fill(H3LoadedPcx16* scr, int x, int y, int w, int h, int r, int g, i
     scr->FillRectangle(x, y, w, h, (BYTE)r, (BYTE)g, (BYTE)b);
 }
 
+// UTF-8 源码字符串 → 游戏字体的 GBK 字节；纯 ASCII 原样返回。
+// 返回指向 out 或原串的指针，out 需 512 字节。
+static const char* ToGbk_(const char* text, char* out, int out_size)
+{
+    bool ascii = true;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p)
+        if (*p >= 0x80) { ascii = false; break; }
+    if (ascii) return text;
+    wchar_t wide[256] = {};
+    const int wide_len = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, _countof(wide));
+    if (wide_len > 0
+        && WideCharToMultiByte(936, 0, wide, -1, out, out_size, nullptr, nullptr) > 0)
+        return out;
+    return text;
+}
+
 static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     int x, int y, int w, int h, INT32 color,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
 {
     if (!fnt || !text || w <= 0 || h <= 0) return;
-
-    // The project uses UTF-8 source files, while the Chinese game font expects
-    // GBK byte sequences. ASCII can be passed through unchanged.
-    bool ascii = true;
-    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
-        if (*p >= 0x80) { ascii = false; break; }
-    }
-    if (ascii) {
-        scr->TextDraw(fnt, text, x, y, w, h, (eTextColor)color, align);
-        return;
-    }
-
-    wchar_t wide[256] = {};
     char gbk[512] = {};
-    const int wide_len = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, _countof(wide));
-    if (wide_len > 0
-        && WideCharToMultiByte(936, 0, wide, -1, gbk, sizeof(gbk), nullptr, nullptr) > 0)
-    {
-        scr->TextDraw(fnt, gbk, x, y, w, h, (eTextColor)color, align);
-    } else {
-        scr->TextDraw(fnt, text, x, y, w, h, (eTextColor)color, align);
+    scr->TextDraw(fnt, ToGbk_(text, gbk, sizeof(gbk)),
+        x, y, w, h, (eTextColor)color, align);
+}
+
+// 富文本：{XX} 切换颜色（XX 为两位十六进制 eTextColor 值），整行居中绘制。
+// 段数有上限，超出的标记按普通文字处理。
+static void DrawRichTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
+    int x, int y, int w, int h, INT32 default_color)
+{
+    if (!fnt || !text || w <= 0 || h <= 0) return;
+    struct Seg { const char* s; int len; INT32 color; };
+    Seg segs[16];
+    int n = 0;
+    INT32 color = default_color;
+    const char* p = text;
+    while (*p && n < 16) {
+        if (p[0] == '{' && isxdigit((unsigned char)p[1])
+            && isxdigit((unsigned char)p[2]) && p[3] == '}') {
+            color = (INT32)strtol(p + 1, nullptr, 16);
+            p += 4;
+            continue;
+        }
+        const char* start = p;
+        while (*p && !(p[0] == '{' && isxdigit((unsigned char)p[1])
+            && isxdigit((unsigned char)p[2]) && p[3] == '}'))
+            ++p;
+        segs[n].s = start;
+        segs[n].len = (int)(p - start);
+        segs[n].color = color;
+        ++n;
     }
+    int total = 0;
+    char plain[256] = {};
+    for (int i = 0; i < n; ++i) {
+        if (total + segs[i].len >= (int)sizeof(plain)) break;
+        memcpy(plain + total, segs[i].s, segs[i].len);
+        total += segs[i].len;
+    }
+    plain[total] = 0;
+    char* gbk_buf = new char[512];
+    const int text_w = fnt->GetMaxLineWidth(ToGbk_(plain, gbk_buf, 512));
+    int cx = x + (w - text_w) / 2;
+    for (int i = 0; i < n; ++i) {
+        char seg[256] = {};
+        const int len = segs[i].len < (int)sizeof(seg) - 1
+            ? segs[i].len : (int)sizeof(seg) - 1;
+        memcpy(seg, segs[i].s, len);
+        const int seg_w = fnt->GetMaxLineWidth(ToGbk_(seg, gbk_buf, 512));
+        DrawTxt(scr, fnt, seg, cx, y, seg_w > 0 ? seg_w : 1, h,
+            segs[i].color, eTextAlignment::MIDDLE_LEFT);
+        cx += seg_w;
+    }
+    delete[] gbk_buf;
 }
 
 static WORD PanelRGB888To565_(int r, int g, int b)
