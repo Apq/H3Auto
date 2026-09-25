@@ -629,7 +629,7 @@ static void DrawPanelToBuffer_()
         const H3POINT cursor = H3POINT::GetCursorPosition();
         if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
             char rich[256];
-            snprintf(rich, sizeof(rich), "{03}%s", tip);
+            snprintf(rich, sizeof(rich), "{金}%s", tip);
             SetStatusText_(rich, 3000);
         }
     }

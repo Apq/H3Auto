@@ -109,8 +109,8 @@ static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到
 static char s_status_text[256] = {};
 static DWORD s_status_until = 0;
 
-// 状态栏统一入口：富文本（{XX} 颜色标记，XX 为两位十六进制 eTextColor 值，
-// 如 {1B}红 {0E}绿 {03}金），整段按 hold_ms 延时后自动消失；新文本立即替换旧文本。
+// 状态栏统一入口：富文本（{颜色名} 标记，如 {绿}{红}{金}{白}{灰}{黄}{蓝}，
+// 也认 {XX} 两位十六进制），整段按 hold_ms 延时后自动消失；新文本立即替换旧文本。
 static void SetStatusText_(const char* rich_text, DWORD hold_ms)
 {
     s_status_text[0] = 0;
@@ -826,7 +826,7 @@ static void SaveProfilesToDisk_()
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
     WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已存档" : "存档失败", slot_path);
-    SetStatusText_(ok ? "{0E}存档成功" : "{1B}存档失败", 5000);
+    SetStatusText_(ok ? "{绿}存档成功" : "{红}存档失败", 5000);
     DrawPanelToBuffer_();
 }
 
@@ -877,7 +877,7 @@ static void LoadProfilesFromDisk_()
     ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
     WriteLog("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
         ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path);
-    SetStatusText_(ok ? "{0E}读档成功" : "{1B}读档失败", 5000);
+    SetStatusText_(ok ? "{绿}读档成功" : "{红}读档失败", 5000);
     DrawPanelToBuffer_();
 }
 

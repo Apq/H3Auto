@@ -60,7 +60,8 @@ static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
         x, y, w, h, (eTextColor)color, align);
 }
 
-// 富文本：{XX} 切换颜色（XX 为两位十六进制 eTextColor 值），整行居中绘制。
+// 富文本：{颜色名} 或 {XX} 切换颜色，整行居中绘制。
+// 颜色名：金 绿 红 白 普通 灰 黄 蓝 青 高亮；XX 为两位十六进制 eTextColor 值。
 // 段数有上限，超出的标记按普通文字处理。
 static void DrawRichTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     int x, int y, int w, int h, INT32 default_color)
@@ -70,18 +71,49 @@ static void DrawRichTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     Seg segs[16];
     int n = 0;
     INT32 color = default_color;
+
+    // {颜色名} → eTextColor；名字按 UTF-8 字节比较。未知名返回 -1。
+    auto named_color = [](const char* s, int len) -> INT32 {
+        struct Name { const char* n; int l; INT32 c; };
+        static const Name kNames[] = {
+            { "\xe9\x87\x91", 3, (INT32)eTextColor::GOLD },        // 金
+            { "\xe7\xbb\xbf", 3, (INT32)eTextColor::LIGHT_GREEN }, // 绿
+            { "\xe7\xba\xa2", 3, (INT32)eTextColor::RED },          // 红
+            { "\xe7\x99\xbd", 3, (INT32)eTextColor::WHITE },        // 白
+            { "\xe6\x99\xae\xe9\x80\x9a", 6, (INT32)eTextColor::REGULAR }, // 普通
+            { "\xe7\x81\xb0", 3, (INT32)eTextColor::GRAY },         // 灰
+            { "\xe9\xbb\x84", 3, (INT32)eTextColor::YELLOW },       // 黄
+            { "\xe8\x93\x9d", 3, (INT32)eTextColor::BLUE },         // 蓝
+            { "\xe9\x9d\x92", 3, (INT32)eTextColor::CYAN },         // 青
+            { "\xe9\xab\x98\xe4\xba\xae", 6, (INT32)eTextColor::HIGHLIGHT }, // 高亮
+        };
+        for (const Name& nm : kNames)
+            if (nm.l == len && memcmp(nm.n, s, len) == 0) return nm.c;
+        return -1;
+    };
+
+    // 当前位置若是颜色标记，返回标记长度并写出颜色；否则返回 0。
+    auto color_mark = [&](const char* p, INT32* out_color) -> int {
+        if (p[0] != '{') return 0;
+        const char* end = strchr(p + 1, '}');
+        if (!end || end - p > 9) return 0;
+        const int len = (int)(end - (p + 1));
+        const INT32 named = named_color(p + 1, len);
+        if (named >= 0) { *out_color = named; return len + 2; }
+        if (len == 2 && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+            *out_color = (INT32)strtol(p + 1, nullptr, 16);
+            return 4;
+        }
+        return 0;
+    };
+
     const char* p = text;
     while (*p && n < 16) {
-        if (p[0] == '{' && isxdigit((unsigned char)p[1])
-            && isxdigit((unsigned char)p[2]) && p[3] == '}') {
-            color = (INT32)strtol(p + 1, nullptr, 16);
-            p += 4;
-            continue;
-        }
+        INT32 next = color;
+        const int mark = color_mark(p, &next);
+        if (mark) { color = next; p += mark; continue; }
         const char* start = p;
-        while (*p && !(p[0] == '{' && isxdigit((unsigned char)p[1])
-            && isxdigit((unsigned char)p[2]) && p[3] == '}'))
-            ++p;
+        while (*p && !color_mark(p, &next)) ++p;
         segs[n].s = start;
         segs[n].len = (int)(p - start);
         segs[n].color = color;
