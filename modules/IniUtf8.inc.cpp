@@ -1,7 +1,7 @@
 // ========== UTF-8 ini 读写 ==========
 // H3Auto.ini 与 lang\*.ini 为 UTF-8 文本（写统一带 BOM，读兼容无 BOM）。
 // GetPrivateProfileStringA 是 ANSI 接口，读 UTF-8 中文值会按 GBK 误解成
-// 乱码，因此手写解析。路径参数按系统 ACP 传 char*（与 GetModuleFileNameA
+// 乱码，因此手写解析。路径参数为 UTF-8 char*（开文件时转宽字符 _wfopen
 // 一致），文件内容按 UTF-8 字节原样返回（调用方内部字符串均为 UTF-8）。
 // 行内注释只认 ';'（不认 '#'，避免截断 {#RRGGBB} 颜色标记）；
 // 行首 '#' 或 ';' 均为注释行。节/键比较不区分大小写。
@@ -9,6 +9,32 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+
+// 路径缓冲上限。用户可能把游戏装在很深的目录里，MAX_PATH(260) 不够；
+// 4MB 只用于堆上的临时缓冲，静态路径与栈上缓冲仍用 MAX_PATH。
+static const int kPathCap_ = 4 * 1024 * 1024;
+
+// UTF-8 路径转宽字符。内部路径一律存 UTF-8，开文件走宽字符接口
+// （_wfopen），不再经过系统 ANSI 代码页。
+static wchar_t* Utf8ToWide_(const char* utf8, wchar_t* out, int out_chars)
+{
+    if (!out || out_chars <= 0) return out;
+    out[0] = 0;
+    if (utf8 && utf8[0])
+        MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out, out_chars);
+    out[out_chars - 1] = 0;
+    return out;
+}
+
+// 堆上的宽字符路径（new[]，调用方 delete[]）。游戏线程栈小，
+// 长路径缓冲不能放栈上。失败返回 nullptr。
+static wchar_t* Utf8ToWideAlloc_(const char* utf8)
+{
+    const int chars = kPathCap_ / (int)sizeof(wchar_t);
+    wchar_t* out = new(std::nothrow) wchar_t[chars];
+    if (!out) return nullptr;
+    return Utf8ToWide_(utf8, out, chars);
+}
 
 // 去掉行首 BOM/空白与行尾空白（原地写 0，返回头指针）。
 static char* IniTrim_(char* s)
@@ -31,7 +57,10 @@ static char* IniReadFileToBuffer_(const char* path, long* out_size)
 {
     if (!path || !path[0]) return nullptr;
     FILE* fp = nullptr;
-    if (fopen_s(&fp, path, "rb") != 0 || !fp) return nullptr;
+    wchar_t* wpath = Utf8ToWideAlloc_(path);
+    if (!wpath) return nullptr;
+    if (_wfopen_s(&fp, wpath, L"rb") != 0 || !fp) { delete[] wpath; return nullptr; }
+    delete[] wpath;
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
     fseek(fp, 0, SEEK_SET);
@@ -222,10 +251,12 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
 
     bool ok = false;
     FILE* fp = nullptr;
-    if (fopen_s(&fp, path, "wb") == 0 && fp) {
+    wchar_t* wpath = Utf8ToWideAlloc_(path);
+    if (wpath && _wfopen_s(&fp, wpath, L"wb") == 0 && fp) {
         ok = fwrite(out, 1, (size_t)out_len, fp) == (size_t)out_len;
         fclose(fp);
     }
+    delete[] wpath;
     delete[] out;
     delete[] old;
     return ok;

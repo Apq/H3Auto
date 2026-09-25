@@ -112,8 +112,8 @@ static const char* T(const char* key)
     return "!!键不存在!!";
 }
 
-// lang 文件路径（ACP char，与 g_ini_path 同目录）。
-static char g_lang_path[MAX_PATH] = {};
+// lang 文件路径（UTF-8，与 g_ini_path 同目录）。
+static char* g_lang_path = new char[kPathCap_]();
 
 // 语言名（如 zh-CN），来自 H3Auto.ini [General] Language。
 static char g_ui_language[32] = "zh-CN";
@@ -135,14 +135,14 @@ static void LoadUiTexts()
     g_ui_language[sizeof(g_ui_language) - 1] = 0;
 
     // lang\<语言>.ini：DLL 目录 = g_ini_path 去掉文件名。
-    strncpy(g_lang_path, g_ini_path, MAX_PATH - 1);
-    g_lang_path[MAX_PATH - 1] = 0;
+    strncpy(g_lang_path, g_ini_path, kPathCap_ - 1);
+    g_lang_path[kPathCap_ - 1] = 0;
     char* slash = strrchr(g_lang_path, (char)92);
     if (!slash) slash = strrchr(g_lang_path, '/');
     if (slash) {
-        _snprintf(slash + 1, MAX_PATH - (int)(slash + 1 - g_lang_path) - 1,
+        _snprintf(slash + 1, kPathCap_ - (int)(slash + 1 - g_lang_path) - 1,
             "lang\\%s.ini", g_ui_language);
-        g_lang_path[MAX_PATH - 1] = 0;
+        g_lang_path[kPathCap_ - 1] = 0;
     } else {
         g_lang_path[0] = 0;
     }

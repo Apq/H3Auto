@@ -202,23 +202,33 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
     if (cache || load_failed)
         return cache;
 
-    char path[MAX_PATH] = {};
-    GetModuleFileNameA(g_hModule, path, _countof(path));
+    // 路径缓冲在堆上：面板绘制跑在游戏线程，栈放不下 4MB。
+    char* path = new(std::nothrow) char[kPathCap_];
+    wchar_t* wmod = new(std::nothrow) wchar_t[kPathCap_ / 2];
+    if (!path || !wmod) { delete[] path; delete[] wmod; load_failed = true; return nullptr; }
+    GetModuleFileNameW(g_hModule, wmod, kPathCap_ / 2);
+    WideCharToMultiByte(CP_UTF8, 0, wmod, -1, path, kPathCap_, nullptr, nullptr);
+    delete[] wmod;
     char* slash = strrchr(path, '\\');
     if (!slash) {
         load_failed = true;
         return nullptr;
     }
-    const size_t remaining = _countof(path) - static_cast<size_t>(slash + 1 - path);
+    const size_t remaining = (size_t)kPathCap_ - static_cast<size_t>(slash + 1 - path);
     strcpy_s(slash + 1, remaining, "img\\");
-    strcat_s(path, asset_name);
+    strcat_s(path, kPathCap_, asset_name);
 
     FILE* file = nullptr;
-    if (fopen_s(&file, path, "rb") != 0 || !file) {
+    wchar_t* wpath = Utf8ToWideAlloc_(path);
+    if (!wpath || _wfopen_s(&file, wpath, L"rb") != 0 || !file) {
         LogError("[Panel] PCX 资源加载失败：%s", path);
+        delete[] path;
+        delete[] wpath;
         load_failed = true;
         return nullptr;
     }
+    delete[] path;
+    delete[] wpath;
 
     fseek(file, 0, SEEK_END);
     const long file_size = ftell(file);

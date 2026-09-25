@@ -46,24 +46,37 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH && !initialized) {
         initialized = true;
         g_hModule = hModule;
-        GetModuleFileNameA(hModule, g_ini_path, MAX_PATH);
+        // 路径一律走宽字符版再转 UTF-8：GetModuleFileNameA 返回系统 ANSI（中文
+        // 系统是 GBK），直接存进 g_ini_path 会让 UTF-8 日志里的中文路径显示成
+        // 乱码，中文目录下的文件访问也只能靠 GBK 碰巧工作。
+        auto utf8_from_wide = [](const wchar_t* w, char* out, int out_size) {
+            WideCharToMultiByte(CP_UTF8, 0, w, -1, out, out_size, nullptr, nullptr);
+            if (out_size > 0) out[out_size - 1] = 0;
+        };
+        wchar_t* wpath = new wchar_t[kPathCap_ / 2]();
+        GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
+        utf8_from_wide(wpath, g_ini_path, kPathCap_);
         char* dot = strrchr(g_ini_path, '.');
         if (dot) strcpy(dot, ".ini");
-        // 方案存档与 DLL 同目录：每个编号一个独立文件（前缀 H3Auto.profiles. + 编号）。
-        GetModuleFileNameA(hModule, g_profiles_prefix, MAX_PATH);
-        char* slash = strrchr(g_profiles_prefix, (char)92);
-        if (!slash) slash = strrchr(g_profiles_prefix, '/');
-        if (slash) strcpy(slash + 1, "H3Auto.profiles.");
-        else strcpy(g_profiles_prefix, "H3Auto.profiles.");
-        // 编号记忆：独立文件 H3Auto.last（一行数字 1..5），不写 INI。
-        GetModuleFileNameA(hModule, g_last_profile_path, MAX_PATH);
-        char* slash2 = strrchr(g_last_profile_path, (char)92);
-        if (!slash2) slash2 = strrchr(g_last_profile_path, '/');
-        if (slash2) strcpy(slash2 + 1, "H3Auto.last");
-        else strcpy(g_last_profile_path, "H3Auto.last");
-        wchar_t ini_path_w[MAX_PATH];
-        MultiByteToWideChar(CP_ACP, 0, g_ini_path, -1, ini_path_w, MAX_PATH);
+        // 方案存档与 DLL 同目录：每个编号一个独立文件（前缀 H3Auto.profiles + 编号）。
+        GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
+        wchar_t* wslash = wcsrchr(wpath, L'\\');
+        if (!wslash) wslash = wcsrchr(wpath, L'/');
+        if (wslash) wcscpy(wslash + 1, L"H3Auto.profiles");
+        else wcscpy(wpath, L"H3Auto.profiles");
+        utf8_from_wide(wpath, g_profiles_prefix, kPathCap_);
+        // 编号记忆：独立文件 H3Auto.last.ini（一行数字 1..5），不写 INI。
+        GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
+        wslash = wcsrchr(wpath, L'\\');
+        if (!wslash) wslash = wcsrchr(wpath, L'/');
+        if (wslash) wcscpy(wslash + 1, L"H3Auto.last.ini");
+        else wcscpy(wpath, L"H3Auto.last.ini");
+        utf8_from_wide(wpath, g_last_profile_path, kPathCap_);
+        wchar_t* ini_path_w = new wchar_t[kPathCap_ / 2];
+        MultiByteToWideChar(CP_UTF8, 0, g_ini_path, -1, ini_path_w, kPathCap_ / 2);
         g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);
+        delete[] ini_path_w;
+        delete[] wpath;
         SetupDatedLogPathAndCleanup(hModule);
         LogInfo("打铁助手 loading.");
         _P = GetPatcher();

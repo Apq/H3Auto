@@ -534,7 +534,7 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
     return best;
 }
 
-// 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profiles.N）。
+// 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profilesN.ini）。
 // 纯编解码：一行文本 "H3AP3 <21×部队表> <策略> <停止回合> <21×规则>"，
 // 规则按槽位排列，每条 59 个十进制整数。
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。

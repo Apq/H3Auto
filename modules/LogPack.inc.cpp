@@ -57,12 +57,12 @@ struct LogPackEntry {
     FILETIME write_time; // 最近写入时间
 };
 
-// DLL 同目录（从 g_ini_path 截掉文件名而来，ACP char）。
+// DLL 同目录（从 g_ini_path 截掉文件名而来，UTF-8）。
 static void LogPackDllDir_(char* dir, int dir_size)
 {
     strncpy(dir, g_ini_path, dir_size - 1);
     dir[dir_size - 1] = 0;
-    char* slash = strrchr(dir, (char)92);
+    char* slash = strrchr(dir, '\\');
     if (!slash) slash = strrchr(dir, '/');
     if (slash) *slash = 0;
     else dir[0] = 0;
@@ -71,40 +71,50 @@ static void LogPackDllDir_(char* dir, int dir_size)
 // 找最近 max_count 个日志（按写入时间降序）。返回实际数量。
 static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
 {
-    char dir[MAX_PATH] = {};
-    LogPackDllDir_(dir, sizeof(dir));
-    if (!dir[0]) return 0;
-
-    LogPackEntry all[64];
-    int total = 0;
-    WIN32_FIND_DATAA fd;
-    char pattern[MAX_PATH] = {};
-    _snprintf(pattern, sizeof(pattern) - 1, "%s\\H3Auto_*.log", dir);
-    pattern[sizeof(pattern) - 1] = 0;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (total >= (int)(sizeof(all) / sizeof(all[0]))) break;
-        strncpy(all[total].name, fd.cFileName, sizeof(all[total].name) - 1);
-        all[total].name[sizeof(all[total].name) - 1] = 0;
-        all[total].write_time = fd.ftLastWriteTime;
-        ++total;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-
-    // 写入时间降序（简单选择排序，n≤64）。
-    for (int i = 0; i < total; ++i) {
-        int best = i;
-        for (int j = i + 1; j < total; ++j)
-            if (CompareFileTime(&all[j].write_time, &all[best].write_time) > 0)
-                best = j;
-        if (best != i) {
-            LogPackEntry t = all[i]; all[i] = all[best]; all[best] = t;
-        }
+    // 路径缓冲在堆上：打包按钮跑在游戏线程，栈放不下 4MB。
+    char* dir = new(std::nothrow) char[kPathCap_];
+    wchar_t* wdir = new(std::nothrow) wchar_t[kPathCap_ / 2];
+    wchar_t* pattern = new(std::nothrow) wchar_t[kPathCap_ / 2];
+    if (!dir || !wdir || !pattern) {
+        delete[] dir; delete[] wdir; delete[] pattern;
+        return 0;
     }
-    const int n = total < max_count ? total : max_count;
-    for (int i = 0; i < n; ++i) out[i] = all[i];
+    LogPackDllDir_(dir, kPathCap_);
+    int n = 0;
+    if (dir[0]) {
+        LogPackEntry all[64];
+        int total = 0;
+        WIN32_FIND_DATAW fd;
+        Utf8ToWide_(dir, wdir, kPathCap_ / 2);
+        _snwprintf(pattern, kPathCap_ / 2 - 1, L"%s\\H3Auto_*.log", wdir);
+        pattern[kPathCap_ / 2 - 1] = 0;
+        HANDLE h = FindFirstFileW(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                if (total >= (int)(sizeof(all) / sizeof(all[0]))) break;
+                WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1,
+                    all[total].name, sizeof(all[total].name), nullptr, nullptr);
+                all[total].name[sizeof(all[total].name) - 1] = 0;
+                all[total].write_time = fd.ftLastWriteTime;
+                ++total;
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        // 写入时间降序（简单选择排序，n≤64）。
+        for (int i = 0; i < total; ++i) {
+            int best = i;
+            for (int j = i + 1; j < total; ++j)
+                if (CompareFileTime(&all[j].write_time, &all[best].write_time) > 0)
+                    best = j;
+            if (best != i) {
+                LogPackEntry t = all[i]; all[i] = all[best]; all[best] = t;
+            }
+        }
+        n = total < max_count ? total : max_count;
+        for (int i = 0; i < n; ++i) out[i] = all[i];
+    }
+    delete[] dir; delete[] wdir; delete[] pattern;
     return n;
 }
 
@@ -197,8 +207,9 @@ static bool LogPackCopyToClipboard_(const char* path)
         bool ok = EmptyClipboard();
         // CF_HDROP：DROPFILES 头 + 双零结尾的宽字符路径列表。
         if (ok) {
-            wchar_t wpath[MAX_PATH] = {};
-            MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
+            wchar_t* wpath = new(std::nothrow) wchar_t[kPathCap_ / 2];
+            if (!wpath) { CloseClipboard(); return false; }
+            Utf8ToWide_(path, wpath, kPathCap_ / 2);
             const size_t wlen = wcslen(wpath);
             const size_t bytes = kDropFilesSize_ + (wlen + 2) * sizeof(wchar_t);
             HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
@@ -222,6 +233,7 @@ static bool LogPackCopyToClipboard_(const char* path)
             } else {
                 ok = false;
             }
+            delete[] wpath;
         }
         CloseClipboard();
         return ok;
@@ -233,9 +245,18 @@ static bool LogPackCopyToClipboard_(const char* path)
 // 原因文案键（help.pack_fail 的 %s）由调用方组织；此处只回填路径/原因。
 static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason, int reason_size)
 {
-    char internal_path[MAX_PATH] = {};
+    // 路径缓冲在堆上并在整个函数内复用：打包跑在游戏线程，栈放不下 4MB。
+    char* internal_path = new(std::nothrow) char[kPathCap_];
+    char* dir = new(std::nothrow) char[kPathCap_];
+    char* path = new(std::nothrow) char[kPathCap_];
+    wchar_t* wpath = new(std::nothrow) wchar_t[kPathCap_ / 2];
+    if (!internal_path || !dir || !path || !wpath) {
+        delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
+        _snprintf(fail_reason, reason_size - 1, "alloc");
+        return false;
+    }
     char* actual_path = out_path ? out_path : internal_path;
-    const int actual_path_size = out_path ? out_path_size : (int)sizeof(internal_path);
+    const int actual_path_size = out_path ? out_path_size : kPathCap_;
     actual_path[0] = 0;
     fail_reason[0] = 0;
 
@@ -246,11 +267,11 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     if (nLogs <= 0) {
         _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_no_logs"));
         fail_reason[reason_size - 1] = 0;
+        delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
         return false;
     }
 
-    char dir[MAX_PATH] = {};
-    LogPackDllDir_(dir, sizeof(dir));
+    LogPackDllDir_(dir, kPathCap_);
 
     // 读入每个日志的尾部（≤2MB）并 LZMA 压缩。
     BYTE* datas[5] = {};
@@ -261,10 +282,10 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     BYTE props[LZMA_PROPS_SIZE] = {};
     int done = 0;
     for (int i = 0; i < nLogs; ++i) {
-        char path[MAX_PATH] = {};
-        _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, entries[i].name);
-        path[sizeof(path) - 1] = 0;
-        HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        _snprintf(path, kPathCap_ - 1, "%s\\%s", dir, entries[i].name);
+        path[kPathCap_ - 1] = 0;
+        Utf8ToWide_(path, wpath, kPathCap_ / 2);
+        HANDLE hf = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf == INVALID_HANDLE_VALUE) {
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
@@ -449,7 +470,8 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
 
         const DWORD blob_len = (DWORD)(32 + pack_total + header_len);
         bool ok = false;
-        HANDLE hz = CreateFileA(actual_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        Utf8ToWide_(actual_path, wpath, kPathCap_ / 2);
+        HANDLE hz = CreateFileW(wpath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hz != INVALID_HANDLE_VALUE) {
             DWORD wrote = 0;
@@ -472,11 +494,13 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             done, zip_name);
         for (int i = 0; i < done; ++i) delete[] datas[i];
         for (int i = 0; i < done; ++i) if (packs[i]) delete[] packs[i];
+        delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
         return true;
     }
 
 bail:
     for (int i = 0; i < done; ++i) delete[] datas[i];
     for (int i = 0; i < done; ++i) if (packs[i]) delete[] packs[i];
+    delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
     return false;
 }

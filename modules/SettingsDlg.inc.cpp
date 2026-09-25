@@ -794,10 +794,11 @@ static void SaveProfilesToDisk_()
         s_p.draft_stop_turns[s_p.selected_profile],
         s_p.selected_profile);
     if (ok) RememberProfileSlot(s_p.selected_profile);
-    char slot_path[MAX_PATH] = {};
-    ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
+    char* slot_path = new(std::nothrow) char[kPathCap_];
+    if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
     LogInfo("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
-        ok ? "已存档" : "存档失败", slot_path);
+        ok ? "已存档" : "存档失败", slot_path ? slot_path : "");
+    delete[] slot_path;
     SetStatusText_(ok ? T("panel.status_save_ok") : T("panel.status_save_fail"), 5000);
     DrawPanelToBuffer_();
 }
@@ -845,10 +846,11 @@ static void LoadProfilesFromDisk_()
     }
     if (ok) RememberProfileSlot(s_p.selected_profile);
     delete[] loaded;
-    char slot_path[MAX_PATH] = {};
-    ProfileSlotPath(s_p.selected_profile, slot_path, MAX_PATH);
+    char* slot_path = new(std::nothrow) char[kPathCap_];
+    if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
     LogInfo("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
-        ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path);
+        ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path ? slot_path : "");
+    delete[] slot_path;
     SetStatusText_(ok ? T("panel.status_load_ok") : T("panel.status_load_fail"), 5000);
     DrawPanelToBuffer_();
 }
