@@ -1,8 +1,14 @@
 // ========== 日志打包（帮助界面「打包日志」按钮） ==========
-// 最近 5 个日志文件合并为一个 zip（STORE 不压缩），以 CF_HDROP 文件式
-// 复制到剪贴板（同资源管理器复制文件，QQ 聊天框 Ctrl+V 直接发送 zip），
-// 同时附 CF_TEXT 路径。纯 Win32 + 手写 zip 结构，无 zlib 依赖；文件名与
-// 路径均为 ASCII（日志/zip 都在 DLL 同目录，无中文坑）。
+// 最近 5 个日志文件（每文件只取尾部 2MB）LZMA 压缩为 .7z（手写容器，
+// LZMA SDK 源码级集成见 lzma/），以 CF_HDROP 文件式复制到剪贴板
+// （同资源管理器复制文件，QQ 聊天框 Ctrl+V 直接发送），同时附
+// CF_TEXT 路径。容器布局经 7-Zip 官方与 py7zr 双端验证。
+// 文件名与路径均为 ASCII（日志/7z 都在 DLL 同目录，无中文坑）。
+
+// LzmaEnc.h → 7zTypes.h 用 EXTERN_C_BEGIN 包裹到文件尾，且注释掉了
+// windows.h，所以 windows.h 必须放在它之后（否则 DWORD 等落在 C 链接块内不可见）。
+#include "LzmaEnc.h"
+#include <windows.h>
 
 // DROPFILES 头大小（4+8+4+4=20，x86 自然对齐无 padding）。
 static const size_t kDropFilesSize_ = 20;
@@ -31,6 +37,20 @@ static DWORD LogPackCrc_(const void* data, size_t size)
         crc = s_logpack_crc_table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
     return crc ^ 0xFFFFFFFFu;
 }
+
+
+// LZMA SDK 的内存分配回调（游戏进程内走 CRT 堆）。
+static void* LzmaPackAlloc_(const ISzAllocPtr p, size_t size)
+{
+    (void)p;
+    return malloc(size ? size : 1);
+}
+static void LzmaPackFree_(const ISzAllocPtr p, void* address)
+{
+    (void)p;
+    free(address);
+}
+static const ISzAlloc g_lzma_pack_alloc_ = { LzmaPackAlloc_, LzmaPackFree_ };
 
 struct LogPackEntry {
     char name[64];       // 文件名（ASCII）
@@ -110,6 +130,60 @@ static void LogPackDosTime_(unsigned* dos_time, unsigned* dos_date)
         | (unsigned)st.wDay;
 }
 
+
+// ---------- .7z 容器（明文 header，每文件独立 folder/LZMA 流） ----------
+// 布局与 7-Zip 官方 7zArcIn.c 解析严格对齐：
+//  - kName 名字流：每名 UTF-16LE+终止 0，最后一个名字的终止兼任流末尾，
+//    不得再补总终止（SzReadFileNames 要求读完 numFiles 个名字后 pos==size）
+//  - kSubStreamsInfo 需显式 kNumUnpackStreams（每 folder 1）
+
+// 7z number：首字节前导 1 数=额外字节数，低 (8-k) 位为高位部分。
+static BYTE* LogPackPutNum_(BYTE* p, unsigned long long v)
+{
+    for (int k = 0; k < 8; ++k) {
+        const unsigned long long hi = v >> (8 * k);
+        if (hi < ((unsigned long long)0x80 >> k)) {
+            if (k == 0) {
+                *p++ = (BYTE)v;
+            } else {
+                *p++ = (BYTE)((((0xFFull << (8 - k)) & 0xFF)) | hi);
+                for (int b = 0; b < k; ++b)
+                    *p++ = (BYTE)((v >> (8 * b)) & 0xFF);
+            }
+            return p;
+        }
+    }
+    return p; // 不可达（尺寸远小于 2^56）
+}
+
+// LZMA 压缩单块。返回分配的压缩缓冲（*out_len 为长度），失败返回 null。
+static BYTE* LogPackLzma_(const BYTE* src, size_t src_len,
+    size_t* out_len, BYTE props_out[LZMA_PROPS_SIZE])
+{
+    const size_t cap = src_len + src_len / 2 + 4096;
+    BYTE* dst = new(std::nothrow) BYTE[cap];
+    if (!dst) return nullptr;
+
+    CLzmaEncProps props;
+    LzmaEncProps_Init(&props);
+    props.dictSize = 1u << 20;      // 1MB 字典：编码内存 ~10MB，32 位安全
+    props.level = 5;
+    props.writeEndMark = 0;
+    LzmaEncProps_Normalize(&props);
+
+    size_t props_size = LZMA_PROPS_SIZE;
+    size_t dst_len = cap;
+    const SRes res = LzmaEncode(dst, &dst_len, src, src_len, &props,
+        props_out, &props_size, 0, nullptr, &g_lzma_pack_alloc_,
+        &g_lzma_pack_alloc_);
+    if (res != SZ_OK || props_size != LZMA_PROPS_SIZE) {
+        delete[] dst;
+        return nullptr;
+    }
+    *out_len = dst_len;
+    return dst;
+}
+
 // 复制到剪贴板：CF_HDROP（Explorer 式文件复制，QQ 聊天框 Ctrl+V 直接
 // 发送 zip 文件）+ CF_TEXT（地址栏/记事本可粘贴路径）。失败重试，被占用常见。
 static bool LogPackCopyToClipboard_(const char* path)
@@ -168,7 +242,7 @@ static bool LogPackCopyToClipboard_(const char* path)
     return false;
 }
 
-// 打包入口：成功返回 true 并把 zip 完整路径写进 out_path（提示用）。
+// 打包入口：成功返回 true 并把 .7z 完整路径写进 out_path（提示用）。
 // 原因文案键（help.pack_fail 的 %s）由调用方组织；此处只回填路径/原因。
 static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason, int reason_size)
 {
@@ -183,12 +257,17 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         return false;
     }
 
-    // 读入全部日志内容到堆（每个文件一块）。
     char dir[MAX_PATH] = {};
     LogPackDllDir_(dir, sizeof(dir));
+
+    // 读入每个日志的尾部（≤2MB）并 LZMA 压缩。
     BYTE* datas[5] = {};
-    DWORD sizes[5] = {};
+    BYTE* packs[5] = {};
+    size_t pack_lens[5] = {};
+    DWORD unpack_sizes[5] = {};
     DWORD crcs[5] = {};
+    BYTE props[LZMA_PROPS_SIZE] = {};
+    int done = 0;
     for (int i = 0; i < n; ++i) {
         char path[MAX_PATH] = {};
         _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, entries[i].name);
@@ -197,143 +276,179 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf == INVALID_HANDLE_VALUE) {
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-            for (int k = 0; k < i; ++k) delete[] datas[k];
-            return false;
+            goto bail;
         }
         LARGE_INTEGER sz;
         if (!GetFileSizeEx(hf, &sz) || sz.QuadPart <= 0) {
             CloseHandle(hf);
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-            for (int k = 0; k < i; ++k) delete[] datas[k];
-            return false;
+            goto bail;
         }
         // 超过上限只取尾部（最新内容在尾部），总量封顶 ~10MB。
         const LONGLONG full = sz.QuadPart;
-        sizes[i] = full > (LONGLONG)kLogPackMaxPerFile_
+        unpack_sizes[i] = full > (LONGLONG)kLogPackMaxPerFile_
             ? kLogPackMaxPerFile_ : (DWORD)full;
-        if (full > (LONGLONG)sizes[i]) {
+        if (full > (LONGLONG)unpack_sizes[i]) {
             LARGE_INTEGER skip;
-            skip.QuadPart = full - (LONGLONG)sizes[i];
+            skip.QuadPart = full - (LONGLONG)unpack_sizes[i];
             if (!SetFilePointerEx(hf, skip, nullptr, FILE_BEGIN)) {
                 CloseHandle(hf);
                 _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-                for (int k = 0; k < i; ++k) delete[] datas[k];
-                return false;
+                goto bail;
             }
         }
-        datas[i] = new(std::nothrow) BYTE[sizes[i]];
+        datas[i] = new(std::nothrow) BYTE[unpack_sizes[i] ? unpack_sizes[i] : 1];
         if (!datas[i]) {
             CloseHandle(hf);
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-            for (int k = 0; k < i; ++k) delete[] datas[k];
-            return false;
+            goto bail;
         }
         DWORD got = 0;
-        if (!ReadFile(hf, datas[i], sizes[i], &got, nullptr) || got != sizes[i]) {
+        if (!ReadFile(hf, datas[i], unpack_sizes[i], &got, nullptr) || got != unpack_sizes[i]) {
             CloseHandle(hf);
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-            for (int k = 0; k <= i; ++k) delete[] datas[k];
-            return false;
+            goto bail;
         }
         CloseHandle(hf);
-        crcs[i] = LogPackCrc_(datas[i], sizes[i]);
+        crcs[i] = LogPackCrc_(datas[i], unpack_sizes[i]);
+
+        packs[i] = LogPackLzma_(datas[i], unpack_sizes[i], &pack_lens[i], props);
+        if (!packs[i]) {
+            _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
+            goto bail;
+        }
+        done = i + 1;
+    }
+    {
+        // ---- 组 .7z 容器：签名头(32) + pack 数据 + 明文 header ----
+        size_t pack_total = 0;
+        size_t names_bytes = 0;
+        for (int i = 0; i < n; ++i) {
+            pack_total += pack_lens[i];
+            names_bytes += (strlen(entries[i].name) + 1) * 2; // UTF-16LE + 终止
+        }
+        const size_t header_cap = 128 + (size_t)n * (16 + LZMA_PROPS_SIZE + 24)
+            + names_bytes + 16;
+        BYTE* header = new(std::nothrow) BYTE[header_cap];
+        BYTE* blob = new(std::nothrow) BYTE[32 + pack_total + header_cap];
+        if (!header || !blob) {
+            delete[] header;
+            delete[] blob;
+            _snprintf(fail_reason, reason_size - 1, "alloc");
+            goto bail;
+        }
+
+        BYTE* h = header;
+        *h++ = 0x01;                                   // kHeader
+        *h++ = 0x04;                                   // kMainStreamsInfo
+        *h++ = 0x06;                                   // kPackInfo
+        h = LogPackPutNum_(h, 0);                      // PackPos
+        h = LogPackPutNum_(h, (unsigned long long)n);  // NumPackStreams
+        *h++ = 0x09;                                   // kSize
+        for (int i = 0; i < n; ++i) h = LogPackPutNum_(h, pack_lens[i]);
+        *h++ = 0x00;                                   // kEnd (PackInfo)
+        *h++ = 0x07;                                   // kUnpackInfo
+        *h++ = 0x0B;                                   // kFolder
+        h = LogPackPutNum_(h, (unsigned long long)n);  // NumFolders
+        *h++ = 0x00;                                   // External=0
+        for (int i = 0; i < n; ++i) {
+            *h++ = 0x01;                               // NumCoders=1
+            *h++ = 0x23;                               // flags: idSize=3 + hasAttrs
+            *h++ = 0x03; *h++ = 0x01; *h++ = 0x01;     // LZMA codec id
+            *h++ = (BYTE)LZMA_PROPS_SIZE;              // PropsSize=5
+            memcpy(h, props, LZMA_PROPS_SIZE); h += LZMA_PROPS_SIZE;
+        }
+        *h++ = 0x0C;                                   // kCodersUnpackSize
+        for (int i = 0; i < n; ++i) h = LogPackPutNum_(h, unpack_sizes[i]);
+        *h++ = 0x0A;                                   // kCRC
+        *h++ = 0x01;                                   // AllAreDefined
+        for (int i = 0; i < n; ++i) {
+            memcpy(h, &crcs[i], 4); h += 4;
+        }
+        *h++ = 0x00;                                   // kEnd (UnpackInfo)
+        *h++ = 0x08;                                   // kSubStreamsInfo
+        *h++ = 0x0D;                                   // kNumUnpackStreams
+        for (int i = 0; i < n; ++i) *h++ = 0x01;       // 每 folder 1 子流
+        *h++ = 0x00;                                   // kEnd (SubStreamsInfo)
+        *h++ = 0x00;                                   // kEnd (StreamsInfo)
+        *h++ = 0x05;                                   // kFilesInfo
+        h = LogPackPutNum_(h, (unsigned long long)n);  // NumFiles
+        *h++ = 0x11;                                   // kName
+        h = LogPackPutNum_(h, 1 + names_bytes);        // property size（External+名字流）
+        *h++ = 0x00;                                   // External=0
+        for (int i = 0; i < n; ++i) {
+            wchar_t wname[64] = {};
+            MultiByteToWideChar(CP_ACP, 0, entries[i].name, -1, wname, 64);
+            for (const wchar_t* w = wname; *w; ++w) {
+                memcpy(h, w, 2); h += 2;
+            }
+            *h++ = 0x00; *h++ = 0x00;                  // 名字终止（最后一个兼任流末尾）
+        }
+        *h++ = 0x00;                                   // kEnd (FilesInfo)
+        *h++ = 0x00;                                   // kEnd (Header)
+        const size_t header_len = (size_t)(h - header);
+
+        // pack 数据紧跟签名头，header 接在 pack 数据之后。
+        BYTE* p = blob + 32;
+        for (int i = 0; i < n; ++i) {
+            memcpy(p, packs[i], pack_lens[i]);
+            p += pack_lens[i];
+        }
+        memcpy(p, header, header_len);
+        // 签名头：6B 签名 + 版本 0.4 + StartHeaderCRC(4) + offset/size/headerCRC(20)。
+        BYTE* sig = blob;
+        memcpy(sig, "7z\xBC\xAF\x27\x1C", 6);
+        sig[6] = 0; sig[7] = 4;
+        // StartHeader：NextHeaderOffset(8) + NextHeaderSize(8) + NextHeaderCRC(4)，
+        // 共 20 字节小端；其 CRC 直接对这 20 字节计算（传数组会被按元素语义误解）。
+        unsigned long long v;
+        v = (unsigned long long)pack_total;      memcpy(sig + 12, &v, 8);
+        v = (unsigned long long)header_len;      memcpy(sig + 20, &v, 8);
+        const DWORD hdr_crc = LogPackCrc_(header, header_len);
+        memcpy(sig + 28, &hdr_crc, 4);
+        const DWORD sh_crc = LogPackCrc_(sig + 12, 20);
+        memcpy(sig + 8, &sh_crc, 4);
+
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char zip_name[48] = {};
+        _snprintf(zip_name, sizeof(zip_name) - 1,
+            "H3Auto_logs_%04u%02u%02u_%02u%02u%02u.7z",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        zip_name[sizeof(zip_name) - 1] = 0;
+        _snprintf(out_path, out_path_size - 1, "%s\\%s", dir, zip_name);
+        out_path[out_path_size - 1] = 0;
+
+        const DWORD blob_len = (DWORD)(32 + pack_total + header_len);
+        bool ok = false;
+        HANDLE hz = CreateFileA(out_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hz != INVALID_HANDLE_VALUE) {
+            DWORD wrote = 0;
+            ok = WriteFile(hz, blob, blob_len, &wrote, nullptr) && wrote == blob_len;
+            CloseHandle(hz);
+        }
+        delete[] header;
+        delete[] blob;
+
+        if (!ok) {
+            _snprintf(fail_reason, reason_size - 1, "%s", zip_name);
+            goto bail;
+        }
+        if (!LogPackCopyToClipboard_(out_path)) {
+            // 7z 已生成，只是剪贴板被占用：路径已写 out_path，调用方可提示手动复制。
+            _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_clipboard_fail"));
+            goto bail;
+        }
+        LogInfo("[LogPack] 已打包 %d 个日志（LZMA）→ %s（已文件式复制到剪贴板）",
+            n, zip_name);
+        for (int i = 0; i < done; ++i) delete[] datas[i];
+        for (int i = 0; i < n; ++i) if (packs[i]) delete[] packs[i];
+        return true;
     }
 
-    // zip 输出路径：DLL 同目录 H3Auto_logs_YYYYMMDD_HHMMSS.zip。
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char zip_name[48] = {};
-    _snprintf(zip_name, sizeof(zip_name) - 1,
-        "H3Auto_logs_%04u%02u%02u_%02u%02u%02u.zip",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    zip_name[sizeof(zip_name) - 1] = 0;
-    _snprintf(out_path, out_path_size - 1, "%s\\%s", dir, zip_name);
-    out_path[out_path_size - 1] = 0;
-
-    // 组 zip（STORE）：Local 头 + 数据 → Central → EOCD。
-    unsigned dos_time = 0, dos_date = 0;
-    LogPackDosTime_(&dos_time, &dos_date);
-    size_t names_len = 0;
-    size_t data_total = 0;
-    for (int i = 0; i < n; ++i) {
-        names_len += strlen(entries[i].name);
-        data_total += sizes[i];
-    }
-    const size_t total = (size_t)n * (30 + 46) + names_len + data_total + 22 + 16;
-    BYTE* zip = new BYTE[total];
-    BYTE* p = zip;
-    DWORD offsets[5] = {};
-
-    for (int i = 0; i < n; ++i) {
-        const DWORD nlen = (DWORD)strlen(entries[i].name);
-        offsets[i] = (DWORD)(p - zip);
-        memcpy(p, "PK\x03\x04", 4); p += 4;
-        LogPackPut2_(p, 20);            p += 2; // version needed
-        LogPackPut2_(p, 0);             p += 2; // flags
-        LogPackPut2_(p, 0);             p += 2; // method = STORE
-        LogPackPut2_(p, dos_time);      p += 2;
-        LogPackPut2_(p, dos_date);      p += 2;
-        LogPackPut4_(p, crcs[i]);       p += 4;
-        LogPackPut4_(p, sizes[i]);      p += 4; // compressed
-        LogPackPut4_(p, sizes[i]);      p += 4; // uncompressed
-        LogPackPut2_(p, nlen);          p += 2;
-        LogPackPut2_(p, 0);             p += 2; // extra len
-        memcpy(p, entries[i].name, nlen); p += nlen;
-        memcpy(p, datas[i], sizes[i]);  p += sizes[i];
-    }
-    const DWORD cd_offset = (DWORD)(p - zip);
-    for (int i = 0; i < n; ++i) {
-        const DWORD nlen = (DWORD)strlen(entries[i].name);
-        memcpy(p, "PK\x01\x02", 4); p += 4;
-        LogPackPut2_(p, 20);            p += 2; // version made by
-        LogPackPut2_(p, 20);            p += 2; // version needed
-        LogPackPut2_(p, 0);             p += 2; // flags
-        LogPackPut2_(p, 0);             p += 2; // method
-        LogPackPut2_(p, dos_time);      p += 2;
-        LogPackPut2_(p, dos_date);      p += 2;
-        LogPackPut4_(p, crcs[i]);       p += 4;
-        LogPackPut4_(p, sizes[i]);      p += 4;
-        LogPackPut4_(p, sizes[i]);      p += 4;
-        LogPackPut2_(p, nlen);          p += 2;
-        LogPackPut2_(p, 0);             p += 2; // extra len
-        LogPackPut2_(p, 0);             p += 2; // comment len
-        LogPackPut2_(p, 0);             p += 2; // disk start
-        LogPackPut2_(p, 0);             p += 2; // internal attrs
-        LogPackPut4_(p, 0);             p += 4; // external attrs
-        LogPackPut4_(p, offsets[i]);    p += 4; // local header offset
-        memcpy(p, entries[i].name, nlen); p += nlen;
-    }
-    const DWORD cd_size = (DWORD)(p - zip) - cd_offset;
-    memcpy(p, "PK\x05\x06", 4); p += 4;
-    LogPackPut2_(p, 0);         p += 2; // this disk
-    LogPackPut2_(p, 0);         p += 2; // cd start disk
-    LogPackPut2_(p, (unsigned)n); p += 2;
-    LogPackPut2_(p, (unsigned)n); p += 2;
-    LogPackPut4_(p, cd_size);   p += 4;
-    LogPackPut4_(p, cd_offset); p += 4;
-    LogPackPut2_(p, 0);         p += 2; // comment len
-
-    const DWORD zip_len = (DWORD)(p - zip);
-    bool ok = false;
-    HANDLE hz = CreateFileA(out_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hz != INVALID_HANDLE_VALUE) {
-        DWORD wrote = 0;
-        ok = WriteFile(hz, zip, zip_len, &wrote, nullptr) && wrote == zip_len;
-        CloseHandle(hz);
-    }
-    for (int i = 0; i < n; ++i) delete[] datas[i];
-    delete[] zip;
-
-    if (!ok) {
-        _snprintf(fail_reason, reason_size - 1, "%s", zip_name);
-        return false;
-    }
-    if (!LogPackCopyToClipboard_(out_path)) {
-        // zip 已生成，只是剪贴板被占用：路径已写 out_path，调用方可提示手动复制。
-        _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_clipboard_fail"));
-        return false;
-    }
-    LogInfo("[LogPack] 已打包 %d 个日志 → %s（zip 已文件式复制到剪贴板）", n, zip_name);
-    return true;
+bail:
+    for (int i = 0; i < done; ++i) delete[] datas[i];
+    for (int i = 0; i < n; ++i) if (packs[i]) delete[] packs[i];
+    return false;
 }
