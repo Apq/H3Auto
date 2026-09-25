@@ -73,3 +73,4 @@ Testing/
 
 Release/
 .cowork-temp
+.hermes-tmp*
