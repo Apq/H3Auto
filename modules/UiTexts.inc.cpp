@@ -53,7 +53,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.log_level_opt3", "警告" },
     { "help.log_level_opt4", "错误" },
     { "help.pack_btn", "打包日志" },
-    { "help.pack_ok", "{绿}日志已打包，路径已复制：%s 请到QQ群粘贴发送，或加712999712私发" },
+    { "help.pack_ok", "{绿}日志已打包（文件已复制），到QQ群 1042362808 / 740338251 粘贴发送，或加QQ 712999712 私发（%s）" },
     { "help.pack_fail", "{红}打包日志失败：%s" },
     { "help.pack_no_logs", "没有找到日志文件" },
     { "help.pack_clipboard_fail", "zip 已生成但复制路径失败（剪贴板被占用），请手动复制" },

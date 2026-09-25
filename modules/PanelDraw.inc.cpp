@@ -745,9 +745,12 @@ static void DrawPanelToBuffer_()
     {
         const H3POINT cursor = H3POINT::GetCursorPosition();
         if (const char* tip = PanelTipAt_(cursor.x - s_p.x, cursor.y - s_p.y)) {
-            char rich[256];
-            snprintf(rich, sizeof(rich), T("tips.color_wrap"), tip);
-            SetStatusText_(rich, 3000);
+            // 结果消息保护期内不覆盖（存/读档、打包结果优先于悬停说明）。
+            if (!StatusResultHoldActive_()) {
+                char rich[256];
+                snprintf(rich, sizeof(rich), T("tips.color_wrap"), tip);
+                SetStatusText_(rich, 3000);
+            }
         }
     }
 

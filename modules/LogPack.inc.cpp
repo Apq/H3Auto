@@ -1,7 +1,11 @@
 // ========== 日志打包（帮助界面「打包日志」按钮） ==========
-// 最近 5 个日志文件合并为一个 zip（STORE 不压缩），复制 zip 完整路径到
-// 剪贴板，玩家到 QQ 粘贴发送或私发。纯 Win32 + 手写 zip 结构，无 zlib
-// 依赖；文件名与路径均为 ASCII（日志/zip 都在 DLL 同目录，无中文坑）。
+// 最近 5 个日志文件合并为一个 zip（STORE 不压缩），以 CF_HDROP 文件式
+// 复制到剪贴板（同资源管理器复制文件，QQ 聊天框 Ctrl+V 直接发送 zip），
+// 同时附 CF_TEXT 路径。纯 Win32 + 手写 zip 结构，无 zlib 依赖；文件名与
+// 路径均为 ASCII（日志/zip 都在 DLL 同目录，无中文坑）。
+
+// DROPFILES 头大小（4+8+4+4=20，x86 自然对齐无 padding）。
+static const size_t kDropFilesSize_ = 20;
 
 // CRC32（IEEE 802.3 多项式），表运行时生成一次。
 static DWORD s_logpack_crc_table[256];
@@ -103,25 +107,58 @@ static void LogPackDosTime_(unsigned* dos_time, unsigned* dos_date)
         | (unsigned)st.wDay;
 }
 
-// 复制文本到剪贴板（CF_TEXT，ASCII 路径足够）。失败重试，被占用常见。
-static bool LogPackCopyToClipboard_(const char* text)
+// 复制到剪贴板：CF_HDROP（Explorer 式文件复制，QQ 聊天框 Ctrl+V 直接
+// 发送 zip 文件）+ CF_TEXT（地址栏/记事本可粘贴路径）。失败重试，被占用常见。
+static bool LogPackCopyToClipboard_(const char* path)
 {
-    const size_t len = strlen(text);
+    const size_t len = strlen(path);
     for (int attempt = 0; attempt < 5; ++attempt) {
         if (!OpenClipboard(nullptr)) {
             Sleep(30);
             continue;
         }
-        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len + 1);
-        if (!mem) { CloseClipboard(); return false; }
-        char* dst = (char*)GlobalLock(mem);
-        if (!dst) { GlobalFree(mem); CloseClipboard(); return false; }
-        memcpy(dst, text, len + 1);
-        GlobalUnlock(mem);
-        const bool ok = EmptyClipboard()
-            && SetClipboardData(CF_TEXT, mem) != nullptr;
-        // 成功后内存归剪贴板所有，不 GlobalFree；失败必须释放。
-        if (!ok) GlobalFree(mem);
+        bool ok = EmptyClipboard();
+        // CF_HDROP：DROPFILES 头 + 双零结尾的宽字符路径列表。
+        if (ok) {
+            wchar_t wpath[MAX_PATH] = {};
+            MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
+            const size_t wlen = wcslen(wpath);
+            const size_t bytes = kDropFilesSize_ + (wlen + 2) * sizeof(wchar_t);
+            HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (mem) {
+                BYTE* raw = (BYTE*)GlobalLock(mem);
+                if (raw) {
+                    // DROPFILES 头（shellapi.h 的 guard 在此工具链下不可靠，布局固定 20 字节）
+                    memset(raw, 0, kDropFilesSize_);
+                    *(DWORD*)(raw + 0) = kDropFilesSize_;   // pFiles：文件列表偏移
+                    *(DWORD*)(raw + 16) = 1;                // fWide：宽字符
+                    wchar_t* dst = (wchar_t*)(raw + kDropFilesSize_);
+                    memcpy(dst, wpath, (wlen + 1) * sizeof(wchar_t));
+                    dst[wlen + 1] = 0; // 列表结尾的额外空字符
+                    GlobalUnlock(mem);
+                    ok = SetClipboardData(CF_HDROP, mem) != nullptr;
+                    if (!ok) GlobalFree(mem); // 成功后归剪贴板所有
+                } else {
+                    GlobalFree(mem);
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
+        }
+        if (ok) {
+            HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len + 1);
+            if (mem) {
+                char* dst = (char*)GlobalLock(mem);
+                if (dst) {
+                    memcpy(dst, path, len + 1);
+                    GlobalUnlock(mem);
+                    if (SetClipboardData(CF_TEXT, mem) == nullptr) GlobalFree(mem);
+                } else {
+                    GlobalFree(mem);
+                }
+            }
+        }
         CloseClipboard();
         return ok;
     }
@@ -275,6 +312,6 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_clipboard_fail"));
         return false;
     }
-    LogInfo("[LogPack] 已打包 %d 个日志 → %s（路径已复制到剪贴板）", n, zip_name);
+    LogInfo("[LogPack] 已打包 %d 个日志 → %s（zip 已文件式复制到剪贴板）", n, zip_name);
     return true;
 }

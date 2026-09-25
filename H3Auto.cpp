@@ -5,6 +5,7 @@
 #define _H3API_PATCHER_X86_
 #include <H3API.hpp>
 #include <ddraw.h>
+#include <shellapi.h> // DROPFILES（日志打包 CF_HDROP 文件式剪贴板）
 #include <stdarg.h>
 #include <wchar.h>
 #include <stdint.h>
