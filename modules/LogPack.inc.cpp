@@ -88,7 +88,10 @@ static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
     return n;
 }
 
-// 小端写出助手。
+// 单文件参与打包的上限：只取每个日志的尾部（最新内容在尾部）。
+// 此前按全量读（上限 64MB/文件），32 位游戏进程内同步分配可达数百 MB，
+// UI 线程换页假死（用户实测「点击打包后卡死」）。
+static const DWORD kLogPackMaxPerFile_ = 2 * 1024 * 1024;
 static void LogPackPut2_(BYTE* p, unsigned v) { p[0] = (BYTE)(v & 0xFF); p[1] = (BYTE)((v >> 8) & 0xFF); }
 static void LogPackPut4_(BYTE* p, unsigned v)
 {
@@ -198,14 +201,33 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             return false;
         }
         LARGE_INTEGER sz;
-        if (!GetFileSizeEx(hf, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 64 * 1024 * 1024) {
+        if (!GetFileSizeEx(hf, &sz) || sz.QuadPart <= 0) {
             CloseHandle(hf);
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
             for (int k = 0; k < i; ++k) delete[] datas[k];
             return false;
         }
-        sizes[i] = (DWORD)sz.QuadPart;
-        datas[i] = new BYTE[sizes[i]];
+        // 超过上限只取尾部（最新内容在尾部），总量封顶 ~10MB。
+        const LONGLONG full = sz.QuadPart;
+        sizes[i] = full > (LONGLONG)kLogPackMaxPerFile_
+            ? kLogPackMaxPerFile_ : (DWORD)full;
+        if (full > (LONGLONG)sizes[i]) {
+            LARGE_INTEGER skip;
+            skip.QuadPart = full - (LONGLONG)sizes[i];
+            if (!SetFilePointerEx(hf, skip, nullptr, FILE_BEGIN)) {
+                CloseHandle(hf);
+                _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
+                for (int k = 0; k < i; ++k) delete[] datas[k];
+                return false;
+            }
+        }
+        datas[i] = new(std::nothrow) BYTE[sizes[i]];
+        if (!datas[i]) {
+            CloseHandle(hf);
+            _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
+            for (int k = 0; k < i; ++k) delete[] datas[k];
+            return false;
+        }
         DWORD got = 0;
         if (!ReadFile(hf, datas[i], sizes[i], &got, nullptr) || got != sizes[i]) {
             CloseHandle(hf);

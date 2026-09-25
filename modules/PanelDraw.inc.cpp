@@ -472,7 +472,16 @@ static const char* PanelTipAt_(int px, int py)
         if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
             return T(kTipKeys[i]);
     }
-    if (px >= 0 && px < PANEL_W && py >= 0 && py < TITLE_H) {
+    // 标题带热键说明：只兜标题文字附近（居中绘制，按文字宽估算），
+    // 不再整条 680×44 触发（按钮/空白处不给这个 tip）。
+    {
+        int hi = 0, lo = 0; // UTF-8：汉字 3 字节各占 16px、ASCII 每字节 8px（近似）
+        for (const unsigned char* s = (const unsigned char*)PanelTitle_(); *s; ++s) {
+            if (*s >= 0x80) ++hi; else ++lo;
+        }
+        const int text_w = (hi / 3) * 16 + lo * 8 + 24;
+        const int tx0 = (PANEL_W - text_w) / 2;
+        if (px >= tx0 && px < tx0 + text_w && py >= 0 && py < TITLE_H) {
         static char title_tip[256];
         char t1[16], t2[16], t3[16];
         snprintf(title_tip, sizeof(title_tip), T("tips.titlebar"),
@@ -480,6 +489,7 @@ static const char* PanelTipAt_(int px, int py)
             HotkeyDisplayName_(cfg.one_shot_manual_vk, t2, sizeof(t2)),
             HotkeyDisplayName_(cfg.open_settings_vk, t3, sizeof(t3)));
         return title_tip;
+        }
     }
     return nullptr;
 }

@@ -6,6 +6,7 @@
 #include <H3API.hpp>
 #include <ddraw.h>
 #include <shellapi.h> // DROPFILES（日志打包 CF_HDROP 文件式剪贴板）
+#include <new>        // std::nothrow（日志打包大缓冲分配失败检查）
 #include <stdarg.h>
 #include <wchar.h>
 #include <stdint.h>
