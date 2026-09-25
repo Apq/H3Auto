@@ -1244,15 +1244,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     if (PackRecentLogs_(zip_path, sizeof(zip_path),
                             reason, sizeof(reason))) {
                         // 系统对话框：文本可选中复制（玩家要复制 QQ 号），
-                        // 自绘状态栏/模态文字都做不到复制。
-                        char msg[MAX_PATH + 256];
+                        // 自绘状态栏/模态文字都做不到复制。缓冲按文案键上限
+                        // （覆盖缓冲 512）+ 路径留余量，不能只给 MAX_PATH+256。
+                        char msg[1024];
                         _snprintf(msg, sizeof(msg) - 1, T("help.pack_ok"), zip_path);
                         msg[sizeof(msg) - 1] = 0;
                         // ini 值写不了真换行：| 记换行位，弹窗前还原。
                         for (char* c = msg; *c; ++c) if (*c == '|') *c = '\n';
-                        wchar_t wmsg[MAX_PATH + 256] = {}, wtitle[32] = {};
-                        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wmsg, MAX_PATH + 256);
-                        MultiByteToWideChar(CP_UTF8, 0, T("help.pack_title"), -1, wtitle, 32);
+                        wchar_t wmsg[1024] = {}, wtitle[64] = {};
+                        MultiByteToWideChar(CP_UTF8, 0, msg, -1, wmsg, 1024);
+                        MultiByteToWideChar(CP_UTF8, 0, T("help.pack_title"), -1, wtitle, 64);
                         MessageBoxW(nullptr, wmsg, wtitle, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
                     } else {
                         char msg[512];
