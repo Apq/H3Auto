@@ -436,6 +436,41 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 // 命不中控件再退回面板级矩形表。
 static const char* PanelTipAt_(int px, int py)
 {
+    // 左侧 Tab 导航条：两页共通。
+    for (int page = 0; page < PAGE_COUNT; ++page) {
+        const int ty = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+        if (px >= TAB_X && px < TAB_X + TAB_ITEM_W
+            && py >= ty && py < ty + TAB_ITEM_H)
+            return T(page == PAGE_ARMY ? "tips.tab_army" : "tips.tab_profile");
+    }
+    // 方案页：只有方案级控件与共通按钮的 tip。
+    if (s_p.active_page != PAGE_ARMY) {
+        struct P { int x, y, w, h; const char* k; };
+        static const P kPageTips[] = {
+            { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, "tips.btn_load" },
+            { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, "tips.btn_save" },
+            { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H, "tips.btn_profile" },
+            { PROTECT_DD_LABEL_X - 4, PROTECT_DD_Y - 4,
+              STOP_LABEL_X - PROTECT_DD_LABEL_X, 30, "protect" },
+            { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30, "tips.stop_row" },
+            { OK_X, BTN_Y, BTN_W, BTN_H, "tips.btn_ok" },
+            { CANCEL_X, BTN_Y, BTN_W, BTN_H, "tips.btn_cancel" },
+        };
+        for (const P& t : kPageTips) {
+            if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) {
+                if (t.k[0] == 'p' && t.k[1] == 'r') { // 保活策略：跟随当前选中项
+                    const int cur = s_p.draft_protect_strategy[s_p.selected_profile];
+                    if (cur < 0 || cur >= (int)H3AutoPolicy::PS_COUNT)
+                        return T("tips.cell_drop");
+                    char key[24] = {};
+                    _snprintf(key, sizeof(key) - 1, "tips.protect_opt%d", cur);
+                    return T(key);
+                }
+                return T(t.k);
+            }
+        }
+        return nullptr;
+    }
     const int first_item = s_p.scroll_row * COLS;
     for (int i = 0; i < CELL_COUNT; ++i) {
         if (first_item + i >= s_p.count) break;
@@ -458,29 +493,17 @@ static const char* PanelTipAt_(int px, int py)
         { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
         { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
         { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H, nullptr },
-        { 20, PROTECT_DD_Y - 4, STOP_LABEL_X - 24, 30, nullptr },
-        { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30, nullptr },
         { OK_X, BTN_Y, BTN_W, BTN_H, nullptr },
         { CANCEL_X, BTN_Y, BTN_W, BTN_H, nullptr },
     };
     static const char* const kTipKeys[] = {
         "tips.btn_load", "tips.btn_save", "tips.btn_profile",
-        nullptr, "tips.stop_row", "tips.btn_ok", "tips.btn_cancel",
+        "tips.btn_ok", "tips.btn_cancel",
     };
     for (int i = 0; i < (int)(sizeof(kTips) / sizeof(kTips[0])); ++i) {
         const TipRect& t = kTips[i];
-        if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) {
-            // 保活策略下拉：提示跟随当前选中项（kTipKeys 第 4 项）。
-            if (i == 3) {
-                const int cur = s_p.draft_protect_strategy[s_p.selected_profile];
-                if (cur < 0 || cur >= (int)H3AutoPolicy::PS_COUNT)
-                    return T("tips.cell_drop");
-                char key[24] = {};
-                _snprintf(key, sizeof(key) - 1, "tips.protect_opt%d", cur);
-                return T(key);
-            }
+        if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
             return T(kTipKeys[i]);
-        }
     }
     // 标题带热键说明：只兜标题文字附近（居中绘制，按文字宽估算），
     // 不再整条 680×44 触发（按钮/空白处不给这个 tip）。
@@ -536,6 +559,34 @@ static const char* ProtectStrategyLabel_(int i)
     case 3: return T("panel.protect_opt3");
     default: return "?";
     }
+}
+
+// 多级导航：左侧 Tab 条 + 金框色分隔竖线（方案行以下、确定/取消以上）。
+// 选中项亮底金框金字，未选暗底暗框（与卡片按钮暖色体系一致）。
+static void DrawTabBar_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    static const char* const kTabKeys[PAGE_COUNT] = {
+        "panel.tab_army", "panel.tab_profile",
+    };
+    H3Font* small_font = GetSmallFont();
+    for (int page = 0; page < PAGE_COUNT; ++page) {
+        const int x = TAB_X;
+        const int y = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+        const bool sel = (page == s_p.active_page);
+        Fill(scr, x, y, TAB_ITEM_W, TAB_ITEM_H,
+            sel ? 136 : 74, sel ? 88 : 52, 24);
+        scr->DrawFrame(x, y, TAB_ITEM_W, TAB_ITEM_H,
+            (BYTE)(sel ? 210 : 112), (BYTE)(sel ? 170 : 82),
+            (BYTE)(sel ? 72 : 36));
+        DrawTxt(scr, small_font, T(kTabKeys[page]),
+            x, y, TAB_ITEM_W, TAB_ITEM_H,
+            (INT32)(sel ? eTextColor::GOLD : eTextColor::REGULAR),
+            eTextAlignment::MIDDLE_CENTER);
+    }
+    // 分隔竖线：3px 金框色（与 HA_grid_frame 边框同色 168,141,68）。
+    Fill(scr, TAB_SEP_X, TAB_SEP_Y0, 3, TAB_SEP_Y1 - TAB_SEP_Y0,
+        168, 141, 68);
 }
 
 static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
@@ -709,8 +760,8 @@ static void DrawPanelToBuffer_()
     DrawHelpButton_(scr);
     DrawStoreButton_(scr, LOAD_BTN_X, 4, T("panel.load"));
     DrawStoreButton_(scr, SAVE_BTN_X, 5, T("panel.save"));
-    DrawProtectStrategyRow_(scr);
     DrawProfileButtons_(scr);
+    DrawTabBar_(scr);
 
     // 下拉悬停高亮由 WH_MOUSE 钩子即时更新到 s_p.hover_cell/hover_idx，
     // 绘制时直接使用，不再依赖低帧率的游戏坐标。
@@ -718,6 +769,17 @@ static void DrawPanelToBuffer_()
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
 
+    // 部队页：21 槽卡片表（三趟 + 滚动条 + 金框）；方案页只画保活行。
+    if (s_p.active_page == PAGE_PROFILE) {
+        DrawProtectStrategyRow_(scr);
+        DrawTxt(scr, fntS, T("panel.profile_note"),
+            GRID_FRAME_X, PROTECT_DD_Y + PROTECT_DD_H + 8,
+            GRID_FRAME_W, 18,
+            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    }
+
+    // 部队页：格子三趟 + 滚动条 + 金框（方案页不画表格）。
+    if (s_p.active_page == PAGE_ARMY) {
     // 第一趟：画所有格子本体
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
@@ -757,6 +819,7 @@ static void DrawPanelToBuffer_()
             && dropRc.bottom > max_redraw_bottom)
             max_redraw_bottom = dropRc.bottom;
     }
+    } // PAGE_ARMY
 
     DrawPanelButtons_(scr);
 
@@ -794,8 +857,9 @@ static void DrawPanelToBuffer_()
                 (INT32)eTextColor::WHITE);
     }
 
-    // 保活策略展开列表：盖住金框上缘/第一行格子，画在格子之后。
-    DrawProtectDropdownList_(scr);
+    // 保活策略展开列表：仅方案页（盖住说明行/金框上缘，画在最后）。
+    if (s_p.active_page == PAGE_PROFILE)
+        DrawProtectDropdownList_(scr);
 
     // 模态层最后绘制，盖住整张设置面板。
     if (s_spell_pick_cell >= 0)

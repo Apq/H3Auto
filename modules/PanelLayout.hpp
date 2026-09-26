@@ -6,15 +6,20 @@ static const int PANEL_W    = 680;
 static const int PANEL_H    = 528;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
-static const int CELL_W     = 568; // 横向占满金框宽（右侧留滚动条）
-// 卡片恢复旧版高度 110：金框 624×342，底边 y=414，表格上方不再留设置行。
+static const int CELL_W     = 464; // 多级导航：左侧 Tab 条+竖线后内容区收窄
+// 卡片高度 110 不变：金框 514×342，底边 y=414，表格上方不再放设置行。
 // SCROLL_H = CELL_H + 2*(CELL_H-2) = 110 + 2*108 = 326。
 static const int CELL_H     = 110;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
-static const int GRID_X      = 41;
+// 网格金框：宽 514，高 342（右缘 x=653 与旧版一致，左侧让位给 Tab 条）。
+static const int GRID_FRAME_W = 514;
+static const int GRID_FRAME_H = 342;
+static const int GRID_FRAME_X = 139;
+static const int GRID_FRAME_Y = 94;
+static const int GRID_X      = GRID_FRAME_X + 12;
 static const int GRID_Y      = 102;
-static const int SCROLL_X    = GRID_X + CELL_W + (COLS - 1) * CELL_STEP_X + 18;
+static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - 26; // 右对齐金框
 static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_W    = 16;
 static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 326
@@ -50,11 +55,21 @@ static const int STORE_BTN_GAP = 6;
 static const int SAVE_BTN_X = HELP_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
 static const int LOAD_BTN_X = SAVE_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
 
-// 网格金框：宽 624，高 342（底边 y=436）。
-static const int GRID_FRAME_W = 624;
-static const int GRID_FRAME_H = 342;
-static const int GRID_FRAME_X = 29;
-static const int GRID_FRAME_Y = 94;
+// ---- 多级导航：左侧 Tab 条 + 金框色分隔竖线（方案行以下、确定/取消以上）----
+enum {
+    PAGE_ARMY    = 0,   // 部队：21 槽卡片表
+    PAGE_PROFILE = 1,   // 方案：方案级设置（保活策略/自动停止）
+    PAGE_COUNT   = 2,
+};
+static const int TAB_X       = 12;   // Tab 条左缘
+static const int TAB_W       = 108;  // Tab 条总宽
+static const int TAB_ITEM_W  = 100;
+static const int TAB_ITEM_H  = 24;
+static const int TAB_GAP     = 8;
+static const int TAB_FIRST_Y = 80;
+static const int TAB_SEP_X   = 129;  // 分隔竖线（3px 金框色）
+static const int TAB_SEP_Y0  = 72;   // 方案行(65)以下
+static const int TAB_SEP_Y1  = 441;  // 确定按钮(BTN_Y=445)以上
 
 // 方案行与金框之间的保活策略行（方案级）：label + 下拉框。
 static const int PROTECT_DD_Y        = 69;

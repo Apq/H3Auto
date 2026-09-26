@@ -49,6 +49,7 @@ static struct Panel {
     int pressed_button;
     int hover_cell;   // 下拉展开时鼠标悬停的格子索引，-1=无
     int hover_idx;    // 下拉展开时鼠标悬停的项索引，-1=无
+    int active_page;  // 当前 Tab 页：PAGE_ARMY / PAGE_PROFILE
     CellControl cells[CELL_COUNT]; // 仅保存当前可见的最多 3 行控件
 } s_p = {};
 
@@ -894,6 +895,25 @@ static void LoadProfilesFromDisk_()
 
 // 切换方案编号：先存回当前编号草稿，再把面板切到新编号的草稿
 // （未存档/未读档的编号是默认空配置；切回来草稿仍在）。
+// 切换 Tab 页：跨页收尾（提交/收起一切临时编辑态），不动方案草稿。
+// 切页 ≠ 切方案：不 Save/Load 草稿，部队页的卡片状态原样保留。
+static void SwitchPanelPage_(int page)
+{
+    if (page < 0 || page >= PAGE_COUNT || page == s_p.active_page) return;
+    if (s_stop_turns_editing) CommitStopTurnsEdit_();
+    s_protect_dd_open = false;
+    s_protect_dd_hover = -1;
+    PanelCommitAllProtectCountEdits_();
+    for (int k = 0; k < CELL_COUNT; ++k) {
+        s_p.cells[k].expanded = CEX_NONE;
+        s_p.cells[k].dirty = true;
+    }
+    s_p.hover_cell = -1;
+    s_p.hover_idx = -1;
+    s_p.active_page = page;
+    DrawPanelToBuffer_();
+}
+
 static void SelectProfile_(int profile)
 {
     if (profile < 0 || profile >= PROFILE_COUNT
@@ -928,6 +948,7 @@ void OpenSettingsPanel_()
     s_help_modal_open = false;
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
+    s_p.active_page = PAGE_ARMY;   // 打开面板默认部队页
     if (!BlockBattleHover_()) {
         s_p.cursor_saved = false;
         LogWarn("[Panel] 无法屏蔽战场悬停，取消打开设置面板。");
@@ -1450,6 +1471,14 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
     if (raw_command == 8) {
         s_cnt_lb_in_box = false; // 按下是否落在「剩≤」框内，由命中测试回填
+        // 左侧 Tab 导航：按下即切页（各页内容互不重叠，无穿透问题）。
+        for (int page = 0; page < PAGE_COUNT; ++page) {
+            const int ty = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+            if (PointInRect_(px, py, TAB_X, ty, TAB_ITEM_W, TAB_ITEM_H)) {
+                SwitchPanelPage_(page);
+                return;
+            }
+        }
         // 保活策略下拉（收起态）：点击展开；先收起卡片下拉避免层级重叠。
         if (PointInRect_(px, py, PROTECT_DD_X, PROTECT_DD_Y,
                 PROTECT_DD_W, PROTECT_DD_H)) {

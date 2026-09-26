@@ -39,7 +39,7 @@ struct CellData
 // 控件常量
 // ========================================================================
 
-static const int CC_CELL_W    = 568;
+static const int CC_CELL_W    = 464;
 // 卡片恢复旧版高度 110：表格上方不再放整行设置，首动保活行移入卡片底部。
 static const int CC_CELL_H    = 110;
 
@@ -54,15 +54,15 @@ static const int CC_ICON_FRAME_H = 66;
 
 static const int CC_LABEL_H  = 11;
 
-// 一行一格（宽格 568×99）横排布局：
-//   图标列（位置左下/数量右下） | 第二小列（仅够「行动前循环快捷施法:」+ 行动/降级）
+// 一行一格（宽格 464×99）横排布局：
+//   图标列（位置左下/数量右下） | 第二小列（「循环施法:」+ 行动/降级）
 //   | 第三小列（循环施法槽 + 选择器/近战/移动，吃掉剩余宽度）
 // 第二小列左缘贴图标金框右缘，留 4px 间距。
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
 static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68
-static const int CC_COL2_W   = 132; // 刚好放下「行动前循环快捷施法:」
+static const int CC_COL2_W   = 96;  // 刚好放下「循环施法:」+ 行动下拉
 static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈206
-static const int CC_COL3_RIGHT = 564; // 卡片右内边距
+static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
 static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈358
 static const int CC_ROW_H    = 22;
 // 顶部循环施法行；行动/目标两行居中，底部加首动保活行，适配 110 高。
@@ -72,10 +72,10 @@ static const int CC_BOT_Y    = 54;  // 下行（降级/阵营/路径槽）
 static const int CC_PROTECT_Y = 78; // 底部行：首动保活（§8.7）
 static const int CC_CHECKBOX_H = 14;
 
-// 首动保活行布局（第三小列内）：复选框在文字前面，仅「加入保活队列」。
-static const int CC_PROTECT_CB_X     = CC_COL3_X;          // 复选框
+// 首动保活行布局（从第二小列起，第三列留给施法/路径槽）：复选框在文字前面。
+static const int CC_PROTECT_CB_X     = CC_COL2_X;          // 复选框
 static const int CC_PROTECT_CB_BOX   = 10;
-static const int CC_PROTECT_LABEL_X  = CC_COL3_X + 14;     // 「加入保活队列」
+static const int CC_PROTECT_LABEL_X  = CC_COL2_X + 14;     // 「加入保活队列」
 static const int CC_PROTECT_LABEL_W  = 118;
 // 按数量保活阈值：标签「剩≤」+ 数字框，仅策略=按数量时显示/可点。
 static const int CC_PROTECT_CNT_LBL_X = CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W + 10; // ≈348
@@ -88,11 +88,11 @@ static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
 // 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
 static const int CC_SPELL_SLOT_GAP = 3;
-static const int CC_SPELL_SLOT_W = 30; // 刚好显示一位数字
+static const int CC_SPELL_SLOT_W = 22; // 刚好显示一位数字（10 槽一排放进 290 宽）
 // 循环移动/近战槽：按文本宽度定槽宽，再反算每行/总容量（两行）。
 static const int CC_PATH_SLOT_GAP = 3;
-static const int CC_MOVE_SLOT_W = 40;  // A01
-static const int CC_MELEE_SLOT_W = 66; // A01→B02
+static const int CC_MOVE_SLOT_W = 32;  // A01（8 槽/行放进 290 宽）
+static const int CC_MELEE_SLOT_W = 54; // A01→B02（5 槽/行放进 290 宽）
 static const int CC_MOVE_SLOTS_PER_ROW =
     (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MOVE_SLOT_W + CC_PATH_SLOT_GAP); // 8
 static const int CC_MELEE_SLOTS_PER_ROW =
