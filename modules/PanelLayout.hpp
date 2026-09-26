@@ -71,7 +71,7 @@ static const int TAB_GAP     = 8;
 static const int TAB_FIRST_Y = 80;
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
 static const int TAB_SEP_Y0  = 67;   // 与方案行下横线衔接
-static const int TAB_SEP_Y1  = 451;  // 与按钮上横线衔接（按钮下移 10px）
+static const int TAB_SEP_Y1  = 441;  // 与按钮上横线衔接
 // 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
 // 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
