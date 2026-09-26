@@ -112,7 +112,6 @@ extern const char* g_selector_labels[SEL_COUNT];
 
 // 面板级判定/收尾由 SettingsDlg 提供（同翻译单元后置定义）。
 static bool PanelProtectCountMode_();
-static bool PanelFullCardRow_(); // 方案1：显示降级复选框与「剩≤」阈值行
 static void PanelCommitAllProtectCountEdits_();
 static void PanelCancelAllProtectCountEdits_();
 static bool PanelAnyProtectCountEditing_();
@@ -787,9 +786,8 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
 
     const AutoStackRule& rule = ctrl->data.rule;
     const bool needs_target = CellControl_ActionNeedsTarget(rule.action);
-    const bool shows_fallback = PanelFullCardRow_()
-        && CellControl_ActionShowsFallback(
-            ctrl->data.creature_type, rule.action);
+    const bool shows_fallback = CellControl_ActionShowsFallback(
+        ctrl->data.creature_type, rule.action);
 
     // ---- 行动下拉 ----
     const char* action_label =
@@ -980,7 +978,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             eTextAlignment::MIDDLE_LEFT);
 
         // 「剩≤[N]」：仅保活策略=按数量时显示；录入态与「停止」框同款。
-        if (PanelProtectCountMode_() && PanelFullCardRow_()) {
+        if (PanelProtectCountMode_()) {
             CellControl_DrawText(scr, fntS, T("cell.protect_count_lbl"),
                 CC_PROTECT_CNT_LBL_X, CC_PROTECT_Y, CC_PROTECT_CNT_LBL_W,
                 CC_ROW_H,
@@ -1434,9 +1432,8 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
 {
     if (!ctrl) return CELL_HIT_NONE;
     const bool needs_target = CellControl_ActionNeedsTarget(ctrl->data.rule.action);
-    const bool shows_fallback = PanelFullCardRow_()
-        && CellControl_ActionShowsFallback(
-            ctrl->data.creature_type, ctrl->data.rule.action);
+    const bool shows_fallback = CellControl_ActionShowsFallback(
+        ctrl->data.creature_type, ctrl->data.rule.action);
     const bool melee = CellControl_ActionUsesTwoHex(ctrl->data.rule.action);
 
     auto in_box = [&](int x, int y, int w) -> bool {
