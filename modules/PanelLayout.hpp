@@ -78,7 +78,7 @@ static const int TAB_HLINE_X0 = 17;
 static const int TAB_HLINE_X1 = GRID_FRAME_X + GRID_FRAME_W + 10;
 static const int TAB_HLINE_Y  = TAB_SEP_Y0;  // 上线：接竖线上端
 static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确定/取消上方）
-static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 31; // 状态栏分隔线（原图抹除，代码绘制；原版 509+20）
+static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 8; // 状态栏分隔线（原图抹除，代码绘制；原版486+20，文字509紧贴线下）
 
 // 方案行与金框之间的保活策略行（方案级）：label + 下拉框。
 static const int PROTECT_DD_Y        = 76;   // 方案行下横线(67..68)之下
