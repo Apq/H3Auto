@@ -73,13 +73,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (wslash) wcscpy(wslash + 1, L"H3Auto.profiles");
         else wcscpy(wpath, L"H3Auto.profiles");
         utf8_from_wide(wpath, g_profiles_prefix, kPathCap_);
-        // 旧版编号记忆文件：仅启动迁移读一次；现行存 user.ini [General] LastProfile。
-        GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
-        wslash = wcsrchr(wpath, L'\\');
-        if (!wslash) wslash = wcsrchr(wpath, L'/');
-        if (wslash) wcscpy(wslash + 1, L"H3Auto.last.ini");
-        else wcscpy(wpath, L"H3Auto.last.ini");
-        utf8_from_wide(wpath, g_last_profile_path, kPathCap_);
         g_disable_log = ReadDisableLogFromIniFiles();
         delete[] wpath;
         SetupDatedLogPathAndCleanup(hModule);
