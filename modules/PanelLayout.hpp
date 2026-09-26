@@ -69,11 +69,13 @@ static const int TAB_GAP     = 8;
 static const int TAB_FIRST_Y = 80;
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
 static const int TAB_SEP_Y0  = 67;   // 与方案行下横线衔接
-static const int TAB_SEP_Y1  = 441;  // 确定按钮(BTN_Y=445)以上
-// 方案行(底 y=65)下的横向金线：第一级与 Tab/内容区的视觉分层。
-static const int TAB_HLINE_Y  = 67;  // 2px，与竖线同色衔接成 ⊤
+static const int TAB_SEP_Y1  = 441;  // 与按钮上横线衔接
+// 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
+// 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
-static const int TAB_HLINE_X1 = GRID_FRAME_X + GRID_FRAME_W + 15; // 右移 5 + 加长 10
+static const int TAB_HLINE_X1 = GRID_FRAME_X + GRID_FRAME_W + 10;
+static const int TAB_HLINE_Y  = TAB_SEP_Y0;  // 上线：接竖线上端
+static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确定/取消上方）
 
 // 方案行与金框之间的保活策略行（方案级）：label + 下拉框。
 static const int PROTECT_DD_Y        = 76;   // 方案行下横线(67..68)之下
