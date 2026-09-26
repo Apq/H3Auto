@@ -973,9 +973,9 @@ void OpenSettingsPanel_()
 
     if (o_WndMgr && o_WndMgr->screenPcx16) {
         s_p.x = (o_WndMgr->screenPcx16->width  - PANEL_W) / 2;
-        s_p.y = (o_WndMgr->screenPcx16->height - PANEL_H) / 2 - 50;
+        s_p.y = (o_WndMgr->screenPcx16->height - PANEL_H) / 2 - 40;
     } else {
-        s_p.x = (800 - PANEL_W) / 2; s_p.y = (600 - PANEL_H) / 2 - 50;
+        s_p.x = (800 - PANEL_W) / 2; s_p.y = (600 - PANEL_H) / 2 - 40;
     }
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 

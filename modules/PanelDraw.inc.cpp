@@ -594,6 +594,9 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
         168, 141, 68);
     Fill(scr, TAB_SEP_X, TAB_SEP_Y0, 2, TAB_HLINE2_Y + 2 - TAB_SEP_Y0,
         168, 141, 68);
+    // 状态栏分隔线（原图横线已抹除，改代码绘制；位置=原版+20px）。
+    Fill(scr, TAB_HLINE_X0, STATUS_SEP_Y, TAB_HLINE_X1 - TAB_HLINE_X0, 2,
+        168, 141, 68);
 }
 
 static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
