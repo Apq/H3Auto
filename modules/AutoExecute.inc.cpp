@@ -1926,8 +1926,14 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
 int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
 {
     int orig = THISCALL_1(int, h->GetDefaultFunc(), This);
-    if (orig != 0)
+    if (orig != 0) {
+        // 游戏 API 判定不把控制权交给玩家（自带“自动战斗”开关开着、
+        // 蛊惑、或 AI 侧行动）。debug 留痕：区分“钩子没被游戏调”与
+        // “orig!=0 被游戏拒绝”，定位“按 F9 切 AUTO 后无接管”类问题。
+        LogDebug("[Takeover] orig=%d game-keeps-control control=%d phase=%d",
+            orig, (int)g_control, (int)g_phase);
         return orig;            // 非“交给玩家”路径：不介入
+    }
     __try {
         PollControlHotkeys_(This);
         // 每次行动（控制权交玩家）都判保活：回合内首动每回合只判一次；
