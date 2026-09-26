@@ -2,8 +2,8 @@
 #pragma once
 
 static const int PANEL_W    = 680;
-// 底部状态栏 +26，背景图 HA_bg.pcx 同步为 680×528。
-static const int PANEL_H    = 528;
+// 底部状态栏 +26，背景图 HA_bg.pcx 同步为 680×548（底部 y=508 前插 20px 木纹带，底框原样下移）。
+static const int PANEL_H    = 548;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
 static const int CELL_W     = 464; // 多级导航：左侧 Tab 条+竖线后内容区收窄
