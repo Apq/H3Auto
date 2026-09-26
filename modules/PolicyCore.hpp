@@ -82,7 +82,7 @@ struct AutoStackRule {
     // 首动保活（§3.1.1）：挂单支部队，随方案/槽位一起存储与重排。
     uint8_t         protectEnable;       // 0=关闭；1=加入保活队列
     // 按数量保活阈值（PS_COUNT_BELOW）：该队剩余数量 ≤ 此值才救。
-    // 每队各自一份，默认 20，范围 0..2147483647。
+    // 每队各自一份，默认 2，范围 0..2147483647。
     int             protectCountBelow;
 };
 
@@ -110,7 +110,7 @@ inline AutoStackRule MakeDefaultRule()
         r.spellSlots[i] = -1;
     r.spellSlotCount = 0;
     r.protectEnable = 0;
-    r.protectCountBelow = 20;
+    r.protectCountBelow = 2;
     return r;
 }
 
@@ -422,7 +422,7 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
 // 保活策略（方案级）：整个方案的保活触发方式；默认 0=无。
 enum ProtectStrategy : uint8_t {
     PS_NONE = 0,          // 无：不保活
-    PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储；0=只救全灭）
+    PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储，默认 2；0=只救全灭）
     PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
     PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
     PS_COUNT

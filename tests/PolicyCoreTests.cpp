@@ -494,7 +494,7 @@ void TestProtect()
     Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, 999, 20),
         "not in queue disables");
 
-    // 按数量策略：剩余数量 ≤ 该队阈值才救（阈值默认 20，范围 0..INT_MAX）。
+    // 按数量策略：剩余数量 ≤ 该队阈值才救（阈值默认 2，范围 0..INT_MAX）。
     Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 15, 20),
         "count at threshold qualifies");
     Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 5, 20),
@@ -597,8 +597,8 @@ void TestProfileStoreRoundtrip()
     Check(out_rules[7].spellSlotCount == 1, "spell count roundtrip");
     Check(out_rules[7].protectEnable == 1, "protect enable roundtrip");
     Check(out_rules[7].protectCountBelow == 123, "protect count threshold roundtrip");
-    Check(out_rules[20].protectCountBelow == 20,
-        "protect count default is 20");
+    Check(out_rules[20].protectCountBelow == 2,
+        "protect count default is 2");
     Check(out_rules[7].allowDefendFallback, "fallback roundtrip");
     Check(out_rules[20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
     Check(out_rules[20].target.selector == SEL_RANGED_SPEED,
