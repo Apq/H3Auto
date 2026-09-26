@@ -869,7 +869,7 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
 // ==== 首动保活（§3.1.1） ====
 // 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历队列
 // （卡片勾选「加入保活队列」）内的己方部队，按方案级策略
-// （无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量）判定够格，
+// （无 / 按数量 / 回合内首动 / 损失量大于恢复量）判定够格，
 // 够格者中取血量最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，
 // 直接 CastSpell 施放。每回合只判一次（成败不重试）；英雄本回合已施法
 // 跳过；不占快捷施法、不推进任何部队的循环施法游标。
@@ -991,7 +991,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
     // 判定时机按策略分派：
     // - 回合内首动：每回合只判一次（判过即记，无论是否施法）；
-    // - 部队全灭后 / 损失量大于恢复量：事件型，每次行动（控制权交玩家）
+    // - 按数量 / 损失量大于恢复量：事件型，每次行动（控制权交玩家）
     //   都判。游戏一回合只允许施法一次：已施法/法力不足时静默跳过，
     //   不记回合标记，之后的行动继续判。
     const bool once_per_turn =
@@ -1068,7 +1068,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
         if (!H3AutoPolicy::ProtectShouldCast(true,
                 (H3AutoPolicy::ProtectStrategy)strategy,
-                restorable, wound, dead,
+                restorable, wound,
                 st->count_current, rule.protectCountBelow))
             continue;
         cands[cand_count] = cand;
@@ -1931,7 +1931,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
     __try {
         PollControlHotkeys_(This);
         // 每次行动（控制权交玩家）都判保活：回合内首动每回合只判一次；
-        // 部队全灭后 / 损失量大于恢复量为事件型，每次行动都判，
+        // 按数量 / 损失量大于恢复量为事件型，每次行动都判，
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         TryAutoStop_(This);

@@ -534,7 +534,6 @@ static const char* ProtectStrategyLabel_(int i)
     case 1: return T("panel.protect_opt1");
     case 2: return T("panel.protect_opt2");
     case 3: return T("panel.protect_opt3");
-    case 4: return T("panel.protect_opt4");
     default: return "?";
     }
 }

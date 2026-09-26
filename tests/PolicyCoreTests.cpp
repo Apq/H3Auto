@@ -478,38 +478,34 @@ void TestProtect()
     Check(ResurrectionRestoreHp(3, 10) == 1000, "expert resurrection restores 100*power");
     Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
 
-    // 方案级策略门槛：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量。
-    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, true, 999, 20),
+    // 方案级策略门槛：无 / 按数量 / 回合内首动 / 损失量大于恢复量。
+    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, 999, 20),
         "PS_NONE never casts");
-    Check(ProtectShouldCast(true, PS_ON_DEAD, 500, 600, true, 0, 20),
-        "on-dead strategy casts for a dead stack");
-    Check(!ProtectShouldCast(true, PS_ON_DEAD, 500, 600, false, 999, 20),
-        "on-dead strategy skips living stacks");
-    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, false, 999, 20),
+    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, 999, 20),
         "first-action strategy casts on any loss");
-    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, false, 999, 20),
+    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, 999, 20),
         "first-action strategy skips undamaged stacks");
-    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, false, 999, 20),
+    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, 999, 20),
         "loss above restorable casts");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, false, 999, 20),
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, 999, 20),
         "loss equal to restorable does not cast");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, true, 0, 20),
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, 0, 20),
         "unlearned spell never casts");
-    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, true, 999, 20),
+    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, 999, 20),
         "not in queue disables");
 
     // 按数量策略：剩余数量 ≤ 该队阈值才救（阈值默认 20，范围 0..INT_MAX）。
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 15, 20),
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 15, 20),
         "count at threshold qualifies");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 5, 20),
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 5, 20),
         "count below threshold qualifies");
-    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 21, 20),
+    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 21, 20),
         "count above threshold does not qualify");
-    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 0, false, 5, 20),
+    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 0, 5, 20),
         "undamaged stack never qualifies");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, true, 0, 0),
-        "dead stack qualifies at threshold 0");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false,
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 0, 0),
+        "count zero qualifies at threshold 0");
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600,
             2147483647, 2147483647),
         "int-max threshold accepts any count");
 
@@ -616,11 +612,15 @@ void TestProfileStoreRoundtrip()
     Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
             &out_strategy, out_rules, &out_stop),
         "legacy five-slot magic rejected");
-    text[4] = '3'; // H3AP4 -> H3AP3：旧格式（59 字段规则）拒绝
+    text[4] = '4'; // H3AP5 -> H3AP4：上一版格式（含全灭后策略枚举）拒绝
+    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+            out_rules, &out_stop),
+        "h3ap4 store rejected after enum reshuffle");
+    text[4] = '3'; // H3AP4 -> H3AP3：59 字段规则旧格式拒绝
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
             out_rules, &out_stop),
         "h3ap3 store rejected after format bump");
-    text[4] = '4';
+    text[4] = '5';
     text[0] = 'X';
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
             out_rules, &out_stop),

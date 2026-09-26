@@ -422,25 +422,23 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
 // 保活策略（方案级）：整个方案的保活触发方式；默认 0=无。
 enum ProtectStrategy : uint8_t {
     PS_NONE = 0,          // 无：不保活
-    PS_ON_DEAD,           // 部队全灭后：只救已全灭（仍有尸体）者
+    PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储；0=只救全灭）
     PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
     PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
-    PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储）
     PS_COUNT
 };
 
 // 是否够格：未入队不触发；无损失不触发；按方案策略判定。
-// PS_ON_DEAD 只救已全灭；PS_FIRST_ACTION 有损失即救；
-// PS_LOSS_GT_RESTORE 要求已损 HP 严格大于一次可恢复量；
-// PS_COUNT_BELOW 要求剩余数量 ≤ 该队阈值（全灭数量 0 天然满足）。
+// PS_COUNT_BELOW 要求剩余数量 ≤ 该队阈值（全灭数量 0 天然满足，0=只救全灭）；
+// PS_FIRST_ACTION 有损失即救；
+// PS_LOSS_GT_RESTORE 要求已损 HP 严格大于一次可恢复量。
 inline bool ProtectShouldCast(bool enabled, ProtectStrategy strategy,
-    int restorable_hp, int wound_value, bool dead,
+    int restorable_hp, int wound_value,
     int count_current, int count_below)
 {
     if (!enabled) return false;
     if (wound_value <= 0) return false;
     switch (strategy) {
-    case PS_ON_DEAD:         return dead;
     case PS_FIRST_ACTION:    return true;
     case PS_LOSS_GT_RESTORE: return restorable_hp > 0
         && wound_value > restorable_hp;
@@ -549,8 +547,8 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 }
 
 // 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profilesN.ini）。
-// 纯编解码：一行文本 "H3AP4 <21×部队表> <策略> <停止回合> <21×规则>"，
-// 规则按槽位排列，每条 60 个十进制整数（H3AP3 及更早一律拒绝）。
+// 纯编解码：一行文本 "H3AP5 <21×部队表> <策略> <停止回合> <21×规则>"，
+// 规则按槽位排列，每条 60 个十进制整数（H3AP4 及更早一律拒绝）。
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
 // 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
 // 文本在部队表之后有 1 个策略、1 个自动停止回合（0..999）。
@@ -719,7 +717,7 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP4 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+// Decode 只接受以 "H3AP5 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
 inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     const int army_counts[PROFILE_STORE_SLOTS],
     uint8_t strategy,
@@ -738,7 +736,7 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
         }
         return true;
     };
-    if (!append("H3AP4")) return -1;
+    if (!append("H3AP5")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
@@ -788,7 +786,7 @@ inline bool DecodeProfileStoreText(const char* text,
 {
     if (!text || !army_types || !army_counts || !strategy || !rules
         || !stop_turns) return false;
-    const char* magic = "H3AP4";
+    const char* magic = "H3AP5";
     for (int i = 0; magic[i]; ++i)
         if (text[i] != magic[i]) return false;
     const char* p = text + 5;
