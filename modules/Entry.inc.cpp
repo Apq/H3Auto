@@ -54,10 +54,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
             if (out_size > 0) out[out_size - 1] = 0;
         };
         wchar_t* wpath = new wchar_t[kPathCap_ / 2]();
-        GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
-        utf8_from_wide(wpath, g_ini_path, kPathCap_);
-        char* dot = strrchr(g_ini_path, '.');
-        if (dot) strcpy(dot, ".ini");
+        // 配置分两层（DLL 同目录）：default = 出厂默认随包分发；
+        // user = 玩家改动层（日志级别等），读取时叠加覆盖默认层。
+        auto set_dll_dir_file = [&](const wchar_t* name, char* out_utf8) {
+            GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
+            wchar_t* wslash = wcsrchr(wpath, L'\\');
+            if (!wslash) wslash = wcsrchr(wpath, L'/');
+            if (wslash) wcscpy(wslash + 1, name);
+            else wcscpy(wpath, name);
+            utf8_from_wide(wpath, out_utf8, kPathCap_);
+        };
+        set_dll_dir_file(L"H3Auto.default.ini", g_ini_path);
+        set_dll_dir_file(L"H3Auto.user.ini", g_user_ini_path);
         // 方案存档与 DLL 同目录：每个编号一个独立文件（前缀 H3Auto.profiles + 编号）。
         GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
         wchar_t* wslash = wcsrchr(wpath, L'\\');
@@ -72,10 +80,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (wslash) wcscpy(wslash + 1, L"H3Auto.last.ini");
         else wcscpy(wpath, L"H3Auto.last.ini");
         utf8_from_wide(wpath, g_last_profile_path, kPathCap_);
-        wchar_t* ini_path_w = new wchar_t[kPathCap_ / 2];
-        MultiByteToWideChar(CP_UTF8, 0, g_ini_path, -1, ini_path_w, kPathCap_ / 2);
-        g_disable_log = ReadDisableLogFromIniFileW(ini_path_w);
-        delete[] ini_path_w;
+        g_disable_log = ReadDisableLogFromIniFiles();
         delete[] wpath;
         SetupDatedLogPathAndCleanup(hModule);
         LogInfo("打铁助手 loading.");

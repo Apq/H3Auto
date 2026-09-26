@@ -27,6 +27,6 @@
     <ResourceCompile Include="H3Auto.rc" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="H3Auto.ini" />
+    <None Include="H3Auto.default.ini" />
   </ItemGroup>
 </Project>

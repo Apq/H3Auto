@@ -1,6 +1,6 @@
 // ========== 界面文案（i18n 外置） ==========
 // 全部界面文本的唯一定义点：内置默认表 + lang\<语言>.ini 覆盖。
-// 加载链：H3Auto.ini [General] Language（缺省 zh-CN）→ DLL 同目录
+// 加载链：H3Auto.default.ini [General] Language（缺省 zh-CN，玩家层可覆盖）→ DLL 同目录
 // lang\<语言>.ini 覆盖命中键；缺文件/缺键回落内置默认（删光配置不崩）。
 // 键 = "节.键名"；值支持富文本颜色标记（{金} {#RRGGBB} 等）与 %s/%d
 // 格式串。行内注释只认 ';'，'#' 只在行首当注释（保护 {#RRGGBB}）。
@@ -59,7 +59,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.pack_fail", "{红}打包日志失败：%s" },
     { "help.pack_no_logs", "没有找到日志文件" },
     { "help.pack_clipboard_fail", "zip 已生成但复制路径失败（剪贴板被占用），请手动复制" },
-    { "help.log_level_set", "{绿}日志级别已设为 %s（已写入配置）" },
+    { "help.log_level_set", "{绿}日志级别已设为 %s（已写入 user.ini）" },
     // ---- tips：状态栏悬停提示 ----
     { "tips.color_wrap", "{金}%s" },
     { "tips.titlebar", "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置 · 右键“自动战斗”按钮也可打开" },
@@ -129,14 +129,14 @@ static const char* T(const char* key)
 // lang 文件路径（UTF-8，与 g_ini_path 同目录）。
 static char* g_lang_path = new char[kPathCap_]();
 
-// 语言名（如 zh-CN），来自 H3Auto.ini [General] Language。
+// 语言名（如 zh-CN），来自 H3Auto.default.ini [General] Language（user 层可覆盖）。
 static char g_ui_language[32] = "zh-CN";
 
 // 启动时调用一次：读语言名 → 逐键覆盖 → 填充 action/selector 标签数组。
 static void LoadUiTexts()
 {
     char lang[32] = {};
-    IniReadUtf8(g_ini_path, "General", "Language", "zh-CN", lang, sizeof(lang));
+    IniReadUtf8Layered("General", "Language", "zh-CN", lang, sizeof(lang));
     bool lang_ok = lang[0] != 0;
     for (const char* p = lang; p && *p; ++p) {
         const unsigned char c = (unsigned char)*p;

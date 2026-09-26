@@ -1252,13 +1252,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             "trace", "debug", "info", "warn", "error",
                         };
                         g_log_level = i;
-                        IniWriteKeyUtf8(g_ini_path, "Logging", "MinLevel", kNames[i]);
+                        IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", kNames[i]);
                         char msg[128];
                         _snprintf(msg, sizeof(msg) - 1, T("help.log_level_set"),
                             kNames[i]);
                         msg[sizeof(msg) - 1] = 0;
                         SetStatusText_(msg, 4000);
-                        LogInfo("[Config] 日志级别切换为 %s（已写入 ini）", kNames[i]);
+                        LogInfo("[Config] 日志级别切换为 %s（已写入 user.ini）", kNames[i]);
                     }
                     DrawPanelToBuffer_();
                     break;

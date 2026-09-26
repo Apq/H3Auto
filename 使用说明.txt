@@ -17,7 +17,8 @@
    <游戏目录>\_HD3_Data\Packs\打铁助手\
    目录里应有：
    H3Auto.dll        插件本体
-   H3Auto.ini        配置（热键、日志）
+   H3Auto.default.ini 出厂默认配置（热键、界面语言）
+   H3Auto.user.ini   玩家配置（日志级别，可没有）
    lang\zh-CN.ini    界面文字，可自行修改
    img\              面板用的图片
 3. 打开 HD Mod 启动器，进“插件”页，在“未加载”里找到
@@ -31,7 +32,7 @@
 ----------------------------------------------
 战斗中两种方式：
 - 右键点“自动战斗”按钮
-- 按 P 键（可在 H3Auto.ini 里改）
+- 按 P 键（可在 H3Auto.default.ini 里改）
 
 打开设置面板会立刻停掉自动执行。改完要点勾号才生效，
 关掉面板后需要重新按 F9 启动。
@@ -121,7 +122,7 @@ F9    启动 / 停止打铁（本场自动与全手动之间切换）
 J     单次接管：锁定当前或下一支部队，手动操作一次后恢复自动
 P     打开 / 关闭设置面板
 
-三个键都在 H3Auto.ini 的 [Hotkeys] 里改：
+三个键都在 H3Auto.default.ini 的 [Hotkeys] 里改：
 ToggleManual   启停，可用 F1-F12 或单个字母
 OneShotManual  单次接管，只能用单个字母
 OpenSettings   打开设置，单个字母
@@ -152,11 +153,15 @@ lang\zh-CN.ini 里是全部界面文字和悬停提示，用记事本编辑，
 十二、出问题了
 ----------------------------------------------
 插件运行时在自己的目录写日志 H3Auto_日期_时间.log。
-H3Auto.ini 的 [Logging] 可调：
+日志设置写在 H3Auto.user.ini（没有就新建一个文本文件），内容：
+[Logging]
+DisableLog=0
+MinLevel=info
+或者在设置帮助页直接切换级别，会自动保存到这个文件。
 DisableLog=1   完全不写日志
 MinLevel       记录级别，默认 info，可选 trace/debug/info/warn/error
 
-反馈 BUG 时：把 MinLevel 临时改成 debug，进游戏复现问题，
+反馈 BUG 时：把 H3Auto.user.ini 的 MinLevel 临时改成 debug（或帮助页切到 debug），进游戏复现问题，
 再到设置里“打包日志”发回。debug 会记录目标选择、保活、
 自动停止等判定细节，方便定位问题；平时用 info 即可。
 
@@ -172,7 +177,8 @@ QQ     712999712
 十三、文件一览
 ----------------------------------------------
 H3Auto.dll              插件本体
-H3Auto.ini              配置：热键、日志、界面语言
+H3Auto.default.ini       出厂默认配置：热键、界面语言
+H3Auto.user.ini          玩家配置：日志级别（使用后生成）
 lang\zh-CN.ini          界面文字
 img\                    面板图片
 H3Auto.profilesN.ini    第 N 套方案的存档（使用后生成）

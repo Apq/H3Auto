@@ -51,11 +51,41 @@ static struct Config {
 } cfg;
 
 // 常驻路径：堆上 4MB，DLL 加载时分配一次。目录可能很深，MAX_PATH 不够。
-static char* g_ini_path = new char[kPathCap_];
+// 配置分两层（同目录）：default = 出厂默认随包分发；user = 玩家改动层。
+static char* g_ini_path = new char[kPathCap_];        // H3Auto.default.ini
+static char* g_user_ini_path = new char[kPathCap_](); // H3Auto.user.ini（可不存在）
 static char* g_log_path = new char[kPathCap_];
 static char* g_profiles_prefix = new char[kPathCap_]; // 每槽一文件：前缀 + 编号（1..5）
 static char* g_last_profile_path = new char[kPathCap_]; // 编号记忆：H3Auto.last.ini
 static wchar_t* g_log_path_w = new wchar_t[kPathCap_ / 2];
+
+// 分层读取：先默认层 H3Auto.default.ini，再叠加玩家层 H3Auto.user.ini
+//（键存在且非空才覆盖）。两层都未命中 → fallback。
+static bool IniReadUtf8Layered(const char* section, const char* key,
+    const char* fallback, char* out, int out_size)
+{
+    const bool hit_default =
+        IniReadUtf8(g_ini_path, section, key, fallback, out, out_size);
+    char user_v[512] = {};
+    if (IniReadUtf8(g_user_ini_path, section, key, "", user_v,
+            (int)sizeof(user_v))
+        && user_v[0]) {
+        const int n = (int)strlen(user_v) < out_size - 1
+            ? (int)strlen(user_v) : out_size - 1;
+        memcpy(out, user_v, n);
+        out[n] = 0;
+        return true;
+    }
+    return hit_default;
+}
+
+static int IniReadIntUtf8Layered(const char* section, const char* key,
+    int fallback)
+{
+    char buf[32] = {};
+    IniReadUtf8Layered(section, key, "", buf, (int)sizeof(buf));
+    return buf[0] ? atoi(buf) : fallback;
+}
 
 // 拼出编号 N（1..5）的存档文件全路径：H3Auto.profilesN.ini。
 void ProfileSlotPath(int slot, char* buf, int buf_size)
@@ -112,16 +142,10 @@ static char* TrimAscii(char* s)
     return s;
 }
 
-static bool ReadDisableLogFromIniFileW(const wchar_t* ini_path)
+static bool ReadDisableLogFromIniFiles()
 {
-    // 宽字符路径转 UTF-8 后走统一解析（IniReadIntUtf8 内部按 UTF-8 路径 _wfopen）。
-    if (!ini_path || !ini_path[0]) return false;
-    char* path = new(std::nothrow) char[kPathCap_];
-    if (!path) return false;
-    WideCharToMultiByte(CP_UTF8, 0, ini_path, -1, path, kPathCap_, nullptr, nullptr);
-    const bool disabled = IniReadIntUtf8(path, "Logging", "DisableLog", 0) != 0;
-    delete[] path;
-    return disabled;
+    // 启动早期（写第一条日志前）：默认层 + 玩家层叠加。
+    return IniReadIntUtf8Layered("Logging", "DisableLog", 0) != 0;
 }
 
 static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base, const wchar_t* current_log_path)
@@ -404,14 +428,14 @@ static bool LoadProfileStore_(int army_types[21], int army_counts[21],
 
 static void ReadConfig()
 {
-    const char* f = g_ini_path;
-    cfg.disable_on_start = IniReadIntUtf8(f, "General", "DisableOnStart", 0);
+    // 全部键走分层读取：H3Auto.default.ini 打底，H3Auto.user.ini 叠加覆盖。
+    cfg.disable_on_start = IniReadIntUtf8Layered("General", "DisableOnStart", 0);
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
 
     // 日志级别：[Logging] MinLevel（trace/debug/info/warn/error，坏值回 info）。
     {
         char lv[16] = {};
-        IniReadUtf8(f, "Logging", "MinLevel", "info", lv, sizeof(lv));
+        IniReadUtf8Layered("Logging", "MinLevel", "info", lv, sizeof(lv));
         g_log_level = ParseLogLevel_(lv);
     }
 
@@ -437,11 +461,11 @@ static void ReadConfig()
     char toggle_buf[64] = {};
     char oneshot_buf[64] = {};
     char openpanel_buf[64] = {};
-    IniReadUtf8(f, "Hotkeys", "ToggleManual", "F9",
+    IniReadUtf8Layered("Hotkeys", "ToggleManual", "F9",
         toggle_buf, sizeof(toggle_buf));
-    IniReadUtf8(f, "Hotkeys", "OneShotManual", "J",
+    IniReadUtf8Layered("Hotkeys", "OneShotManual", "J",
         oneshot_buf, sizeof(oneshot_buf));
-    IniReadUtf8(f, "Hotkeys", "OpenSettings", "P",
+    IniReadUtf8Layered("Hotkeys", "OpenSettings", "P",
         openpanel_buf, sizeof(openpanel_buf));
     cfg.toggle_manual_vk = ParseHotkeyVk_(toggle_buf, VK_F9, false);
     cfg.one_shot_manual_vk = ParseHotkeyVk_(oneshot_buf, 'J', true);
