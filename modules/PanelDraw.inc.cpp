@@ -437,8 +437,9 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 static const char* PanelTipAt_(int px, int py)
 {
     // 左侧 Tab 导航条：两页共通。
-    for (int page = 0; page < PAGE_COUNT; ++page) {
-        const int ty = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+    for (int i = 0; i < PAGE_COUNT; ++i) {
+        const int page = kTabOrder[i];
+        const int ty = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
         if (px >= TAB_X && px < TAB_X + TAB_ITEM_W
             && py >= ty && py < ty + TAB_ITEM_H)
             return T(page == PAGE_ARMY ? "tips.tab_army" : "tips.tab_profile");
@@ -570,9 +571,10 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
         "panel.tab_army", "panel.tab_profile",
     };
     H3Font* small_font = GetSmallFont();
-    for (int page = 0; page < PAGE_COUNT; ++page) {
+    for (int i = 0; i < PAGE_COUNT; ++i) {
+        const int page = kTabOrder[i];
         const int x = TAB_X;
-        const int y = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+        const int y = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
         const bool sel = (page == s_p.active_page);
         Fill(scr, x, y, TAB_ITEM_W, TAB_ITEM_H,
             sel ? 136 : 74, sel ? 88 : 52, 24);

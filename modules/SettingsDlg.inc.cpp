@@ -1472,8 +1472,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     if (raw_command == 8) {
         s_cnt_lb_in_box = false; // 按下是否落在「剩≤」框内，由命中测试回填
         // 左侧 Tab 导航：按下即切页（各页内容互不重叠，无穿透问题）。
-        for (int page = 0; page < PAGE_COUNT; ++page) {
-            const int ty = TAB_FIRST_Y + page * (TAB_ITEM_H + TAB_GAP);
+        for (int i = 0; i < PAGE_COUNT; ++i) {
+            const int page = kTabOrder[i];
+            const int ty = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
             if (PointInRect_(px, py, TAB_X, ty, TAB_ITEM_W, TAB_ITEM_H)) {
                 SwitchPanelPage_(page);
                 return;

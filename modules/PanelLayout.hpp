@@ -30,7 +30,7 @@ static const int BTN_H      = 30;
 static const int BTN_FRAME_W = 66;
 static const int BTN_FRAME_H = 32;
 static const int BTN_GAP    = 24;
-static const int BTN_Y      = PANEL_H - 83;
+static const int BTN_Y      = PANEL_H - 73;
 static const int OK_X       = (PANEL_W - BTN_GAP) / 2 - BTN_W;
 static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * VISIBLE_ROWS;
@@ -61,6 +61,8 @@ enum {
     PAGE_PROFILE = 1,   // 方案：方案级设置（保活策略/自动停止）
     PAGE_COUNT   = 2,
 };
+// Tab 显示顺序（从上到下）：方案页在上、部队页在下。
+static const int kTabOrder[PAGE_COUNT] = { PAGE_PROFILE, PAGE_ARMY };
 static const int TAB_X       = 17;   // Tab 条左缘
 static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
@@ -69,7 +71,7 @@ static const int TAB_GAP     = 8;
 static const int TAB_FIRST_Y = 80;
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
 static const int TAB_SEP_Y0  = 67;   // 与方案行下横线衔接
-static const int TAB_SEP_Y1  = 441;  // 与按钮上横线衔接
+static const int TAB_SEP_Y1  = 451;  // 与按钮上横线衔接（按钮下移 10px）
 // 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
 // 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
