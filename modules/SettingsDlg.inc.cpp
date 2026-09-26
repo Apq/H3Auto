@@ -630,6 +630,41 @@ static void CancelStopTurnsEdit_()
     s_stop_turns_caret = 0;
 }
 
+// ===== 部队卡片「剩≤」数量阈值录入（保活策略=按数量） =====
+// 状态挂在各 CellControl 上；这里只做面板级的查找与收尾。
+static bool PanelProtectCountMode_()
+{
+    return s_p.draft_protect_strategy[s_p.selected_profile]
+        == (int)H3AutoPolicy::PS_COUNT_BELOW;
+}
+
+static bool PanelAnyProtectCountEditing_()
+{
+    for (int i = 0; i < CELL_COUNT; ++i)
+        if (s_p.cells[i].cnt_editing) return true;
+    return false;
+}
+
+static CellControl* PanelEditingProtectCountCell_()
+{
+    for (int i = 0; i < CELL_COUNT; ++i)
+        if (s_p.cells[i].cnt_editing) return &s_p.cells[i];
+    return nullptr;
+}
+
+static void PanelCommitAllProtectCountEdits_()
+{
+    for (int i = 0; i < CELL_COUNT; ++i)
+        if (s_p.cells[i].cnt_editing)
+            CellControl_CommitCountEdit_(&s_p.cells[i]);
+}
+
+static void PanelCancelAllProtectCountEdits_()
+{
+    for (int i = 0; i < CELL_COUNT; ++i)
+        CellControl_CancelCountEdit_(&s_p.cells[i]);
+}
+
 
 // 拾取模式：隐藏面板，并让原版战场重绘覆盖面板储留像素（只隐藏，不关闭）。
 // 仅 H3Redraw 区域失效不够：不会把已经 blit 到屏幕的面板储留清掉。
@@ -683,6 +718,8 @@ static bool StackIsRanged_(const H3CombatCreature& stack)
 
 static void SaveCurrentCellsToDraft_()
 {
+    // 「剩≤」录入先落进卡片规则，再随规则一起收进草稿。
+    PanelCommitAllProtectCountEdits_();
     const int profile = s_p.selected_profile;
     if (profile < 0 || profile >= PROFILE_COUNT) return;
     for (int i = 0; i < CELL_COUNT; ++i) {
@@ -834,6 +871,7 @@ static void LoadProfilesFromDisk_()
         s_p.draft_protect_strategy[s_p.selected_profile] = strategy;
         s_p.draft_stop_turns[s_p.selected_profile] = stop_turns;
         s_stop_turns_editing = false;
+        PanelCancelAllProtectCountEdits_();
         for (int k = 0; k < CELL_COUNT; ++k) {
             s_p.cells[k].expanded = CEX_NONE;
             s_p.cells[k].dirty = true;
@@ -1019,6 +1057,7 @@ void CloseSettingsPanel()
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
     if (s_stop_turns_editing) CancelStopTurnsEdit_();
+    PanelCancelAllProtectCountEdits_();
     ForcePanelModalDepth_(false);
     RestoreBattleHover_();
     // Allow the same battle to open the panel again, but require a fresh
@@ -1311,6 +1350,11 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 DrawPanelToBuffer_();
             }
         }
+        if (raw_command == 16 && PanelAnyProtectCountEditing_()
+            && !s_cnt_lb_in_box) {
+            PanelCommitAllProtectCountEdits_();
+            DrawPanelToBuffer_();
+        }
         return;
     }
 
@@ -1325,6 +1369,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 int ix = 0, iy = 0, iw = 0, ih = 0;
                 GetProtectDdItemRect_(i, &ix, &iy, &iw, &ih);
                 if (PointInRect_(px, py, ix, iy, iw, ih)) {
+                    PanelCommitAllProtectCountEdits_();
                     s_p.draft_protect_strategy[s_p.selected_profile] =
                         (uint8_t)i;
                     s_protect_dd_open = false;
@@ -1404,6 +1449,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     }
 
     if (raw_command == 8) {
+        s_cnt_lb_in_box = false; // 按下是否落在「剩≤」框内，由命中测试回填
         // 保活策略下拉（收起态）：点击展开；先收起卡片下拉避免层级重叠。
         if (PointInRect_(px, py, PROTECT_DD_X, PROTECT_DD_Y,
                 PROTECT_DD_W, PROTECT_DD_H)) {

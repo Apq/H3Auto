@@ -324,7 +324,7 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 }
 
 // 方案存档：DLL 同目录，每个编号一个独立文件（H3Auto.profiles1.ini .. profiles5.ini，
-// 文本一行，格式见 PolicyCore H3AP3）。
+// 文本一行，格式见 PolicyCore H3AP4）。
 // 保存/加载的是面板草稿，不改变当前生效方案，也不暂停自动执行。
 // g_profiles_prefix 在 Entry 的 DllMain 里初始化。
 

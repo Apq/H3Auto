@@ -479,24 +479,39 @@ void TestProtect()
     Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
 
     // 方案级策略门槛：无 / 部队全灭后 / 回合内首动 / 损失量大于恢复量。
-    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, true),
+    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, true, 999, 20),
         "PS_NONE never casts");
-    Check(ProtectShouldCast(true, PS_ON_DEAD, 500, 600, true),
+    Check(ProtectShouldCast(true, PS_ON_DEAD, 500, 600, true, 0, 20),
         "on-dead strategy casts for a dead stack");
-    Check(!ProtectShouldCast(true, PS_ON_DEAD, 500, 600, false),
+    Check(!ProtectShouldCast(true, PS_ON_DEAD, 500, 600, false, 999, 20),
         "on-dead strategy skips living stacks");
-    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, false),
+    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, false, 999, 20),
         "first-action strategy casts on any loss");
-    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, false),
+    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, false, 999, 20),
         "first-action strategy skips undamaged stacks");
-    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, false),
+    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, false, 999, 20),
         "loss above restorable casts");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, false),
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, false, 999, 20),
         "loss equal to restorable does not cast");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, true),
+    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, true, 0, 20),
         "unlearned spell never casts");
-    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, true),
+    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, true, 999, 20),
         "not in queue disables");
+
+    // 按数量策略：剩余数量 ≤ 该队阈值才救（阈值默认 20，范围 0..INT_MAX）。
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 15, 20),
+        "count at threshold qualifies");
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 5, 20),
+        "count below threshold qualifies");
+    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false, 21, 20),
+        "count above threshold does not qualify");
+    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 0, false, 5, 20),
+        "undamaged stack never qualifies");
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, true, 0, 0),
+        "dead stack qualifies at threshold 0");
+    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, false,
+            2147483647, 2147483647),
+        "int-max threshold accepts any count");
 
     // 够格者中选目标：血量最低（全灭者剩余 0 天然最前）。
     {
@@ -546,6 +561,7 @@ void TestProfileStoreRoundtrip()
     rules[7].spellSlots[0] = 3;
     rules[7].spellSlotCount = 1;
     rules[7].protectEnable = 1;
+    rules[7].protectCountBelow = 123;
     rules[7].allowDefendFallback = true;
     rules[20].action = AA_RANGED_ATTACK;
     rules[20].target.selector = SEL_RANGED_SPEED;
@@ -584,6 +600,9 @@ void TestProfileStoreRoundtrip()
     Check(out_rules[7].spellSlots[0] == 3, "spell slot roundtrip");
     Check(out_rules[7].spellSlotCount == 1, "spell count roundtrip");
     Check(out_rules[7].protectEnable == 1, "protect enable roundtrip");
+    Check(out_rules[7].protectCountBelow == 123, "protect count threshold roundtrip");
+    Check(out_rules[20].protectCountBelow == 20,
+        "protect count default is 20");
     Check(out_rules[7].allowDefendFallback, "fallback roundtrip");
     Check(out_rules[20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
     Check(out_rules[20].target.selector == SEL_RANGED_SPEED,
@@ -597,6 +616,11 @@ void TestProfileStoreRoundtrip()
     Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
             &out_strategy, out_rules, &out_stop),
         "legacy five-slot magic rejected");
+    text[4] = '3'; // H3AP4 -> H3AP3：旧格式（59 字段规则）拒绝
+    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+            out_rules, &out_stop),
+        "h3ap3 store rejected after format bump");
+    text[4] = '4';
     text[0] = 'X';
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
             out_rules, &out_stop),

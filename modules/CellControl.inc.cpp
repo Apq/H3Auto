@@ -77,6 +77,13 @@ static const int CC_PROTECT_CB_X     = CC_COL3_X;          // 复选框
 static const int CC_PROTECT_CB_BOX   = 10;
 static const int CC_PROTECT_LABEL_X  = CC_COL3_X + 14;     // 「加入保活队列」
 static const int CC_PROTECT_LABEL_W  = 118;
+// 按数量保活阈值：标签「剩≤」+ 数字框，仅策略=按数量时显示/可点。
+static const int CC_PROTECT_CNT_LBL_X = CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W + 10; // ≈348
+static const int CC_PROTECT_CNT_LBL_W = 34;
+static const int CC_PROTECT_CNT_BOX_X = CC_PROTECT_CNT_LBL_X + CC_PROTECT_CNT_LBL_W; // ≈382
+static const int CC_PROTECT_CNT_BOX_W = 92;  // 容纳 10 位（2147483647）
+static const int CC_PROTECT_CNT_BOX_H = 16;
+static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
 // 循环施法：标签占第二小列；槽位从第三小列起。
 // 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
 static const int CC_SPELL_LABEL_W = CC_COL2_W;
@@ -102,6 +109,14 @@ static const int CC_DROPDOWN_ITEM_H = 18;
 // 标签（由 SettingsDlg 注入）
 extern const char* g_action_labels[AA_COUNT];
 extern const char* g_selector_labels[SEL_COUNT];
+
+// 面板级判定/收尾由 SettingsDlg 提供（同翻译单元后置定义）。
+static bool PanelProtectCountMode_();
+static void PanelCommitAllProtectCountEdits_();
+static void PanelCancelAllProtectCountEdits_();
+static bool PanelAnyProtectCountEditing_();
+// 本轮按下是否落在正在录入的「剩≤」框内（松开时不打断录入）。
+static bool s_cnt_lb_in_box = false;
 
 // 展开中的下拉类型
 enum CellExpandKind {
@@ -140,7 +155,18 @@ struct CellControl
     int              spell_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
+
+    // 「剩≤」数量阈值录入态（保活策略=按数量）：文本/插入位/闪烁基准。
+    bool             cnt_editing;
+    char             cnt_text[12];
+    int              cnt_caret;
+    DWORD            cnt_caret_tick;
 };
+
+// 结构体定义之后才可声明返回/接受 CellControl* 的接口。
+static void CellControl_CommitCountEdit_(CellControl* ctrl);
+static void CellControl_CancelCountEdit_(CellControl* ctrl);
+static CellControl* PanelEditingProtectCountCell_();
 
 // ========================================================================
 // 规则/选项辅助
@@ -950,6 +976,51 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             CC_PROTECT_LABEL_X, CC_PROTECT_Y, CC_PROTECT_LABEL_W, CC_ROW_H,
             (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
             eTextAlignment::MIDDLE_LEFT);
+
+        // 「剩≤[N]」：仅保活策略=按数量时显示；录入态与「停止」框同款。
+        if (PanelProtectCountMode_()) {
+            CellControl_DrawText(scr, fntS, T("cell.protect_count_lbl"),
+                CC_PROTECT_CNT_LBL_X, CC_PROTECT_Y, CC_PROTECT_CNT_LBL_W,
+                CC_ROW_H,
+                (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
+                eTextAlignment::MIDDLE_LEFT);
+            const int bx = CC_PROTECT_CNT_BOX_X;
+            const int by = CC_PROTECT_Y + (CC_ROW_H - CC_PROTECT_CNT_BOX_H) / 2;
+            const int bw = CC_PROTECT_CNT_BOX_W;
+            const int bh = CC_PROTECT_CNT_BOX_H;
+            char num[16] = {};
+            if (ctrl->cnt_editing)
+                _snprintf(num, sizeof(num), "%s", ctrl->cnt_text);
+            else
+                _snprintf(num, sizeof(num), "%d",
+                    (int)rule.protectCountBelow);
+            Fill(scr, bx, by, bw, bh,
+                ctrl->cnt_editing ? 104 : 74,
+                ctrl->cnt_editing ? 70 : 52,
+                ctrl->cnt_editing ? 28 : 24);
+            scr->DrawFrame(bx, by, bw, bh, (BYTE)210, (BYTE)170, (BYTE)72);
+            if (ctrl->cnt_editing) {
+                // 编辑态：左对齐 + 500ms 闪烁光标（BltComplete 每帧重绘）。
+                const int text_x = bx + 8;
+                CellControl_DrawText(scr, fntS, num, text_x, by, bw - 12, bh,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+                const bool caret_on =
+                    ((GetTickCount() - ctrl->cnt_caret_tick) / 500) % 2 == 0;
+                if (caret_on) {
+                    char prefix[12] = {};
+                    const int caret = ctrl->cnt_caret;
+                    if (caret > 0)
+                        memcpy(prefix, num, caret < 11 ? caret : 11);
+                    const INT32 prefix_w =
+                        fntS ? fntS->GetMaxLineWidth(prefix) : 0;
+                    Fill(scr, text_x + prefix_w, by + (bh - 10) / 2, 2, 10,
+                        210, 170, 72); // 金色竖线光标
+                }
+            } else {
+                CellControl_DrawText(scr, fntS, num, bx, by, bw, bh,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+            }
+        }
     }
 
     // ---- 位置/数量：第一小列左下角向上排（位置在下、数量在上），明确左对齐 ----
@@ -1276,6 +1347,7 @@ enum CellHitArea
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
     CELL_HIT_PROTECT_CHECKBOX, // 加入保活队列复选框
+    CELL_HIT_PROTECT_COUNT,     // 「剩≤」数量阈值数字框（策略=按数量）
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
@@ -1286,6 +1358,33 @@ enum CellHitArea
 // 返回静态字符串；未命中返回 nullptr。
 // 行动/目标选择下拉按当前选中项取各自的提示；当前值没有对应文案
 // （如等待）时回落到展开列表的通用提示。
+// 「剩≤」录入提交：文本→规则值；溢出 int 上限截到 2147483647。
+static void CellControl_CommitCountEdit_(CellControl* ctrl)
+{
+    if (!ctrl || !ctrl->cnt_editing) return;
+    int value = 0;
+    for (int i = 0; ctrl->cnt_text[i]; ++i) {
+        const int d = ctrl->cnt_text[i] - '0';
+        if (d < 0 || d > 9) continue;
+        if (value > (2147483647 - d) / 10) { value = 2147483647; break; }
+        value = value * 10 + d;
+    }
+    ctrl->data.rule.protectCountBelow = value;
+    ctrl->cnt_editing = false;
+    ctrl->cnt_text[0] = 0;
+    ctrl->cnt_caret = 0;
+    ctrl->dirty = true;
+    LogInfo("[Panel] 保活阈值=%d 位置=%d", value, ctrl->data.position);
+}
+
+static void CellControl_CancelCountEdit_(CellControl* ctrl)
+{
+    if (!ctrl || !ctrl->cnt_editing) return;
+    ctrl->cnt_editing = false;
+    ctrl->cnt_text[0] = 0;
+    ctrl->cnt_caret = 0;
+}
+
 static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctrl)
 {
     switch (hit) {
@@ -1313,6 +1412,8 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
         return T("tips.cell_fallback");
     case CELL_HIT_PROTECT_CHECKBOX:
         return T("tips.cell_protect");
+    case CELL_HIT_PROTECT_COUNT:
+        return T("tips.cell_protect_count");
     case CELL_HIT_DROP:
         return T("tips.cell_drop");
     default:
@@ -1434,6 +1535,10 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         if (local_x >= CC_PROTECT_CB_X
             && local_x < CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W)
             return CELL_HIT_PROTECT_CHECKBOX;
+        if (PanelProtectCountMode_()
+            && local_x >= CC_PROTECT_CNT_LBL_X
+            && local_x < CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W)
+            return CELL_HIT_PROTECT_COUNT;
     }
 
     if (local_x >= CC_ICON_X && local_x < CC_ICON_X + CC_ICON_W
@@ -1529,6 +1634,25 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->data.rule.protectEnable ? 0 : 1;
             ctrl->expanded = CEX_NONE;
             ctrl->dirty = true;
+            return true;
+        }
+        if (hit == CELL_HIT_PROTECT_COUNT) {
+            // 点框内：已在录入则不打断；否则先收尾其它录入再进入
+            //（预填当前值，值 0 预填空避免「点击即变 0」，光标在末尾）。
+            s_cnt_lb_in_box = true;
+            if (!ctrl->cnt_editing) {
+                PanelCommitAllProtectCountEdits_();
+                ctrl->cnt_editing = true;
+                ctrl->cnt_text[0] = 0;
+                const int cur = (int)ctrl->data.rule.protectCountBelow;
+                if (cur > 0)
+                    _snprintf(ctrl->cnt_text, sizeof(ctrl->cnt_text),
+                        "%d", cur);
+                ctrl->cnt_caret = (int)strlen(ctrl->cnt_text);
+                ctrl->cnt_caret_tick = GetTickCount();
+                ctrl->expanded = CEX_NONE;
+                ctrl->dirty = true;
+            }
             return true;
         }
         if (hit >= CELL_HIT_MELEE_PAIR_BASE

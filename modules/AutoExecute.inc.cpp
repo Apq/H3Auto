@@ -1048,18 +1048,28 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         cand.hit_points     = st->creature.hit_points;
         cand.lost_hp        = st->lost_hp;
         const int wound = H3AutoPolicy::WoundValue(cand);
+        // 队列槽位快照（debug）：还原「该救不救」判定的完整输入。
+        LogDebug("[Protect] queue slot=%d cnt=%d start=%d wound=%d dead=%d rem=%d th=%d",
+            slot, st->count_current, st->count_at_start, wound,
+            dead ? 1 : 0, H3AutoPolicy::StackRemainingHp(cand),
+            rule.protectCountBelow);
 
         // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
         const int spell_id = P_CreatureInformation[st->creature_id].undead
             ? 39 : 38;
         const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
-        if (expertise <= 0) continue;                   // 没学该法术
+        if (expertise <= 0) {
+            LogDebug("[Protect] skip no-expertise slot=%d spell=%d",
+                slot, spell_id);
+            continue;                                   // 没学该法术
+        }
         const int restorable =
             H3AutoPolicy::ResurrectionRestoreHp(expertise, spell_power);
 
         if (!H3AutoPolicy::ProtectShouldCast(true,
                 (H3AutoPolicy::ProtectStrategy)strategy,
-                restorable, wound, dead))
+                restorable, wound, dead,
+                st->count_current, rule.protectCountBelow))
             continue;
         cands[cand_count] = cand;
         cand_slot[cand_count] = slot;
@@ -1075,11 +1085,13 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     }
     // 候选明细（debug）：定位“该救不救/救错对象”类问题。
     for (int i = 0; i < cand_count; ++i)
-        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d wound=%d rem=%d dead=%d",
+        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
             i, cand_count, cand_slot[i], cand_spell[i], cand_exp[i],
             H3AutoPolicy::WoundValue(cands[i]),
             H3AutoPolicy::StackRemainingHp(cands[i]),
-            cands[i].count_current <= 0 ? 1 : 0);
+            cands[i].count_current <= 0 ? 1 : 0,
+            cands[i].count_current,
+            g_active_rules[cand_slot[i]].protectCountBelow);
 
     const int best_slot = cand_slot[picked];
     const int best_spell = cand_spell[picked];

@@ -66,6 +66,9 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             } else if (s_stop_turns_editing) {
                 CancelStopTurnsEdit_();
                 DrawPanelToBuffer_();
+            } else if (PanelAnyProtectCountEditing_()) {
+                PanelCancelAllProtectCountEdits_();
+                DrawPanelToBuffer_();
             } else if (s_protect_dd_open) {
                 s_protect_dd_open = false;
                 s_protect_dd_hover = -1;
@@ -78,8 +81,10 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             }
             return 1;  // swallow
         }
-        if (wParam == VK_RETURN && s_stop_turns_editing) {
-            CommitStopTurnsEdit_();
+        if (wParam == VK_RETURN
+            && (s_stop_turns_editing || PanelAnyProtectCountEditing_())) {
+            if (s_stop_turns_editing) CommitStopTurnsEdit_();
+            PanelCommitAllProtectCountEdits_();
             DrawPanelToBuffer_();
             return 1;
         }
@@ -144,6 +149,63 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 if (repeatable) {
                     s_repeat_vk = wParam;
                     s_repeat_tick = now;
+                }
+                DrawPanelToBuffer_();
+            }
+            if (changed || wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE
+                || IsDigitKey_(wParam))
+                return 1;
+        }
+        // 「剩≤」数量阈值录入：与停止回合同款（钩子即时处理 + 首次重复延迟）。
+        if (CellControl* ce = PanelEditingProtectCountCell_()) {
+            static WPARAM s_cnt_repeat_vk = 0;
+            static DWORD s_cnt_repeat_tick = 0;
+            const DWORD now = GetTickCount();
+            const bool repeatable = wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE;
+            const bool first = (lParam & 0x40000000) == 0;
+            if (repeatable && !first) {
+                const DWORD gap = (s_cnt_repeat_vk == wParam)
+                    ? (DWORD)30 : (DWORD)400;
+                if (now - s_cnt_repeat_tick < gap)
+                    return 1;
+            }
+            const int len = (int)strlen(ce->cnt_text);
+            bool changed = false;
+            if (wParam == VK_BACK && ce->cnt_caret > 0) {
+                memmove(ce->cnt_text + ce->cnt_caret - 1,
+                    ce->cnt_text + ce->cnt_caret, len - ce->cnt_caret + 1);
+                --ce->cnt_caret;
+                changed = true;
+            } else if (wParam == VK_DELETE && ce->cnt_caret < len) {
+                memmove(ce->cnt_text + ce->cnt_caret,
+                    ce->cnt_text + ce->cnt_caret + 1, len - ce->cnt_caret);
+                changed = true;
+            } else if (wParam == VK_LEFT && ce->cnt_caret > 0) {
+                --ce->cnt_caret;
+                changed = true;
+            } else if (wParam == VK_RIGHT && ce->cnt_caret < len) {
+                ++ce->cnt_caret;
+                changed = true;
+            } else if (IsDigitKey_(wParam)) {
+                const int d = DigitFromVk_(wParam);
+                if (d >= 0 && len < CC_CNT_MAX_DIGITS
+                    && ce->cnt_caret <= len) {
+                    memmove(ce->cnt_text + ce->cnt_caret + 1,
+                        ce->cnt_text + ce->cnt_caret, len - ce->cnt_caret + 1);
+                    ce->cnt_text[ce->cnt_caret] =
+                        static_cast<char>('0' + d);
+                    ++ce->cnt_caret;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                ce->cnt_caret_tick = now;
+                ce->dirty = true;
+                if (repeatable) {
+                    s_cnt_repeat_vk = wParam;
+                    s_cnt_repeat_tick = now;
                 }
                 DrawPanelToBuffer_();
             }

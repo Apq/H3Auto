@@ -15,8 +15,8 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 //
 
 IDR_VERSIONINFO VERSIONINFO
- FILEVERSION 0,1,2026,710
- PRODUCTVERSION 0,1,2026,710
+ FILEVERSION 0,2,2026,926
+ PRODUCTVERSION 0,2,2026,926
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -34,12 +34,12 @@ BEGIN
             VALUE "Comments", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
             VALUE "CompanyName", "Apq"
             VALUE "FileDescription", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
-            VALUE "FileVersion", "0.1.2026.710"
+            VALUE "FileVersion", "0.2.2026.926"
             VALUE "InternalName", "H3Auto"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "H3Auto.dll"
             VALUE "ProductName", "\xb4\xf2\xcc\xfa\xd6\xfa\xca\xd6"
-            VALUE "ProductVersion", "0.1.2026.710"
+            VALUE "ProductVersion", "0.2.2026.926"
         END
     END
     BLOCK "VarFileInfo"
