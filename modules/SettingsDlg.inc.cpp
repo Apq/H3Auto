@@ -639,6 +639,13 @@ static bool PanelProtectCountMode_()
         == (int)H3AutoPolicy::PS_COUNT_BELOW;
 }
 
+// 卡片完整行（降级复选框/「剩≤」阈值）只在方案 1 显示；
+// 方案 2-5 是精简配置（规则值保留，仅界面隐藏，不可改）。
+static bool PanelFullCardRow_()
+{
+    return s_p.selected_profile == 0;
+}
+
 static bool PanelAnyProtectCountEditing_()
 {
     for (int i = 0; i < CELL_COUNT; ++i)
