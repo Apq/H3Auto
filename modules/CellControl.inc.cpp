@@ -111,7 +111,6 @@ extern const char* g_action_labels[AA_COUNT];
 extern const char* g_selector_labels[SEL_COUNT];
 
 // 面板级判定/收尾由 SettingsDlg 提供（同翻译单元后置定义）。
-static bool PanelProtectCountMode_();
 static void PanelCommitAllProtectCountEdits_();
 static void PanelCancelAllProtectCountEdits_();
 static bool PanelAnyProtectCountEditing_();
@@ -977,8 +976,8 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
             eTextAlignment::MIDDLE_LEFT);
 
-        // 「剩≤[N]」：仅保活策略=按数量时显示；录入态与「停止」框同款。
-        if (PanelProtectCountMode_()) {
+        // 「剩≤[N]」：恒显示（生效需策略=按数量）；录入态与「停止」框同款。
+        {
             CellControl_DrawText(scr, fntS, T("cell.protect_count_lbl"),
                 CC_PROTECT_CNT_LBL_X, CC_PROTECT_Y, CC_PROTECT_CNT_LBL_W,
                 CC_ROW_H,
@@ -1535,8 +1534,7 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         if (local_x >= CC_PROTECT_CB_X
             && local_x < CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W)
             return CELL_HIT_PROTECT_CHECKBOX;
-        if (PanelProtectCountMode_()
-            && local_x >= CC_PROTECT_CNT_LBL_X
+        if (local_x >= CC_PROTECT_CNT_LBL_X
             && local_x < CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W)
             return CELL_HIT_PROTECT_COUNT;
     }

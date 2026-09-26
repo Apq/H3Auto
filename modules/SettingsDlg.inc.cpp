@@ -633,12 +633,6 @@ static void CancelStopTurnsEdit_()
 
 // ===== 部队卡片「剩≤」数量阈值录入（保活策略=按数量） =====
 // 状态挂在各 CellControl 上；这里只做面板级的查找与收尾。
-static bool PanelProtectCountMode_()
-{
-    return s_p.draft_protect_strategy[s_p.selected_profile]
-        == (int)H3AutoPolicy::PS_COUNT_BELOW;
-}
-
 static bool PanelAnyProtectCountEditing_()
 {
     for (int i = 0; i < CELL_COUNT; ++i)
