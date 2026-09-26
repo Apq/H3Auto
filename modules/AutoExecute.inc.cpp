@@ -824,11 +824,11 @@ static bool TriggerQuickSpellDigit_(int digit)
         is_human = (side >= 0 && side <= 1) ? raw[0x54A6 + side] : -1;
         tactics = raw[0x13D68];
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    // WriteLog("[Spell] request digit=%d slot=%d spell=%d targetHex=%d targetStack=%p flags=0x%X side=%d human=%d tactics=%d hero=%p casted=%d mana=%d action=%d",
-    //     digit, slot, spell_id, target_hex, target_stack, spell_flags,
-    //     side, is_human, tactics,
-    //     (side >= 0 && side <= 1) ? mgr->hero[side] : nullptr,
-    //     GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
+    LogDebug("[Spell] request digit=%d slot=%d spell=%d targetHex=%d targetStack=%p flags=0x%X side=%d human=%d tactics=%d hero=%p casted=%d mana=%d action=%d",
+        digit, slot, spell_id, target_hex, target_stack, spell_flags,
+        side, is_human, tactics,
+        (side >= 0 && side <= 1) ? mgr->hero[side] : nullptr,
+        GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
 
     if (spell_id < 0 || spell_id >= 70 || (spell_flags & 1) == 0)
         LogWarn("[Spell] SoD_SP slot appears empty/invalid; still posting digit for other hooks slot=%d spell=%d flags=0x%X",
@@ -847,8 +847,8 @@ static bool TriggerQuickSpellDigit_(int digit)
     __try {
         const BOOL down_ok = PostMessageA(hwnd, WM_KEYDOWN, win_vk, key_down);
         const BOOL up_ok = PostMessageA(hwnd, WM_KEYUP, win_vk, key_up);
-        // WriteLog("[Spell] posted quick key digit=%d h3vk=%d spell=%d hwnd=%p down=%d up=%d",
-        //     digit, h3vk, spell_id, hwnd, down_ok ? 1 : 0, up_ok ? 1 : 0);
+        LogDebug("[Spell] posted quick key digit=%d h3vk=%d spell=%d hwnd=%p down=%d up=%d",
+            digit, h3vk, spell_id, hwnd, down_ok ? 1 : 0, up_ok ? 1 : 0);
         if (!down_ok || !up_ok)
             return false;
         return true;
@@ -961,11 +961,15 @@ static void TryAutoStop_(_BattleMgr_* mgr)
     }
     g_enemy_hp_turn[1] = turn;
     g_enemy_hp_value[1] = hp;
+    LogDebug("[AutoStop] sample turn=%d hp=%d prev=(%d,%d) threshold=%d",
+        turn, hp, g_enemy_hp_turn[0], g_enemy_hp_value[0], threshold);
     if (g_enemy_hp_turn[0] < 0) return;
 
     const int elapsed = g_enemy_hp_turn[1] - g_enemy_hp_turn[0];
     const int left = H3AutoPolicy::ProjectEnemyTurnsLeft(
         threshold, g_enemy_hp_value[0], hp, elapsed);
+    LogDebug("[AutoStop] judge elapsed=%d base=%d cur=%d left=%d",
+        elapsed, g_enemy_hp_value[0], hp, left);
     if (left < 0 || left > threshold) return;
 
     g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
@@ -1064,7 +1068,18 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         ++cand_count;
     }
     const int picked = H3AutoPolicy::SelectProtectTargetIndex(cands, cand_count);
-    if (picked < 0) return false;
+    if (picked < 0) {
+        LogDebug("[Protect] no qualified target strategy=%d turn=%d cands=%d",
+            strategy, turn, cand_count);
+        return false;
+    }
+    // 候选明细（debug）：定位“该救不救/救错对象”类问题。
+    for (int i = 0; i < cand_count; ++i)
+        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d wound=%d rem=%d dead=%d",
+            i, cand_count, cand_slot[i], cand_spell[i], cand_exp[i],
+            H3AutoPolicy::WoundValue(cands[i]),
+            H3AutoPolicy::StackRemainingHp(cands[i]),
+            cands[i].count_current <= 0 ? 1 : 0);
 
     const int best_slot = cand_slot[picked];
     const int best_spell = cand_spell[picked];
@@ -1077,8 +1092,13 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     // 原版施法失败不能逃出战斗回调。
     __try {
+        LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d strategy=%d",
+            best_spell, best_slot, StackHex_(st), best_exp, spell_power,
+            best_remaining, best_wound, strategy);
         cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
     } __except (1) {
+        LogDebug("[Protect] cast exception code=0x%08X spell=%d slot=%d",
+            GetExceptionCode(), best_spell, best_slot);
         return false;
     }
     return true;
@@ -1281,7 +1301,11 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
             candidates[count++] = t;
         }
     }
-    if (count <= 0) return nullptr;
+    if (count <= 0) {
+        LogDebug("[Target] no candidates selector=%d side=%d wounded=%d",
+            (int)rule.target.selector, side_filter, require_wounded ? 1 : 0);
+        return nullptr;
+    }
 
     H3AutoPolicy::TargetCandidate scored[42] = {};
     for (int i = 0; i < count; ++i)
@@ -1294,6 +1318,19 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
             count, (int)rule.target.selector, side_filter, require_wounded ? 1 : 0);
         return nullptr;
     }
+    // 候选明细与选中结果（debug）：定位“选错目标/不选目标”类问题。
+    for (int i = 0; i < count; ++i)
+        LogDebug("[Target] cand[%d/%d] side=%d slot=%d cid=0x%X cnt=%d/%d hp=%d rem=%d spd=%d shots=%d ranged=%d flyer=%d wound=%d",
+            i, count, candidates[i]->def_group_ix, candidates[i]->army_slot_ix,
+            candidates[i]->creature_id, candidates[i]->count_current,
+            candidates[i]->count_at_start, scored[i].hit_points,
+            H3AutoPolicy::StackRemainingHp(scored[i]), scored[i].speed,
+            scored[i].shots, scored[i].ranged, scored[i].flyer,
+            H3AutoPolicy::WoundValue(scored[i]));
+    LogDebug("[Target] select action=%d selector=%d -> slot=%d cid=0x%X hex=%d",
+        (int)rule.action, (int)rule.target.selector,
+        candidates[selected]->army_slot_ix, candidates[selected]->creature_id,
+        StackHex_(candidates[selected]));
     return candidates[selected];
 }
 
@@ -1648,6 +1685,11 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     const int spell_key = PeekSpellKey_(rule, runtime);
     const bool want_spell = spell_key >= 0;
     const bool want_action = rule.action != AA_MANUAL;
+    // 分发快照（debug）：定位“该动不动/走错分支”类问题。
+    LogDebug("[Auto] dispatch slot=%d cid=0x%X action=%d selector=%d fallback=%d spells=%d cursor=%d key=%d stage=%d",
+        idx, self->creature_id, (int)rule.action, (int)rule.target.selector,
+        rule.allowDefendFallback ? 1 : 0, rule.spellSlotCount,
+        runtime.spell_cursor, spell_key, (int)g_pipeline_stage);
 
     // 既无施法序列、又无主动作：不介入。
     if (!want_spell && !want_action)
@@ -1892,12 +1934,23 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         }
 
         const int decision = DecideTakeover(This);
+        // 判定快照（debug）：decision 2=插件执行 1=交AI 0=保持原版。
+        {
+            _BattleStack_* ds = This->active_stack;
+            const int dslot = ds ? ds->army_slot_ix : -1;
+            LogDebug("[Takeover] decision=%d slot=%d cid=0x%X cnt=%d rule_action=%d control=%d phase=%d",
+                decision, dslot, ds ? ds->creature_id : -1,
+                ds ? ds->count_current : -1,
+                (dslot >= 0 && dslot < 21)
+                    ? (int)g_active_rules[dslot].action : -1,
+                (int)g_control, (int)g_phase);
+        }
         if (decision == CD_HAND_TO_AI)
             return 1;           // 仅战争机器特殊：交回 AI
         // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0（控制权在玩家路径）。
         // 若需代发动作，在 Hook_BattleMsgProc 入口提交。
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // WriteLog("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
+        LogDebug("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
     }
     return 0;
 }

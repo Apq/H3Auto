@@ -206,7 +206,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         }
     }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // WriteLog("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
+        LogDebug("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -296,8 +296,8 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
                     }
                 }
             }
-            // WriteLog("[Panel] pick click abs=(%d,%d) rel=(%d,%d) hex=%d",
-            //     abs_x, abs_y, rel_x, rel_y, hex);
+            LogDebug("[Panel] pick click abs=(%d,%d) rel=(%d,%d) hex=%d",
+                abs_x, abs_y, rel_x, rel_y, hex);
             DoPickCapture_(hex, false);
         }
         // 其他鼠标消息（包括 LCLICK_OUTSIDE）统统吞掉，不传透。

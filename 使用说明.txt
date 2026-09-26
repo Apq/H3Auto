@@ -153,6 +153,10 @@ H3Auto.ini 的 [Logging] 可调：
 DisableLog=1   完全不写日志
 MinLevel       记录级别，默认 info，可选 trace/debug/info/warn/error
 
+反馈 BUG 时：把 MinLevel 临时改成 debug，进游戏复现问题，
+再到设置里“打包日志”发回。debug 会记录目标选择、保活、
+自动停止等判定细节，方便定位问题；平时用 info 即可。
+
 遇到问题：打开设置，右上角“?”进使用说明，点“打包日志”。
 插件把最近的日志打成 .7z，并复制成文件，到 QQ 聊天框直接
 粘贴发送即可。说明文件在压缩包里的 00_说明.txt。

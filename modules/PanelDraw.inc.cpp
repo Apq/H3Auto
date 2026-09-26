@@ -189,9 +189,9 @@ static void DrawMeleePickMarker_()
         static int s_marker_log_hex = -1;
         if (s_marker_log_hex != s_melee_pick_stand_hex) {
             s_marker_log_hex = s_melee_pick_stand_hex;
-            // WriteLog("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
-            //     s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
-            //     abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
+            LogDebug("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
+                s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
+                abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LogError("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);

@@ -782,8 +782,8 @@ static void BuildPanelArmyTable_(int out_types[21], int out_counts[21])
 // 其余槽保持原样），并记忆该编号。不改生效方案、不暂停。
 static void SaveProfilesToDisk_()
 {
-    // WriteLog("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
-    //     &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
+    LogDebug("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
+        &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
     SaveCurrentCellsToDraft_();
     int army_types[21] = {};
     int army_counts[21] = {};
@@ -806,6 +806,7 @@ static void SaveProfilesToDisk_()
 // 不改生效方案、不暂停。
 static void LoadProfilesFromDisk_()
 {
+    LogDebug("[Panel] 读档入口：profile=%d", s_p.selected_profile);
     // 21 条规则约 1.7KB，堆分配避免游戏线程栈溢出。
     AutoStackRule* loaded = new AutoStackRule[MAX_STACKS]();
     uint8_t strategy = 0;
@@ -926,7 +927,7 @@ void OpenSettingsPanel_()
     if (s_p.x < 0) s_p.x = 0; if (s_p.y < 0) s_p.y = 0;
 
     H3CombatManager* mgr = GetCombatMgr();
-    // WriteLog("[Panel] 打开阶段：开始枚举部队");
+    LogDebug("[Panel] 打开阶段：开始枚举部队");
     if (mgr) {
         // 当前人类玩家侧：优先 currentActiveSide，否则 0。
         int side = 0;
@@ -958,14 +959,14 @@ void OpenSettingsPanel_()
         }
     }
     RebindVisibleCells_();
-    // WriteLog("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
+    LogDebug("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
     InstallBattleInputBlocker_();
-    // WriteLog("[Panel] 打开阶段：输入屏障完成");
+    LogDebug("[Panel] 打开阶段：输入屏障完成");
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
-    // WriteLog("[Panel] 打开阶段：开始绘制");
+    LogDebug("[Panel] 打开阶段：开始绘制");
     DrawPanelToBuffer_();
-    // WriteLog("[Panel] 打开阶段：绘制完成");
+    LogDebug("[Panel] 打开阶段：绘制完成");
     // 安装键盘钩子，立即响应 ESC/Enter，不受游戏帧率影响
     const DWORD panel_thread = GetWindowThreadProcessId(
         *reinterpret_cast<HWND*>(0x699650), nullptr);
@@ -976,8 +977,8 @@ void OpenSettingsPanel_()
     if (!s_mouse_hook)
         s_mouse_hook = SetWindowsHookExA(WH_MOUSE, PanelMouseHook_, g_hModule,
             panel_thread);
-    // WriteLog("[Panel] 打开设置面板 count=%d at (%d,%d) s_p=%p",
-    //     s_p.count, s_p.x, s_p.y, &s_p);
+    LogDebug("[Panel] 打开设置面板 count=%d at (%d,%d) s_p=%p",
+        s_p.count, s_p.x, s_p.y, &s_p);
 }
 
 void RefreshSettingsPanel() { if (s_p.active) DrawPanelToBuffer_(); }

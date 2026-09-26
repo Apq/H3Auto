@@ -368,7 +368,7 @@ static bool SaveProfileStore_(const int army_types[21],
     } __except (code = GetExceptionCode(),
                 fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
                 EXCEPTION_EXECUTE_HANDLER) {
-        // WriteLog("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
+        LogDebug("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
         ok = false;
     }
     return ok;
