@@ -61,18 +61,22 @@ enum {
     PAGE_PROFILE = 1,   // 方案：方案级设置（保活策略/自动停止）
     PAGE_COUNT   = 2,
 };
-static const int TAB_X       = 12;   // Tab 条左缘
+static const int TAB_X       = 17;   // Tab 条左缘
 static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
 static const int TAB_ITEM_H  = 24;
 static const int TAB_GAP     = 8;
 static const int TAB_FIRST_Y = 80;
-static const int TAB_SEP_X   = 129;  // 分隔竖线（3px 金框色）
-static const int TAB_SEP_Y0  = 72;   // 方案行(65)以下
+static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
+static const int TAB_SEP_Y0  = 67;   // 与方案行下横线衔接
 static const int TAB_SEP_Y1  = 441;  // 确定按钮(BTN_Y=445)以上
+// 方案行(底 y=65)下的横向金线：第一级与 Tab/内容区的视觉分层。
+static const int TAB_HLINE_Y  = 67;  // 2px，与竖线同色衔接成 ⊤
+static const int TAB_HLINE_X0 = 12;
+static const int TAB_HLINE_X1 = GRID_FRAME_X + GRID_FRAME_W;
 
 // 方案行与金框之间的保活策略行（方案级）：label + 下拉框。
-static const int PROTECT_DD_Y        = 69;
+static const int PROTECT_DD_Y        = 76;   // 方案行下横线(67..68)之下
 static const int PROTECT_DD_H        = 18;
 static const int PROTECT_DD_LABEL_X  = GRID_FRAME_X;
 static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」

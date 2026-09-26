@@ -584,8 +584,10 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
             (INT32)(sel ? eTextColor::GOLD : eTextColor::REGULAR),
             eTextAlignment::MIDDLE_CENTER);
     }
-    // 分隔竖线：3px 金框色（与 HA_grid_frame 边框同色 168,141,68）。
-    Fill(scr, TAB_SEP_X, TAB_SEP_Y0, 3, TAB_SEP_Y1 - TAB_SEP_Y0,
+    // 方案行下横向金线 + Tab/内容区分隔竖线（均 2px 金框色 168,141,68）。
+    Fill(scr, TAB_HLINE_X0, TAB_HLINE_Y, TAB_HLINE_X1 - TAB_HLINE_X0, 2,
+        168, 141, 68);
+    Fill(scr, TAB_SEP_X, TAB_SEP_Y0, 2, TAB_SEP_Y1 - TAB_SEP_Y0,
         168, 141, 68);
 }
 
