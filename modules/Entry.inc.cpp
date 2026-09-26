@@ -73,7 +73,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (wslash) wcscpy(wslash + 1, L"H3Auto.profiles");
         else wcscpy(wpath, L"H3Auto.profiles");
         utf8_from_wide(wpath, g_profiles_prefix, kPathCap_);
-        // 编号记忆：独立文件 H3Auto.last.ini（一行数字 1..5），不写 INI。
+        // 旧版编号记忆文件：仅启动迁移读一次；现行存 user.ini [General] LastProfile。
         GetModuleFileNameW(hModule, wpath, kPathCap_ / 2);
         wslash = wcsrchr(wpath, L'\\');
         if (!wslash) wslash = wcsrchr(wpath, L'/');

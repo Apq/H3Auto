@@ -56,7 +56,7 @@ static char* g_ini_path = new char[kPathCap_];        // H3Auto.default.ini
 static char* g_user_ini_path = new char[kPathCap_](); // H3Auto.user.ini（可不存在）
 static char* g_log_path = new char[kPathCap_];
 static char* g_profiles_prefix = new char[kPathCap_]; // 每槽一文件：前缀 + 编号（1..5）
-static char* g_last_profile_path = new char[kPathCap_]; // 编号记忆：H3Auto.last.ini
+static char* g_last_profile_path = new char[kPathCap_]; // 旧版编号记忆文件：仅启动迁移读一次
 static wchar_t* g_log_path_w = new wchar_t[kPathCap_ / 2];
 
 // 分层读取：先默认层 H3Auto.default.ini，再叠加玩家层 H3Auto.user.ini
@@ -95,20 +95,15 @@ void ProfileSlotPath(int slot, char* buf, int buf_size)
     if (buf_size > 0) buf[buf_size - 1] = 0;
 }
 
-// 存/读档成功后记忆槽位：更新内存值并写 H3Auto.last.ini（跨战斗/跨场保留）。
+// 勾号生效时记忆槽位：更新内存值并写 H3Auto.user.ini [General] LastProfile
+//（玩家层；不再使用独立 H3Auto.last.ini）。
 void RememberProfileSlot(int slot)
 {
     if (slot < 0 || slot >= 5) return;
     g_last_profile = slot;
     char buf[8] = {};
     _snprintf(buf, sizeof(buf) - 1, "%d", slot + 1);
-    FILE* fp = nullptr;
-    wchar_t* wpath = Utf8ToWideAlloc_(g_last_profile_path);
-    if (wpath && _wfopen_s(&fp, wpath, L"wb") == 0 && fp) {
-        fwrite(buf, 1, strlen(buf), fp);
-        fclose(fp);
-    }
-    delete[] wpath;
+    IniWriteKeyUtf8(g_user_ini_path, "General", "LastProfile", buf);
 }
 static HMODULE g_hModule = nullptr;
 static bool g_disable_log = false;
@@ -439,22 +434,30 @@ static void ReadConfig()
         g_log_level = ParseLogLevel_(lv);
     }
 
-    // 上次存/读档的槽位（面板自动选中该编号，不自动读档）。
-    // 从独立文件 H3Auto.last.ini 读（一行数字 1..5），无文件/坏值默认 1。
+    // 上次勾号生效的槽位（面板自动选中该编号，不自动读档）。
+    // 现行存 H3Auto.user.ini [General] LastProfile；旧版独立文件
+    // H3Auto.last.ini（一行数字 1..5）仅做一次迁移读取。
     {
         int last = 1;
-        FILE* fp = nullptr;
-        wchar_t* wpath = Utf8ToWideAlloc_(g_last_profile_path);
-        if (wpath && _wfopen_s(&fp, wpath, L"rb") == 0 && fp) {
-            char buf[8] = {};
-            const size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-            fclose(fp);
-            if (n > 0) {
-                buf[n] = 0;
-                last = atoi(buf);
+        char buf[8] = {};
+        const bool hit = IniReadUtf8Layered("General", "LastProfile",
+            "", buf, (int)sizeof(buf));
+        if (!hit) {
+            FILE* fp = nullptr;
+            wchar_t* wpath = Utf8ToWideAlloc_(g_last_profile_path);
+            if (wpath && _wfopen_s(&fp, wpath, L"rb") == 0 && fp) {
+                char lbuf[8] = {};
+                const size_t n = fread(lbuf, 1, sizeof(lbuf) - 1, fp);
+                fclose(fp);
+                if (n > 0) {
+                    lbuf[n] = 0;
+                    last = atoi(lbuf);
+                }
             }
+            delete[] wpath;
+        } else if (buf[0]) {
+            last = atoi(buf);
         }
-        delete[] wpath;
         g_last_profile = ClampInt(last, 1, 5) - 1;
     }
 

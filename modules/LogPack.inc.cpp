@@ -1,5 +1,5 @@
 // ========== 日志打包（帮助界面「打包日志」按钮） ==========
-// 最近 5 个日志文件（每文件只取尾部 2MB）LZMA 压缩为 .7z（手写容器，
+// 最近 5 个日志文件（完整文件，不截尾部）LZMA 压缩为 .7z（手写容器，
 // LZMA SDK 源码级集成见 lzma/），以 CF_HDROP 文件式复制到剪贴板
 // （同资源管理器复制文件，QQ 聊天框 Ctrl+V 直接发送），同时附
 // CF_TEXT 路径。容器布局经 7-Zip 官方与 py7zr 双端验证。
@@ -118,10 +118,8 @@ static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
     return n;
 }
 
-// 单文件参与打包的上限：只取每个日志的尾部（最新内容在尾部）。
-// 此前按全量读（上限 64MB/文件），32 位游戏进程内同步分配可达数百 MB，
-// UI 线程换页假死（用户实测「点击打包后卡死」）。
-static const DWORD kLogPackMaxPerFile_ = 2 * 1024 * 1024;
+// 历史教训：全量读大日志曾致 32 位进程 UI 假死（先截尾部 2MB 规避）；
+// 2026-09-26 用户定稿改回完整文件打包（定位 BUG 需要开场初始化段）。
 static void LogPackPut2_(BYTE* p, unsigned v) { p[0] = (BYTE)(v & 0xFF); p[1] = (BYTE)((v >> 8) & 0xFF); }
 static void LogPackPut4_(BYTE* p, unsigned v)
 {
@@ -260,10 +258,10 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     actual_path[0] = 0;
     fail_reason[0] = 0;
 
-    // 5 槽：最近 4 个日志 + 1 个发送说明（QQ 号写进包内 txt，解压即可复制；
-    // 剪贴板继续只放 .7z 文件本身，不被文本挤掉）。
-    LogPackEntry entries[5];
-    const int nLogs = LogPackCollectRecent_(entries, 4);
+    // 6 槽：最近 5 个日志（完整文件）+ 1 个发送说明（QQ 号写进包内 txt，
+    // 解压即可复制；剪贴板继续只放 .7z 文件本身，不被文本挤掉）。
+    LogPackEntry entries[6];
+    const int nLogs = LogPackCollectRecent_(entries, 5);
     if (nLogs <= 0) {
         _snprintf(fail_reason, reason_size - 1, "%s", T("help.pack_no_logs"));
         fail_reason[reason_size - 1] = 0;
@@ -273,12 +271,12 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
 
     LogPackDllDir_(dir, kPathCap_);
 
-    // 读入每个日志的尾部（≤2MB）并 LZMA 压缩。
-    BYTE* datas[5] = {};
-    BYTE* packs[5] = {};
-    size_t pack_lens[5] = {};
-    DWORD unpack_sizes[5] = {};
-    DWORD crcs[5] = {};
+    // 读入每个日志（完整文件，不截尾部）并 LZMA 压缩。
+    BYTE* datas[6] = {};
+    BYTE* packs[6] = {};
+    size_t pack_lens[6] = {};
+    DWORD unpack_sizes[6] = {};
+    DWORD crcs[6] = {};
     BYTE props[LZMA_PROPS_SIZE] = {};
     int done = 0;
     for (int i = 0; i < nLogs; ++i) {
@@ -297,19 +295,9 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
             goto bail;
         }
-        // 超过上限只取尾部（最新内容在尾部），总量封顶 ~10MB。
+        // 完整文件参与打包（最新内容在尾部，但定位 BUG 常需看开场初始化）。
         const LONGLONG full = sz.QuadPart;
-        unpack_sizes[i] = full > (LONGLONG)kLogPackMaxPerFile_
-            ? kLogPackMaxPerFile_ : (DWORD)full;
-        if (full > (LONGLONG)unpack_sizes[i]) {
-            LARGE_INTEGER skip;
-            skip.QuadPart = full - (LONGLONG)unpack_sizes[i];
-            if (!SetFilePointerEx(hf, skip, nullptr, FILE_BEGIN)) {
-                CloseHandle(hf);
-                _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
-                goto bail;
-            }
-        }
+        unpack_sizes[i] = (DWORD)full;
         datas[i] = new(std::nothrow) BYTE[unpack_sizes[i] ? unpack_sizes[i] : 1];
         if (!datas[i]) {
             CloseHandle(hf);
