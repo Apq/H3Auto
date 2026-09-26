@@ -860,7 +860,7 @@ static void DrawPanelToBuffer_()
             s_status_text[0] = 0;
         else
             DrawRichTxt(scr, GetSmallFont(), s_status_text,
-                20, BTN_Y + BTN_H + 14, PANEL_W - 40, 20,
+                20, BTN_Y + BTN_H + 11, PANEL_W - 40, 20, // 状态栏不跟随按钮下移
                 (INT32)eTextColor::WHITE);
     }
 
