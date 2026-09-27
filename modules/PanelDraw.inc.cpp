@@ -437,7 +437,7 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
 static const char* PanelTipAt_(int px, int py)
 {
     // 左侧 Tab 导航条：两页共通。
-    for (int i = 0; i < PAGE_COUNT; ++i) {
+    for (int i = 0; i < TAB_VISIBLE_COUNT; ++i) {
         const int page = kTabOrder[i];
         const int ty = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
         if (px >= TAB_X && px < TAB_X + TAB_ITEM_W
@@ -567,11 +567,11 @@ static const char* ProtectStrategyLabel_(int i)
 static void DrawTabBar_(H3LoadedPcx16* scr)
 {
     if (!scr) return;
-    static const char* const kTabKeys[PAGE_COUNT] = {
-        "panel.tab_army", "panel.tab_profile",
+    static const char* const kTabKeys[TAB_VISIBLE_COUNT] = {
+        "panel.tab_army",
     };
     H3Font* small_font = GetSmallFont();
-    for (int i = 0; i < PAGE_COUNT; ++i) {
+    for (int i = 0; i < TAB_VISIBLE_COUNT; ++i) {
         const int page = kTabOrder[i];
         const int x = TAB_X;
         const int y = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
@@ -779,17 +779,11 @@ static void DrawPanelToBuffer_()
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
 
-    // 部队页：21 槽卡片表（三趟 + 滚动条 + 金框）；方案页只画保活行。
-    if (s_p.active_page == PAGE_PROFILE) {
-        DrawProtectStrategyRow_(scr);
-        DrawTxt(scr, fntS, T("panel.profile_note"),
-            GRID_FRAME_X, PROTECT_DD_Y + PROTECT_DD_H + 8,
-            GRID_FRAME_W, 18,
-            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-    }
+    // 保活策略行：全局常显（原方案页专属；表格上方与上横线之间）。
+    DrawProtectStrategyRow_(scr);
 
-    // 部队页：格子三趟 + 滚动条 + 金框（方案页不画表格）。
-    if (s_p.active_page == PAGE_ARMY) {
+    // 21 槽卡片表（三趟 + 滚动条 + 金框）。
+    {
     // 第一趟：画所有格子本体
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
@@ -867,9 +861,8 @@ static void DrawPanelToBuffer_()
                 (INT32)eTextColor::WHITE);
     }
 
-    // 保活策略展开列表：仅方案页（盖住说明行/金框上缘，画在最后）。
-    if (s_p.active_page == PAGE_PROFILE)
-        DrawProtectDropdownList_(scr);
+    // 保活策略展开列表（盖住表格上缘，画在最后）。
+    DrawProtectDropdownList_(scr);
 
     // 模态层最后绘制，盖住整张设置面板。
     if (s_spell_pick_cell >= 0)

@@ -16,9 +16,9 @@ static const int CELL_STEP_Y = CELL_H - 2;
 static const int GRID_FRAME_W = 514;
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 139;
-static const int GRID_FRAME_Y = 94;
+static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
 static const int GRID_X      = GRID_FRAME_X + 12;
-static const int GRID_Y      = 102;
+static const int GRID_Y      = 117;
 static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - 26; // 右对齐金框
 static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_W    = 16;
@@ -61,17 +61,18 @@ enum {
     PAGE_PROFILE = 1,   // 方案：方案级设置（保活策略/自动停止）
     PAGE_COUNT   = 2,
 };
-// Tab 显示顺序（从上到下）：方案页在上、部队页在下。
-static const int kTabOrder[PAGE_COUNT] = { PAGE_PROFILE, PAGE_ARMY };
+// Tab 显示：方案页已移除（保活行全局化），仅剩部队页；后续新页往 kTabOrder 加。
+static const int TAB_VISIBLE_COUNT = 1;
+static const int kTabOrder[TAB_VISIBLE_COUNT] = { PAGE_ARMY };
 static const int TAB_X       = 17;   // Tab 条左缘
 static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
 static const int TAB_ITEM_H  = 24;
 static const int TAB_GAP     = 8;
-static const int TAB_FIRST_Y = 80;
+static const int TAB_FIRST_Y = 95;
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
-static const int TAB_SEP_Y0  = 67;   // 与方案行下横线衔接
-static const int TAB_SEP_Y1  = 441;  // 与按钮上横线衔接
+static const int TAB_SEP_Y0  = 72;   // 随内容+15后上移10（相对内容）
+static const int TAB_SEP_Y1  = 456;  // 随内容+15；与卡片底保持5px
 // 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
 // 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
@@ -80,8 +81,8 @@ static const int TAB_HLINE_Y  = TAB_SEP_Y0;  // 上线：接竖线上端
 static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确定/取消上方）
 static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 8; // 状态栏分隔线（原图抹除，代码绘制；原版486+20，文字509紧贴线下）
 
-// 方案行与金框之间的保活策略行（方案级）：label + 下拉框。
-static const int PROTECT_DD_Y        = 76;   // 方案行下横线(67..68)之下
+// 保活策略行（全局常显）：上横线与表格之间的新行（原方案页专属，方案页已移除）。
+static const int PROTECT_DD_Y        = 78;   // 上横线(72)下6px、表格顶(109)上方
 static const int PROTECT_DD_H        = 18;
 static const int PROTECT_DD_LABEL_X  = GRID_FRAME_X;
 static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」
