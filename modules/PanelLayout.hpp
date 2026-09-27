@@ -6,14 +6,14 @@ static const int PANEL_W    = 680;
 static const int PANEL_H    = 548;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
-static const int CELL_W     = 487; // 内容区 129..636(右缘对齐帮助按钮)，滚动条前留4px
+static const int CELL_W     = 511; // 内容区 129..660(=帮助按钮右缘636+24)，滚动条前留4px
 // 卡片高度 110 不变：金框 514×342，底边 y=414，表格上方不再放设置行。
 // SCROLL_H = CELL_H + 2*(CELL_H-2) = 110 + 2*108 = 326。
 static const int CELL_H     = 110;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
 // 内容区边界（原金框范围；框已不画，卡片与保活行以此对齐）。
-static const int GRID_FRAME_W = 507;  // 内容区右缘 636 = 帮助按钮右缘
+static const int GRID_FRAME_W = 531;  // 内容区右缘 660 = 帮助按钮右缘(HELP_BTN_X 636+SIZE 24)
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 129;  // 左界左移 10
 static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
@@ -76,13 +76,13 @@ static const int TAB_SEP_Y1  = 456;  // 随内容+15；与卡片底保持5px
 // 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
 // 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
-static const int TAB_HLINE_X1 = 663;  // 横线右端不随内容区收（保持原 663）
+static const int TAB_HLINE_X1 = 660;  // 横线右端对齐内容区右缘/帮助按钮右缘
 static const int TAB_HLINE_Y  = TAB_SEP_Y0;  // 上线：接竖线上端
 static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确定/取消上方）
 static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 8; // 状态栏分隔线（原图抹除，代码绘制；原版486+20，文字509紧贴线下）
 
 // 保活策略行（全局常显）：上横线与表格之间的新行（原方案页专属，方案页已移除）。
-static const int PROTECT_DD_Y        = 78;   // 上横线(72)下6px、表格顶(109)上方
+static const int PROTECT_DD_Y        = 83;   // 上横线(72)下11px（下移5）、表格顶(109)上方
 static const int PROTECT_DD_H        = 18;
 static const int PROTECT_DD_LABEL_X  = GRID_FRAME_X;
 static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」
