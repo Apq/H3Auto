@@ -69,7 +69,7 @@ static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
 static const int TAB_ITEM_H  = 24;
 static const int TAB_GAP     = 8;
-static const int TAB_FIRST_Y = 95;
+static const int TAB_FIRST_Y = 85;  // 与保活行上缘对齐
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
 static const int TAB_SEP_Y0  = 72;   // 随内容+15后上移10（相对内容）
 static const int TAB_SEP_Y1  = 456;  // 随内容+15；与卡片底保持5px
@@ -82,7 +82,7 @@ static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确�
 static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 8; // 状态栏分隔线（原图抹除，代码绘制；原版486+20，文字509紧贴线下）
 
 // 保活策略行（全局常显）：上横线与表格之间的新行（原方案页专属，方案页已移除）。
-static const int PROTECT_DD_Y        = 83;   // 上横线(72)下11px（下移5）、表格顶(109)上方
+static const int PROTECT_DD_Y        = 85;   // 与Tab标签上缘对齐（原83再下移2）
 static const int PROTECT_DD_H        = 18;
 static const int PROTECT_DD_LABEL_X  = GRID_FRAME_X;
 static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」
