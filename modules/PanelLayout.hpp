@@ -6,22 +6,22 @@ static const int PANEL_W    = 680;
 static const int PANEL_H    = 548;
 static const int COLS       = 1;   // 一行一格（单列宽格）
 static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
-static const int CELL_W     = 464; // 多级导航：左侧 Tab 条+竖线后内容区收窄
+static const int CELL_W     = 494; // 金框已去除：卡片从内容区左缘(139)铺到滚动条前(633)
 // 卡片高度 110 不变：金框 514×342，底边 y=414，表格上方不再放设置行。
 // SCROLL_H = CELL_H + 2*(CELL_H-2) = 110 + 2*108 = 326。
 static const int CELL_H     = 110;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
-// 网格金框：宽 514，高 342（右缘 x=653 与旧版一致，左侧让位给 Tab 条）。
+// 内容区边界（原金框范围；框已不画，卡片与保活行以此对齐）。
 static const int GRID_FRAME_W = 514;
 static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 139;
 static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
-static const int GRID_X      = GRID_FRAME_X + 12;
+static const int GRID_X      = GRID_FRAME_X; // 卡片贴内容区左缘
 static const int GRID_Y      = 117;
-static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - 26; // 右对齐金框
-static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_W    = 16;
+static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - SCROLL_W; // 贴内容区右缘
+static const int SCROLL_Y    = GRID_Y;
 static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 326
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;

@@ -800,15 +800,9 @@ static void DrawPanelToBuffer_()
 
     DrawPanelScrollbar_(scr);
 
-    // 网格金框：框住 3 行格子 + 右侧滚动条（仅金色边框，内部青色键透明）。
-    // 必须在展开下拉之前绘制，否则下拉区域会被金框边线盖住。
-    {
-        H3LoadedPcx16* gridFrame = LoadPanelGridFrame_();
-        if (gridFrame)
-            DrawTransparentPcx_(gridFrame, scr, GRID_FRAME_X, GRID_FRAME_Y);
-    }
+    // 表格外金框已去除（布局线已足够；卡片铺满内容区，见 CELL_W=494）。
 
-    // 最后一趟：展开的下拉项，覆盖在格子/滚动条/金框之上（层级最高）。
+    // 最后一趟：展开的下拉项，覆盖在格子/滚动条之上（层级最高）。
     for (int i = 0; i < CELL_COUNT; ++i) {
         const int item_index = first_item + i;
         if (item_index >= s_p.count) break;

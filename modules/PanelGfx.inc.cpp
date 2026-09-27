@@ -18,10 +18,9 @@ static H3LoadedPcx16* s_panel_ok_pressed = nullptr;
 static H3LoadedPcx16* s_panel_cancel_normal = nullptr;
 static H3LoadedPcx16* s_panel_cancel_pressed = nullptr;
 static H3LoadedPcx16* s_panel_button_frame = nullptr;
-static H3LoadedPcx16* s_panel_grid_frame = nullptr;
+
 static bool s_panel_background_load_failed = false;
 static bool s_panel_cell_load_failed = false;
-static bool s_panel_grid_frame_load_failed = false;
 static bool s_panel_ok_normal_load_failed = false;
 static bool s_panel_ok_pressed_load_failed = false;
 static bool s_panel_cancel_normal_load_failed = false;
@@ -345,12 +344,6 @@ static H3LoadedPcx16* LoadPanelCell_()
         s_panel_cell, s_panel_cell_load_failed, false);
 }
 
-static H3LoadedPcx16* LoadPanelGridFrame_()
-{
-    return LoadPanelPcx24_("HA_grid_frame.pcx", GRID_FRAME_W, GRID_FRAME_H,
-        s_panel_grid_frame, s_panel_grid_frame_load_failed, false);
-}
-
 static bool CopyPanelBackground_(H3LoadedPcx16* destination)
 {
     H3LoadedPcx16* background = LoadPanelBackground_();
@@ -603,10 +596,6 @@ static void ReleasePanelComposite_()
         s_panel_cell->Destroy();
         s_panel_cell = nullptr;
     }
-    if (s_panel_grid_frame) {
-        s_panel_grid_frame->Destroy();
-        s_panel_grid_frame = nullptr;
-    }
     H3LoadedPcx16** button_resources[] = {
         &s_panel_ok_normal, &s_panel_ok_pressed,
         &s_panel_cancel_normal, &s_panel_cancel_pressed,
@@ -620,7 +609,6 @@ static void ReleasePanelComposite_()
     }
     s_panel_background_load_failed = false;
     s_panel_cell_load_failed = false;
-    s_panel_grid_frame_load_failed = false;
     s_panel_ok_normal_load_failed = false;
     s_panel_ok_pressed_load_failed = false;
     s_panel_cancel_normal_load_failed = false;
