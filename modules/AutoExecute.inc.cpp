@@ -1,10 +1,11 @@
-﻿// AutoExecute.inc.cpp
+// AutoExecute.inc.cpp
 // Automated battle execution module
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint16_t stop_turns[5]);
+    const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
+    const SummonProfileFields summon[5]);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
@@ -12,6 +13,7 @@ extern int  g_active_profile;
 extern int  g_last_profile;
 extern uint8_t  g_protect_strategy[5];
 extern uint16_t g_stop_turns[5];
+extern SummonProfileFields g_summon[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -41,6 +43,17 @@ enum PipelineStage {
 };
 static PipelineStage g_pipeline_stage = PS_IDLE;
 static void* g_pipeline_stack = nullptr; // 管线锚定的活动单位
+// 本激活窗口内是否已写入过主动作（SubmitDefend_/WriteAction_）。
+// 士气高涨：同支部队消化完命令后立即再激活（无其它部队插入、活动单位
+// 不变），PS_HANDLED 残留会挡住第二次行动；用「已落地 + action 已清 +
+// 控制权判定点再次询问同一单位」识别这是新的一次行动机会。
+static bool g_pipeline_action_landed = false;
+static int g_pipeline_landed_turn = -1;   // 命令落地时的战场回合号
+// 同单位再激活的回合号相同 = 士气额外行动（循环语义作用于回合：
+// 循环移动→防御、循环近战→重打本回合组合不推进游标）；
+// 回合号前进 = 新回合（极端情况：场上只剩一支部队，回合背靠背）。
+static bool g_pipeline_morale_extra = false;
+static int g_pipeline_morale_turn = -1;
 
 static const char* ControlModeName_(ControlMode m)
 {
@@ -130,6 +143,9 @@ static int  g_protect_checked_turn = -1;
 // 自动停止：最近两笔敌方血量。两笔都有效才外推，更早的不参与。
 static int g_enemy_hp_turn[2] = { -1, -1 };
 static int g_enemy_hp_value[2] = {};
+// 召唤通道运行态：自动模式本场锁定的元素下标（0..3，-1 未锁定）。
+// 首次成功施放后锁定，战斗结束/重打/状态重置清空（ResetAutoState）。
+static int g_summon_locked_spell = -1;
 
 static bool CreatureInfoIndexValid_(int creature_id)
 {
@@ -228,6 +244,14 @@ static void BindStackTrackingFromBattle_()
         t.move_cursor = 0;
         t.melee_cursor = 0;
         t.spell_cursor = 0;
+        // 绑定时刻已在场的召唤物（重开面板再勾号的场景）：
+        // 召唤策略下直接套用共享规则。
+        if (g_protect_strategy[g_active_profile]
+                == (uint8_t)H3AutoPolicy::PS_SUMMON_LOW_FORCE
+            && current_identities[i].kind == H3AutoPolicy::STACK_ID_SUMMON
+            && H3AutoPolicy::IsSummonedElemental(s->creature_id)) {
+            g_active_rules[i] = g_summon[g_active_profile].summon_rule;
+        }
         ++bound;
         if (g_active_rules[i].action != AA_MANUAL)
             ++configured_action;
@@ -294,6 +318,42 @@ static void UpdateStackTracking_()
                 LogDebug("[Track] update slot=%d cid=0x%X hex=%d count=%d",
                     i, t.creature_id, t.hex, t.count_alive);
             }
+        }
+    }
+
+    // —— 动态补绑召唤物（§2.3）——
+    // 首次出现的四系元素（身份 STACK_ID_SUMMON + 槽未绑定）在本场内接管：
+    // 绑定跟踪条目并套用召唤共享规则（游标归零）。克隆物（类型不在四系）
+    // 不绑、保持手动。仅保活策略 = 兵力不足时召唤时补绑。
+    if (g_protect_strategy[g_active_profile]
+        == (uint8_t)H3AutoPolicy::PS_SUMMON_LOW_FORCE) {
+        for (int i = 0; i < 21; ++i) {
+            if (g_stack_track[i].bound) continue;
+            const H3AutoPolicy::StableStackIdentity& id = current_identities[i];
+            if (id.kind != H3AutoPolicy::STACK_ID_SUMMON) continue;
+            _BattleStack_* s = &mgr->stack[g_track_side][i];
+            if (s->count_current <= 0 || s->count_at_start <= 0) continue;
+            if (!H3AutoPolicy::IsSummonedElemental(s->creature_id)) continue;
+
+            StackTrackEntry& t = g_stack_track[i];
+            t.bound = true;
+            t.identity = id;
+            t.attempt_id = g_battle_attempt_id;
+            t.side = g_track_side;
+            t.slot = i;
+            t.creature_id = s->creature_id;
+            t.hex = s->hex_ix;
+            t.count_alive = s->count_current;
+            t.count_start = s->count_at_start;
+            t.alive = true;
+            t.move_cursor = 0;
+            t.melee_cursor = 0;
+            t.spell_cursor = 0;
+            g_active_rules[i] = g_summon[g_active_profile].summon_rule;
+            g_track_active = true;
+            LogInfo("[Summon] 补绑召唤物 slot=%d cid=0x%X hex=%d count=%d action=%d",
+                i, s->creature_id, s->hex_ix, s->count_current,
+                (int)g_summon[g_active_profile].summon_rule.action);
         }
     }
 }
@@ -509,6 +569,8 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
             ClearSpellWait_();
         g_pipeline_stage = PS_IDLE;
         g_pipeline_stack = nullptr;
+        g_pipeline_action_landed = false;
+        g_pipeline_morale_extra = false;
     }
     if (g_auto_state.action_wake_stack == stack)
         g_auto_state.action_wake_stack = nullptr;
@@ -652,6 +714,8 @@ void ResetAutoState()
     g_auto_state.action_wake_stack = nullptr;
     g_pipeline_stage = PS_IDLE;   // 管线整体清（含 done/handled 残留）
     g_pipeline_stack = nullptr;
+    g_pipeline_action_landed = false;
+    g_pipeline_morale_extra = false;
     g_auto_state.spell_wait_slot = -1;
     g_auto_state.spell_wait_key = -1;
     g_auto_state.spell_wait_frames = 0;
@@ -666,6 +730,7 @@ void ResetAutoState()
     g_enemy_hp_turn[1] = -1;
     g_enemy_hp_value[0] = 0;
     g_enemy_hp_value[1] = 0;
+    g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     ClearOneShotManual_();
     // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
@@ -936,6 +1001,121 @@ static int EnemyAliveHp_(_BattleMgr_* mgr)
     return static_cast<int>(total);
 }
 
+// ==== 召唤通道（保活策略 = 兵力不足时召唤，§2.3）====
+// 事件型判定：每次控制权交玩家都判（无回合标记）；英雄已施法则跳过
+// （TryProtectCast_ 共享守卫已查）。法力消耗与召唤量常量表为暂定口径，
+// 上机逆向确认后修订（§5 清单项）。
+static const int kSummonManaCostProvisional = 15; // SoD 四系召唤法力消耗（暂定）
+
+// 召唤量（个）= 力量 × 等级系数（基础 2 / 高级 3 / 专家 4；暂定，§5）。
+// 只影响自动模式的元素排序，不参与判定。
+static int SummonCountAmount_(int expertise, int spell_power)
+{
+    if (expertise <= 0 || spell_power <= 0) return 0;
+    const int mult = expertise >= 3 ? 4 : expertise == 2 ? 3 : 2;
+    return spell_power * mult;
+}
+
+// 己方存活统计（含召唤物、不含战争机器）喂纯函数：存活队数 + 血量合计。
+static void OwnSideForceStats_(_BattleMgr_* mgr, int side,
+    int* out_alive, int* out_hp)
+{
+    if (out_alive) *out_alive = 0;
+    if (out_hp) *out_hp = 0;
+    if (!mgr || side < 0 || side > 1) return;
+    H3AutoPolicy::TargetCandidate alive[21] = {};
+    int n = 0;
+    for (int i = 0; i < 21; ++i) {
+        _BattleStack_* st = &mgr->stack[side][i];
+        if (st->count_current <= 0 || st->count_at_start <= 0) continue;
+        if (!CreatureInfoIndexValid_(st->creature_id)) continue;
+        if (H3AutoPolicy::IsWarMachineType(st->creature_id)) continue;
+        H3AutoPolicy::TargetCandidate& c = alive[n++];
+        c.count_current = st->count_current;
+        c.count_at_start = st->count_at_start;
+        c.hit_points = st->creature.hit_points;
+        c.lost_hp = st->lost_hp;
+    }
+    if (out_alive) *out_alive = H3AutoPolicy::CountAliveSideStacks(alive, n);
+    if (out_hp) *out_hp = H3AutoPolicy::SumSideRemainingHp(alive, n);
+}
+
+static bool SummonChannel_(_BattleMgr_* mgr, int side,
+    H3CombatManager* cm, H3Hero* hero, int spell_power)
+{
+    const int profile = g_active_profile;
+    if (profile < 0 || profile >= 5) return false;
+    const SummonProfileFields& sf = g_summon[profile];
+
+    int alive = 0, hp_total = 0;
+    OwnSideForceStats_(mgr, side, &alive, &hp_total);
+
+    // 已学法术与召唤量（元素下标 0..3 = 气/水/火/土）。
+    int amounts[H3AutoPolicy::SUMMON_ELEMENT_COUNT] = {};
+    bool learned[H3AutoPolicy::SUMMON_ELEMENT_COUNT] = {};
+    for (int i = 0; i < H3AutoPolicy::SUMMON_ELEMENT_COUNT; ++i) {
+        const int exp = hero->GetSpellExpertise(
+            H3AutoPolicy::kSummonSpellIds[i], cm->specialTerrain);
+        learned[i] = exp > 0;
+        amounts[i] = SummonCountAmount_(exp, spell_power);
+    }
+    const int pick = H3AutoPolicy::PickSummonSpell(
+        amounts, learned, sf.spell_pick, g_summon_locked_spell);
+    LogDebug("[Summon] check alive=%d/th%d hp=%d/th%d pick_cfg=%d pick=%d locked=%d mana=%d",
+        alive, sf.count_th, hp_total, sf.hp_th, sf.spell_pick, pick,
+        g_summon_locked_spell, GetHeroMana_(mgr, side));
+    if (pick < 0) {
+        LogDebug("[Summon] no available spell (cfg=%d learned=%d%d%d%d)",
+            sf.spell_pick, learned[0] ? 1 : 0, learned[1] ? 1 : 0,
+            learned[2] ? 1 : 0, learned[3] ? 1 : 0);
+        return false;
+    }
+    const int spell_id = H3AutoPolicy::kSummonSpellIds[pick];
+    const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
+    if (!H3AutoPolicy::SummonShouldCast(alive, sf.count_th, hp_total,
+            sf.hp_th, GetHeroMana_(mgr, side), kSummonManaCostProvisional,
+            GetHeroCasted_(mgr, side) != 0, expertise > 0))
+        return false;   // 时机不满足：静默跳过，不记失败（§0）
+
+    // 召唤锚定格：己方第一支存活部队所在格。召唤法术 target hex
+    // 实参语义待上机验证（§5），先按保活通道同参对照原版施放。
+    int anchor_hex = -1;
+    for (int i = 0; i < 21 && anchor_hex < 0; ++i) {
+        _BattleStack_* st = &mgr->stack[side][i];
+        if (st->count_current > 0)
+            anchor_hex = StackHex_(st);
+    }
+    if (anchor_hex < 0) anchor_hex = 0;
+
+    const int mana_before = GetHeroMana_(mgr, side);
+    const int casted_before = GetHeroCasted_(mgr, side);
+    __try {
+        LogDebug("[Summon] cast spell=%d hex=%d exp=%d power=%d alive=%d/%d hp=%d/%d",
+            spell_id, anchor_hex, expertise, spell_power,
+            alive, sf.count_th, hp_total, sf.hp_th);
+        cm->CastSpell(spell_id, anchor_hex, 0, -1, expertise, spell_power);
+    } __except (1) {
+        LogWarn("[Summon] cast exception code=0x%08X spell=%d",
+            GetExceptionCode(), spell_id);
+        return false;
+    }
+    // 成功（法力扣减或施法标志翻转）才记锁定；槽位占满等静默失败不记。
+    const bool cast_ok =
+        GetHeroMana_(mgr, side) < mana_before
+        || (casted_before == 0 && GetHeroCasted_(mgr, side) != 0);
+    if (!cast_ok) {
+        LogWarn("[Summon] cast not taken effect spell=%d mana=%d->%d casted=%d",
+            spell_id, mana_before, GetHeroMana_(mgr, side),
+            GetHeroCasted_(mgr, side));
+        return false;
+    }
+    if (sf.spell_pick == 0 && g_summon_locked_spell < 0)
+        g_summon_locked_spell = pick;   // 自动模式：首次成功即本场锁定
+    LogInfo("[Summon] 召唤成功 spell=%d 元素下标=%d 锚格=%d (方案%d 队数≤%d 血量≤%d)",
+        spell_id, pick, anchor_hex, profile + 1, sf.count_th, sf.hp_th);
+    return true;
+}
+
 // 预计敌方会在阈值回合内全灭时切到全手动。
 // 只看最近两笔取样的掉血，不用更早的回合。
 // 守卫（S5）：仅战斗中·面板关 + 自动模式下判（设计文档 §3.1.2）。
@@ -947,6 +1127,36 @@ static void TryAutoStop_(_BattleMgr_* mgr)
     const int profile = g_active_profile;
     if (profile < 0 || profile >= 5) return;
     const int threshold = g_stop_turns[profile];
+
+    // —— 第二停止条件：敌方英雄法力 ≤ 阈值（常量 6）——
+    // 勾选 stop_enemy_mana 且敌方有英雄、有魔法书才判；与停止回合数
+    // OR 组合，任一触发即切手动。无书英雄法力常为 0，不判书会开战即误停。
+    // 每次控制权交还玩家都判（与停止回合数同评估点，不受回合取样约束）。
+    if (g_summon[profile].stop_enemy_mana) {
+        const int side = ResolveHumanSide_(mgr);
+        if (side >= 0 && side <= 1 && mgr->hero[1 - side]) {
+            bool has_book = false;
+            __try {
+                // 魔法书 = 0 号宝物（DoesWearArtifact @0x4E2C90，Compat 自带）。
+                has_book = mgr->hero[1 - side]->DoesWearArtifact(0) != 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                has_book = false;
+            }
+            const int enemy_mana = GetHeroMana_(mgr, 1 - side);
+            LogDebug("[AutoStop] enemy mana check book=%d mana=%d",
+                has_book ? 1 : 0, enemy_mana);
+            if (H3AutoPolicy::ShouldStopOnEnemyMana(1, true, has_book,
+                    enemy_mana, H3AutoPolicy::kSummonStopEnemyMana)) {
+                g_control = CM_MANUAL; // 与停止回合数同款：切回手动
+                ClearOneShotManual_();
+                LogInfo("[AutoStop] enemy mana low: 敌方法力 %d ≤ %d，切回手动",
+                    enemy_mana, H3AutoPolicy::kSummonStopEnemyMana);
+                RefreshControlStatusHint_();
+                return;
+            }
+        }
+    }
+
     if (threshold <= 0) return;
 
     const int turn = GetCurrentBattleTurn_(mgr);
@@ -970,13 +1180,14 @@ static void TryAutoStop_(_BattleMgr_* mgr)
         threshold, g_enemy_hp_value[0], hp, elapsed);
     LogDebug("[AutoStop] judge elapsed=%d base=%d cur=%d left=%d",
         elapsed, g_enemy_hp_value[0], hp, left);
-    if (left < 0 || left > threshold) return;
-
-    g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
-    ClearOneShotManual_();
-    LogInfo("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
-        elapsed, g_enemy_hp_value[0], hp, left, threshold);
-    RefreshControlStatusHint_();
+    if (left >= 0 && left <= threshold) {
+        g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
+        ClearOneShotManual_();
+        LogInfo("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
+            elapsed, g_enemy_hp_value[0], hp, left, threshold);
+        RefreshControlStatusHint_();
+        return;
+    }
 }
 
 // 守卫（S5）：仅战斗中·面板关 + 自动模式下判（设计文档 §3.1.1：
@@ -1022,6 +1233,11 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         return false;
     }
     const int spell_power = cm->heroSpellPower[side];
+
+    // 策略分派（§2.3）：兵力不足时召唤 → 召唤通道（事件型，自查法力）；
+    // 其余策略走原复活通道（复活固定耗魔 10）。
+    if (strategy == (int)H3AutoPolicy::PS_SUMMON_LOW_FORCE)
+        return SummonChannel_(mgr, side, cm, hero, spell_power);
 
     // 收集队列内够格候选：勾选 + 按方案策略判定。
     // 够格者中统一取血量最低（全灭者剩余 0 天然最前）。
@@ -1196,8 +1412,11 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 }
 
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
+// 召唤通道参数（阈值/法术选择/召唤物共享规则/敌方法力停）随方案一起提交，
+// 共享规则在此再过一次 NormalizeSummonRule（草稿来源不可信原则）。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint16_t stop_turns[5])
+    const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
+    const SummonProfileFields summon[5])
 {
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
@@ -1208,6 +1427,17 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (turns < 0) turns = 0;
         if (turns > 999) turns = 999;
         g_stop_turns[p] = static_cast<uint16_t>(turns);
+        SummonProfileFields fields = summon
+            ? summon[p] : H3AutoPolicy::MakeDefaultSummonFields();
+        if (fields.count_th < 0) fields.count_th = 0;
+        if (fields.count_th > 21) fields.count_th = 21;
+        if (fields.hp_th < 0) fields.hp_th = 0;
+        if (fields.spell_pick < 0
+            || fields.spell_pick > H3AutoPolicy::SUMMON_ELEMENT_COUNT)
+            fields.spell_pick = 0;
+        fields.stop_enemy_mana = fields.stop_enemy_mana ? 1 : 0;
+        H3AutoPolicy::NormalizeSummonRule(&fields.summon_rule);
+        g_summon[p] = fields;
     }
     g_active_profile = active_profile;
 
@@ -1370,6 +1600,8 @@ static bool SubmitDefend_(_BattleMgr_* mgr, _BattleStack_* self)
     mgr->action_parameter2 = 0;
     g_pipeline_stage = PS_HANDLED;   // 本回合已处理，防重复下命令
     g_pipeline_stack = self;
+    g_pipeline_action_landed = true; // 命令已落地（士气再行动判据）
+    g_pipeline_landed_turn = GetCurrentBattleTurn_(mgr);
     LogDebug("[Auto] submit DEFEND slot=%d creature=0x%X",
         self->army_slot_ix, self->creature_id);
     return true;
@@ -1386,6 +1618,8 @@ static bool WriteAction_(_BattleMgr_* mgr, _BattleStack_* self,
     mgr->action_parameter2 = 0;
     g_pipeline_stage = PS_HANDLED;   // 本回合已处理，防重复下命令
     g_pipeline_stack = self;
+    g_pipeline_action_landed = true; // 命令已落地（士气再行动判据）
+    g_pipeline_landed_turn = GetCurrentBattleTurn_(mgr);
     return true;
 }
 
@@ -1506,6 +1740,51 @@ static bool SubmitMove_(_BattleMgr_* mgr, _BattleStack_* self,
     return true;
 }
 
+// 召唤物移动：散开（分级拉开）与随机移动（共享规则专属动作）。
+// 可达格用原版悬停判定（0x475DC0）逐格核对，与移动/近战同口径；
+// 散开两档无解 → 原地防御（降级链固定终于防御，与勾选无关）；
+// 随机移动无可达格 → 交调用方按「允许降级为防御」处理。
+// 缓冲 static 化：游戏回调线程栈小（技能条目：大缓冲不进栈）。
+static bool SubmitSummonMove_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule)
+{
+    if (!mgr || !self) return false;
+
+    static int cands[H3AutoPolicy::BATTLEFIELD_HEXES];
+    int n = 0;
+    for (int hex = 1; hex <= 185
+        && n < H3AutoPolicy::BATTLEFIELD_HEXES; ++hex) {
+        if (IsMoveTargetReachable_(mgr, self, hex))
+            cands[n++] = hex;
+    }
+    // 己方其它存活部队位置（含战争机器；宽体只记头格，距离近似）。
+    static int own[H3AutoPolicy::BATTLEFIELD_HEXES];
+    int own_n = 0;
+    for (int i = 0; i < 21; ++i) {
+        _BattleStack_* s = &mgr->stack[self->def_group_ix][i];
+        if (s == self || s->count_current <= 0 || s->count_at_start <= 0)
+            continue;
+        const int h = StackHex_(s);
+        if (h >= 0 && own_n < H3AutoPolicy::BATTLEFIELD_HEXES)
+            own[own_n++] = h;
+    }
+    const int cur = StackHex_(self);
+    const int target = H3AutoPolicy::ChooseSummonMoveHex(
+        rule.action, cands, n, cur, own, own_n,
+        static_cast<uint32_t>(GetTickCount()));
+    if (target < 0) {
+        if (rule.action == AA_SCATTER)
+            return SubmitDefend_(mgr, self);
+        return false;   // 随机移动：无可达格 → 上层降级/交回玩家
+    }
+    if (!WriteAction_(mgr, self, BA_WALK, -1, target))
+        return false;
+    LogDebug("[Summon] submit %s slot=%d -> hex=%d cands=%d",
+        rule.action == AA_SCATTER ? "SCATTER" : "RANDOM_MOVE",
+        self->army_slot_ix, target, n);
+    return true;
+}
+
 // 判断某 hex 是否被敌方部队占据（双格头/尾都算）。
 // 尾格用 GetSecondSquare(0x4463C0)；失败则仅比头格。
 static _BattleStack_* FindEnemyOccupyingHex_(_BattleMgr_* mgr, _BattleStack_* self, int hex)
@@ -1534,7 +1813,7 @@ static _BattleStack_* FindEnemyOccupyingHex_(_BattleMgr_* mgr, _BattleStack_* se
 // （对应 FUN_00476500 case7 的 0x132d4/0x132d8）。
 // 同时写入 mouse_coord/attacker_coord，贴近玩家点击后的状态。
 static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
-    const AutoStackRule& rule, StackTrackEntry& runtime)
+    const AutoStackRule& rule, StackTrackEntry& runtime, int repeat_pair = -1)
 {
     if (!mgr || !self) return false;
     const AutoTargetRule& target = rule.target;
@@ -1546,6 +1825,9 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
     const bool legacy = count == 0;
     int cursor = legacy ? 0 : runtime.melee_cursor;
     if (!legacy && (cursor < 0 || cursor >= count)) cursor = 0;
+    // 士气额外行动：重打指定组合（本回合刚执行过的），不推进游标。
+    const bool repeat = !legacy && repeat_pair >= 0 && repeat_pair < count;
+    if (repeat) cursor = repeat_pair;
 
     const int attack_hex = legacy
         ? target.meleeAttackHex : target.meleeAttackHexes[cursor];
@@ -1579,10 +1861,12 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
     if (!WriteAction_(mgr, self, BA_WALK_ATTACK, stand_hex, attack_hex))
         return false;
     // 只在成功提交后推进；失败时保持当前组合不变。
-    if (!legacy && count > 0)
+    // 士气重打不推进：循环作用于回合，下回合继续原顺序。
+    if (!legacy && count > 0 && !repeat)
         runtime.melee_cursor = (cursor + 1) % count;
-    LogDebug("[Auto] submit MELEE(loop) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
-        cursor, count, stand_hex, attack_hex, enemy->army_slot_ix, StackHex_(enemy),
+    LogDebug("[Auto] submit MELEE(loop%s) pair=%d/%d stand=%d attack=%d enemy_slot=%d enemy_hex=%d next=%d",
+        repeat ? ",repeat" : "", cursor, count, stand_hex, attack_hex,
+        enemy->army_slot_ix, StackHex_(enemy),
         legacy ? 0 : runtime.melee_cursor);
     return true;
 }
@@ -1626,6 +1910,28 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
         return false;
     };
 
+    // —— 士气高涨的额外行动：循环语义作用于回合，不作用于同回合的额外行动 ——
+    // 循环移动：不动（原地防御）；路径游标已在本回合正常推进，下回合走下一点。
+    // 循环近战：重打本回合刚执行过的组合，游标不往前推进（下回合继续原顺序）。
+    // 其余动作（远程/急救/防御/召唤物走位）无回合游标，自然再执行一次。
+    const bool morale_extra = g_pipeline_morale_extra
+        && g_pipeline_morale_turn == GetCurrentBattleTurn_(mgr);
+    if (morale_extra && rule.action == AA_MOVE) {
+        LogInfo("[Auto] morale extra: MOVE -> DEFEND slot=%d",
+            self->army_slot_ix);
+        return SubmitDefend_(mgr, self);
+    }
+    int melee_repeat_pair = -1;
+    if (morale_extra && rule.action == AA_MELEE_ATTACK
+        && rule.target.meleePairCount > 0) {
+        int pair_count = rule.target.meleePairCount;
+        if (pair_count > MELEE_PAIR_CAPACITY) pair_count = MELEE_PAIR_CAPACITY;
+        // 游标在本回合成功提交后已 +1；取回退一格 = 本回合刚打过的组合。
+        melee_repeat_pair = (runtime.melee_cursor - 1 + pair_count) % pair_count;
+        LogInfo("[Auto] morale extra: MELEE repeat pair=%d/%d slot=%d",
+            melee_repeat_pair, pair_count, self->army_slot_ix);
+    }
+
     switch (rule.action) {
     case AA_MANUAL:
         // 仅配置了循环施法时：施法阶段结束后把主动作交回玩家。
@@ -1637,12 +1943,18 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     case AA_MOVE:
         return fallback_or_fail(SubmitMove_(mgr, self, rule, runtime));
     case AA_MELEE_ATTACK:
-        return fallback_or_fail(SubmitMelee_(mgr, self, rule, runtime));
+        return fallback_or_fail(
+            SubmitMelee_(mgr, self, rule, runtime, melee_repeat_pair));
     case AA_RANGED_ATTACK:
         return fallback_or_fail(SubmitRanged_(mgr, self, rule));
     case AA_FIRST_AID:
         if (cid != WM_FIRST_AID) return false;
         return SubmitFirstAid_(mgr, self, rule); // 帐篷不降级
+    case AA_SCATTER:
+    case AA_RANDOM_MOVE:
+        // 召唤共享规则专属动作（普通部队下拉不出这两个值；
+        // NormalizeSummonRule 保证只有召唤规则能存进来）。
+        return fallback_or_fail(SubmitSummonMove_(mgr, self, rule));
     default:
         return false;
     }
@@ -1668,6 +1980,8 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
             ClearSpellWait_();
         g_pipeline_stage = PS_IDLE;
         g_pipeline_stack = nullptr;
+        g_pipeline_action_landed = false;
+        g_pipeline_morale_extra = false;
     }
     if (g_auto_state.action_wake_stack
         && g_auto_state.action_wake_stack != self)
@@ -1948,6 +2262,34 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
                     ClearSpellWait_();
                 g_pipeline_stage = PS_IDLE;
                 g_pipeline_stack = nullptr;
+                g_pipeline_action_landed = false;
+                g_pipeline_morale_extra = false;
+            } else if (g_pipeline_stage == PS_HANDLED
+                && g_pipeline_stack == This->active_stack
+                && g_pipeline_action_landed && This->action == 0) {
+                // 同支部队消化完上一条命令后再次获得行动机会。本判定点
+                // 只在真正的行动时机发生（战斗动画期间不被调用），且要求
+                // 命令已落地、action 已被执行器清回 0——即这是全新的一次
+                // 行动机会，而非执行窗口内的重复询问。
+                // 回合号相同 = 士气高涨的额外行动（带 g_pipeline_morale_extra
+                // 标记，循环移动/近战按「循环作用于回合」特殊处理）；
+                // 回合号前进 = 新回合（极端情况：场上只剩一支部队，
+                // 回合背靠背、无其它部队插入触发不了单位变化复位）。
+                // 快捷施法由 hero_casted 挡住，士气额外行动不会二施。
+                const int turn = GetCurrentBattleTurn_(This);
+                const bool morale_extra =
+                    turn >= 0 && g_pipeline_landed_turn == turn;
+                g_pipeline_stage = PS_IDLE;
+                g_pipeline_action_landed = false;
+                g_pipeline_morale_extra = morale_extra;
+                g_pipeline_morale_turn = turn;
+                if (morale_extra)
+                    LogInfo("[Auto] morale re-action: reset pipeline slot=%d cid=0x%X",
+                        This->active_stack->army_slot_ix,
+                        This->active_stack->creature_id);
+                else
+                    LogDebug("[Auto] same stack new turn: reset pipeline slot=%d turn=%d",
+                        This->active_stack->army_slot_ix, turn);
             }
         }
 

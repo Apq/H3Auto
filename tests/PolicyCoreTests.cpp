@@ -32,16 +32,22 @@ void CheckActions(int creature, bool ranged, bool artillery, bool firstAid,
 
 void TestPanelAdmission()
 {
-    Check(!IsConfigurablePanelStack(CREATURE_AMMO_CART, 10, true),
+    Check(!IsConfigurablePanelStack(CREATURE_AMMO_CART, 10, true, false),
         "ammo cart is never configurable");
-    Check(!IsConfigurablePanelStack(CREATURE_CATAPULT, 10, false),
+    Check(!IsConfigurablePanelStack(CREATURE_CATAPULT, 10, false, false),
         "catapult requires ballistics");
-    Check(IsConfigurablePanelStack(CREATURE_CATAPULT, 10, true),
+    Check(IsConfigurablePanelStack(CREATURE_CATAPULT, 10, true, false),
         "catapult with ballistics is configurable");
-    Check(IsConfigurablePanelStack(CREATURE_FIRST_AID_TENT, 10, false),
+    Check(IsConfigurablePanelStack(CREATURE_FIRST_AID_TENT, 10, false, false),
         "first aid tent is always configurable");
-    Check(!IsConfigurablePanelStack(CREATURE_BALLISTA, 0, true),
+    Check(!IsConfigurablePanelStack(CREATURE_BALLISTA, 0, true, false),
         "dead stack is not configurable");
+    Check(!IsConfigurablePanelStack(kSummonCreatureIds[0], 10, false, true),
+        "summoned elemental is not configurable");
+    Check(!IsConfigurablePanelStack(10, 10, false, true),
+        "clone stack is not configurable");
+    Check(IsConfigurablePanelStack(kSummonCreatureIds[0], 10, false, false),
+        "brought-in elemental army stack stays configurable");
 }
 
 void TestWarMachineActions()
@@ -544,7 +550,7 @@ void TestProtect()
 
 void TestProfileStoreRoundtrip()
 {
-    uint8_t strategy = PS_FIRST_ACTION;
+    uint8_t strategy = PS_SUMMON_LOW_FORCE;
     AutoStackRule rules[PROFILE_STORE_SLOTS] = {};
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
         rules[s] = MakeDefaultRule();
@@ -569,9 +575,19 @@ void TestProfileStoreRoundtrip()
     army_types[1] = 11; army_counts[1] = 30;
     army_types[2] = 12; army_counts[2] = 40;
 
+    SummonProfileFields summon = MakeDefaultSummonFields();
+    summon.count_th = 3;
+    summon.hp_th = 900;
+    summon.spell_pick = 2;
+    summon.stop_enemy_mana = 1;
+    summon.summon_rule.action = AA_SCATTER;
+    summon.summon_rule.allowDefendFallback = true; // 散开须清掉
+
+    Check(PROFILE_STORE_INTS == 1368, "h3ap6 profile store has 1368 ints");
+
     char text[32 * 1024] = {};
     const int written = EncodeProfileStoreText(army_types, army_counts,
-        strategy, rules, stop_turns, text, sizeof(text));
+        strategy, rules, stop_turns, summon, text, sizeof(text));
     Check(written > 0, "profile store encodes");
 
     uint8_t out_strategy = 0;
@@ -579,14 +595,15 @@ void TestProfileStoreRoundtrip()
     int out_types[PROFILE_STORE_SLOTS] = {};
     int out_counts[PROFILE_STORE_SLOTS] = {};
     AutoStackRule out_rules[PROFILE_STORE_SLOTS] = {};
+    SummonProfileFields out_summon = {};
     Check(DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
-            out_rules, &out_stop),
+            out_rules, &out_stop, &out_summon),
         "profile store decodes");
     Check(out_types[0] == 10 && out_counts[0] == 20
         && out_types[2] == 12 && out_counts[2] == 40,
         "army table roundtrip");
     Check(out_types[3] == -1 && out_counts[3] == 0, "empty slot roundtrip");
-    Check(out_strategy == strategy, "strategy roundtrip");
+    Check(out_strategy == strategy, "summon strategy roundtrip");
     Check(out_rules[7].action == AA_MELEE_ATTACK, "rule action roundtrip");
     Check(out_rules[7].target.meleeStandHex == 125, "melee stand roundtrip");
     Check(out_rules[7].target.meleeAttackHex == 108, "melee attack roundtrip");
@@ -605,25 +622,34 @@ void TestProfileStoreRoundtrip()
         "last slot selector roundtrip");
     Check(out_rules[0].action == AA_MANUAL, "default slot stays manual");
     Check(out_stop == stop_turns, "stop turns roundtrip");
+    Check(out_summon.count_th == 3 && out_summon.hp_th == 900
+        && out_summon.spell_pick == 2 && out_summon.stop_enemy_mana == 1,
+        "summon fields roundtrip");
+    Check(out_summon.summon_rule.action == AA_SCATTER,
+        "summon rule action roundtrip");
+    Check(!out_summon.summon_rule.allowDefendFallback,
+        "scatter clears fallback on decode");
+    Check(out_summon.summon_rule.protectEnable == 0,
+        "summon rule never joins protect queue");
 
     Check(!DecodeProfileStoreText("H3AP3 1 2 3", out_types, out_counts,
-            &out_strategy, out_rules, &out_stop),
+            &out_strategy, out_rules, &out_stop, &out_summon),
         "truncated store rejected");
     Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
-            &out_strategy, out_rules, &out_stop),
+            &out_strategy, out_rules, &out_stop, &out_summon),
         "legacy five-slot magic rejected");
-    text[4] = '4'; // H3AP5 -> H3AP4：上一版格式（含全灭后策略枚举）拒绝
+    text[4] = '5'; // H3AP6 -> H3AP5：上一版格式（无召唤字段）拒绝
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
-            out_rules, &out_stop),
-        "h3ap4 store rejected after enum reshuffle");
-    text[4] = '3'; // H3AP4 -> H3AP3：59 字段规则旧格式拒绝
+            out_rules, &out_stop, &out_summon),
+        "h3ap5 store rejected after format bump");
+    text[4] = '4'; // H3AP4：59 字段规则旧格式拒绝
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
-            out_rules, &out_stop),
-        "h3ap3 store rejected after format bump");
-    text[4] = '5';
+            out_rules, &out_stop, &out_summon),
+        "h3ap4 store rejected");
+    text[4] = '6';
     text[0] = 'X';
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
-            out_rules, &out_stop),
+            out_rules, &out_stop, &out_summon),
         "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
     Check(!AutoStopShouldYield(10, 1000, 990, 1), "slow damage stays running");
@@ -631,6 +657,199 @@ void TestProfileStoreRoundtrip()
     Check(!AutoStopShouldYield(10, 1000, 1000, 5), "no damage does not stop");
     Check(!AutoStopShouldYield(10, 1000, 1100, 5), "enemy hp gain does not stop");
     Check(ProjectEnemyTurnsLeft(10, 1000, 100, 9) == 1, "remaining turns round up");
+}
+
+void TestSummonChannel()
+{
+    // 时机判定：队数与血量双阈值 + 施法/已学/法力守卫。
+    Check(SummonShouldCast(2, 2, 750, 750, 30, 15, false, true),
+        "both thresholds met casts");
+    Check(!SummonShouldCast(3, 2, 750, 750, 30, 15, false, true),
+        "stack count above threshold does not cast");
+    Check(!SummonShouldCast(2, 2, 751, 750, 30, 15, false, true),
+        "hp total above threshold does not cast");
+    Check(SummonShouldCast(0, 0, 0, 0, 30, 15, false, true),
+        "zero thresholds cast only when force is empty");
+    Check(!SummonShouldCast(2, 2, 750, 750, 30, 15, true, true),
+        "already casted this turn blocks");
+    Check(!SummonShouldCast(2, 2, 750, 750, 14, 15, false, true),
+        "not enough mana blocks");
+    Check(SummonShouldCast(2, 2, 750, 750, 30, 0, false, true),
+        "zero mana cost never blocks mana check");
+    Check(!SummonShouldCast(2, 2, 750, 750, 30, 15, false, false),
+        "unlearned spell never casts");
+
+    // 元素判定：气112/土113/火114/水115。
+    Check(IsSummonedElemental(112) && IsSummonedElemental(113)
+        && IsSummonedElemental(114) && IsSummonedElemental(115),
+        "four elementals recognized");
+    Check(!IsSummonedElemental(111) && !IsSummonedElemental(116)
+        && !IsSummonedElemental(0x95),
+        "non-elemental ids rejected");
+
+    // 选法术：固定（含未学拒绝）、自动（量最大、锁定优先、平手靠前、全未学）。
+    const int amounts[SUMMON_ELEMENT_COUNT] = {100, 250, 250, 90};
+    const bool all_learned[SUMMON_ELEMENT_COUNT] = {true, true, true, true};
+    const bool none_learned[SUMMON_ELEMENT_COUNT] = {false, false, false, false};
+    const bool partial[SUMMON_ELEMENT_COUNT] = {true, false, true, false};
+    Check(PickSummonSpell(amounts, all_learned, 1, -1) == 0,
+        "fixed air picks air");
+    Check(PickSummonSpell(amounts, none_learned, 1, -1) == -1,
+        "fixed unlearned refuses");
+    Check(PickSummonSpell(amounts, all_learned, 0, -1) == 1,
+        "auto picks largest amount");
+    Check(PickSummonSpell(amounts, partial, 0, -1) == 2,
+        "auto picks largest among learned");
+    Check(PickSummonSpell(amounts, all_learned, 0, 3) == 3,
+        "locked element overrides auto");
+    Check(PickSummonSpell(amounts, none_learned, 0, -1) == -1,
+        "auto with nothing learned refuses");
+    const int tie[SUMMON_ELEMENT_COUNT] = {200, 200, 200, 200};
+    Check(PickSummonSpell(tie, all_learned, 0, -1) == 0,
+        "tie keeps front element");
+
+    // 侧统计：含召唤物、调用方负责剔除战争机器与死亡槽。
+    const TargetCandidate side[] = {
+        {10, 10, 20, 0, 0, 0, 0, 0},   // 200
+        {5, 5, 30, 30, 0, 0, 0, 0},    // 120
+        {0, 7, 25, 0, 0, 0, 0, 0},     // 全灭不计
+    };
+    Check(CountAliveSideStacks(side, 3) == 2, "alive count skips dead stacks");
+    Check(SumSideRemainingHp(side, 3) == 320, "hp sum skips dead stacks");
+
+    // 自动停止第二条件。
+    Check(ShouldStopOnEnemyMana(1, true, true, 6, 6),
+        "mana at threshold stops");
+    Check(ShouldStopOnEnemyMana(1, true, true, 0, 6),
+        "drained mana stops");
+    Check(!ShouldStopOnEnemyMana(1, true, true, 7, 6),
+        "mana above threshold continues");
+    Check(!ShouldStopOnEnemyMana(0, true, true, 0, 6),
+        "disabled flag never stops");
+    Check(!ShouldStopOnEnemyMana(1, false, true, 0, 6),
+        "no enemy hero never stops");
+    Check(!ShouldStopOnEnemyMana(1, true, false, 0, 6),
+        "no spellbook never stops");
+    Check(!ShouldStopOnEnemyMana(1, true, true, -1, 6),
+        "negative mana read never stops");
+}
+
+void TestSummonMoveHex()
+{
+    // 六格距离：同行相邻 1；跨行邻居 1；隔一格 2；无效格无穷远。
+    Check(HexCoordDistance(0, 0) == 0, "same hex distance zero");
+    Check(HexCoordDistance(0, 1) == 1, "same row neighbour is one");
+    Check(HexCoordDistance(0, 15) == 1, "row below neighbour is one");
+    Check(HexCoordDistance(0, 2) == 2, "same row skip is two");
+    Check(HexCoordDistance(0, 16) == 2, "odd row next column is two away");
+    Check(HexCoordDistance(0, 17) == 3, "odd row second column is three away");
+    Check(HexCoordDistance(0, 45) == 3, "third row distance three");
+    Check(HexCoordDistance(15, 16) == 1, "cross row diagonal is one");
+    Check(HexCoordDistance(-1, 5) > 10000, "invalid hex is far away");
+
+    // 散开：own 在 hex 0，自身在 hex 30（距离 2，已达标）。
+    const int own1[1] = {0};
+    const int far_cands[3] = {58, 59, 60};
+    Check(ChooseSummonMoveHex(AA_SCATTER, far_cands, 3, 30, own1, 1, 0) == -1,
+        "satisfied tier stays put");
+
+    // 当前格相邻（距离 1），有 ≥2 候选 → 挑 min-dist 最大者。
+    const int near_cands[2] = {17, 90};
+    Check(HexCoordDistance(15, 0) == 1, "setup: current is adjacent");
+    Check(HexCoordDistance(17, 0) == 3, "setup: first candidate tier two");
+    Check(HexCoordDistance(90, 0) == 6, "setup: second candidate farther");
+    Check(ChooseSummonMoveHex(AA_SCATTER, near_cands, 2, 15, own1, 1, 0) == 90,
+        "scatter picks farthest candidate in tier");
+
+    // ≥2 全场做不到 → 降级 ≥1：当前格与其余部队距离恒 ≥1，原地防御。
+    // current=3 与 own 2/18 相邻；候选 1/5 也都只满足 ≥1。
+    const int crowd_own[3] = {2, 4, 18};
+    const int crowd_cands[2] = {1, 5};
+    Check(HexCoordDistance(3, 2) == 1 && HexCoordDistance(3, 18) == 1,
+        "setup: crowded adjacency");
+    Check(HexCoordDistance(1, 2) == 1 && HexCoordDistance(5, 4) == 1,
+        "setup: candidates also adjacent");
+    Check(ChooseSummonMoveHex(AA_SCATTER, crowd_cands, 2, 3, crowd_own, 3, 0)
+        == -1,
+        "no tier two achievable defends in place");
+    // 没有任何其它己方部队：任意格都满足 ≥2，当前即最优，原地。
+    Check(ChooseSummonMoveHex(AA_SCATTER, crowd_cands, 2, 3, own1, 0, 0) == -1,
+        "no other stacks stays put");
+
+    // 随机移动：排除当前格，均匀取一；无候选 → 原地。
+    const int rnd_cands[3] = {10, 20, 30};
+    Check(ChooseSummonMoveHex(AA_RANDOM_MOVE, rnd_cands, 3, 30, own1, 1, 0) == 10,
+        "random move uses injected rng");
+    Check(ChooseSummonMoveHex(AA_RANDOM_MOVE, rnd_cands, 3, 30, own1, 1, 1) == 20,
+        "random move uses next bucket");
+    Check(ChooseSummonMoveHex(AA_RANDOM_MOVE, rnd_cands, 1, 10, own1, 1, 0) == -1,
+        "random without other candidates stays");
+    Check(ChooseSummonMoveHex(AA_MANUAL, rnd_cands, 3, 30, own1, 1, 0) == -1,
+        "manual never moves");
+}
+
+void TestSummonRuleNormalization()
+{
+    // 普通部队行动集不包含散开/随机移动（回归）。
+    AutoActionKind actions[AA_COUNT] = {};
+    const int n = GetAllowedActions(1, false, false, false, actions);
+    bool has_summon_action = false;
+    for (int i = 0; i < n; ++i)
+        if (actions[i] == AA_SCATTER || actions[i] == AA_RANDOM_MOVE)
+            has_summon_action = true;
+    Check(!has_summon_action, "ordinary stack cannot pick summon actions");
+    Check(ActionShowsFallback(1, AA_RANDOM_MOVE),
+        "random move shows fallback checkbox");
+    Check(!ActionShowsFallback(1, AA_SCATTER),
+        "scatter hides fallback checkbox");
+    Check(!ActionNeedsTarget(AA_SCATTER) && !ActionNeedsTarget(AA_RANDOM_MOVE),
+        "summon actions need no target rule");
+
+    // 召唤行动集与规范化。
+    AutoActionKind summon_actions[4] = {};
+    const int m = GetAllowedSummonActions(summon_actions);
+    Check(m == 4 && summon_actions[0] == AA_MANUAL
+        && summon_actions[1] == AA_DEFEND && summon_actions[2] == AA_SCATTER
+        && summon_actions[3] == AA_RANDOM_MOVE,
+        "summon action set is manual/defend/scatter/random");
+
+    AutoStackRule rule = MakeDefaultRule();
+    rule.action = AA_SCATTER;
+    rule.allowDefendFallback = true;
+    rule.protectEnable = 1;
+    rule.quickCastFirst = true;
+    rule.spellSlotCount = 2;
+    rule.spellSlots[0] = 1;
+    rule.spellSlots[1] = 2;
+    NormalizeSummonRule(&rule);
+    Check(rule.action == AA_SCATTER, "scatter survives normalization");
+    Check(!rule.allowDefendFallback, "scatter loses fallback");
+    Check(rule.protectEnable == 0, "summon rule leaves protect queue");
+    Check(!rule.quickCastFirst && rule.spellSlotCount == 0,
+        "summon rule has no quick cast");
+
+    rule = MakeDefaultRule();
+    rule.action = AA_RANDOM_MOVE;
+    rule.allowDefendFallback = true;
+    NormalizeSummonRule(&rule);
+    Check(rule.action == AA_RANDOM_MOVE && rule.allowDefendFallback,
+        "random move keeps fallback");
+
+    rule = MakeDefaultRule();
+    rule.action = AA_MELEE_ATTACK;
+    NormalizeSummonRule(&rule);
+    Check(rule.action == AA_MANUAL, "non-summon action snaps to manual");
+
+    const SummonProfileFields def = MakeDefaultSummonFields();
+    Check(def.count_th == 2 && def.hp_th == 750 && def.spell_pick == 0
+        && def.stop_enemy_mana == 0 && def.summon_rule.action == AA_MANUAL,
+        "default summon fields");
+
+    // 普通规则 NormalizeRule 仍会把召唤动作裁掉（双保险）。
+    AutoStackRule leak = MakeDefaultRule();
+    leak.action = AA_SCATTER;
+    NormalizeRule(&leak, 1, false, false, false);
+    Check(leak.action == AA_MANUAL, "normalize rule strips summon action");
 }
 
 } // namespace
@@ -649,6 +868,9 @@ TestArchiveSlotMapRounds();
     TestFailedActionPlayerHandoffEligibility();
     TestLegacySpellSlotCompatibility();
     TestProtect();
+    TestSummonChannel();
+    TestSummonMoveHex();
+    TestSummonRuleNormalization();
     TestProfileStoreRoundtrip();
     std::cout << "PolicyCoreTests: " << g_checks << " checks passed\n";
     return 0;

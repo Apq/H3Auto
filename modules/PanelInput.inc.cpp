@@ -63,6 +63,12 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             if (s_help_modal_open) {
                 s_help_modal_open = false;
                 DrawPanelToBuffer_();
+            } else if (s_summon_edit_which != SUMMON_EDIT_NONE) {
+                CancelSummonNumEdit_();
+                DrawPanelToBuffer_();
+            } else if (s_summon_spell_dd_open || s_summon_act_dd_open) {
+                CloseSummonDropdowns_();
+                DrawPanelToBuffer_();
             } else if (s_stop_turns_editing) {
                 CancelStopTurnsEdit_();
                 DrawPanelToBuffer_();
@@ -82,8 +88,10 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             return 1;  // swallow
         }
         if (wParam == VK_RETURN
-            && (s_stop_turns_editing || PanelAnyProtectCountEditing_())) {
+            && (s_stop_turns_editing || PanelAnyProtectCountEditing_()
+                || s_summon_edit_which != SUMMON_EDIT_NONE)) {
             if (s_stop_turns_editing) CommitStopTurnsEdit_();
+            CommitSummonNumEdit_();
             PanelCommitAllProtectCountEdits_();
             DrawPanelToBuffer_();
             return 1;
@@ -91,7 +99,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         // 帮助/快捷键模态或保活下拉展开时：Enter 不提交设置面板，仅吞掉。
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && s_spell_pick_cell < 0 && !s_help_modal_open
-            && !s_protect_dd_open) {
+            && !s_protect_dd_open
+            && !s_summon_spell_dd_open && !s_summon_act_dd_open) {
             SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
@@ -206,6 +215,68 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 if (repeatable) {
                     s_cnt_repeat_vk = wParam;
                     s_cnt_repeat_tick = now;
+                }
+                DrawPanelToBuffer_();
+            }
+            if (changed || wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE
+                || IsDigitKey_(wParam))
+                return 1;
+        }
+        // 召唤页阈值录入：与停止回合/「剩≤」同款（钩子即时 + 首次重复延迟）。
+        if (s_summon_edit_which != SUMMON_EDIT_NONE) {
+            static WPARAM s_sum_repeat_vk = 0;
+            static DWORD s_sum_repeat_tick = 0;
+            const DWORD now = GetTickCount();
+            const bool repeatable = wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE;
+            const bool first = (lParam & 0x40000000) == 0;
+            if (repeatable && !first) {
+                const DWORD gap = (s_sum_repeat_vk == wParam)
+                    ? (DWORD)30 : (DWORD)400;
+                if (now - s_sum_repeat_tick < gap)
+                    return 1;
+            }
+            const int len = (int)strlen(s_summon_edit_text);
+            const int max_digits =
+                SummonNumBoxMaxDigits_(s_summon_edit_which);
+            bool changed = false;
+            if (wParam == VK_BACK && s_summon_edit_caret > 0) {
+                memmove(s_summon_edit_text + s_summon_edit_caret - 1,
+                    s_summon_edit_text + s_summon_edit_caret,
+                    len - s_summon_edit_caret + 1);
+                --s_summon_edit_caret;
+                changed = true;
+            } else if (wParam == VK_DELETE && s_summon_edit_caret < len) {
+                memmove(s_summon_edit_text + s_summon_edit_caret,
+                    s_summon_edit_text + s_summon_edit_caret + 1,
+                    len - s_summon_edit_caret);
+                changed = true;
+            } else if (wParam == VK_LEFT && s_summon_edit_caret > 0) {
+                --s_summon_edit_caret;
+                changed = true;
+            } else if (wParam == VK_RIGHT && s_summon_edit_caret < len) {
+                ++s_summon_edit_caret;
+                changed = true;
+            } else if (IsDigitKey_(wParam)) {
+                const int d = DigitFromVk_(wParam);
+                if (d >= 0 && len < max_digits
+                    && len < (int)sizeof(s_summon_edit_text) - 1
+                    && s_summon_edit_caret <= len) {
+                    memmove(s_summon_edit_text + s_summon_edit_caret + 1,
+                        s_summon_edit_text + s_summon_edit_caret,
+                        len - s_summon_edit_caret + 1);
+                    s_summon_edit_text[s_summon_edit_caret] =
+                        static_cast<char>('0' + d);
+                    ++s_summon_edit_caret;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                s_summon_edit_caret_tick = now;
+                if (repeatable) {
+                    s_sum_repeat_vk = wParam;
+                    s_sum_repeat_tick = now;
                 }
                 DrawPanelToBuffer_();
             }
@@ -391,7 +462,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
         }
         if (scrolled_dropdown) {
             DrawPanelToBuffer_();
-        } else {
+        } else if (s_p.active_page == PAGE_ARMY) {
             const int old_row = s_p.scroll_row;
             if (wheel_delta < 0)
                 SetPanelScrollRow_(s_p.scroll_row + 1);

@@ -21,10 +21,22 @@ AutoStackRule g_active_rules[21] = {};
 int g_last_profile = 0;
 
 // 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
+// 策略 1-4 = 复活/聚灵通道；PS_SUMMON_LOW_FORCE = 召唤通道（时机与参数见 g_summon）。
 uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
 uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS }; // 0=关闭，0..999
+
+// 召唤通道配置（方案级，H3AP6 起随方案存档）：时机在 g_protect_strategy，
+// 阈值/法术选择/召唤物共享规则在此；stop_enemy_mana 是自动停止第二条件
+// （敌方法力 ≤ kSummonStopEnemyMana 时整场切回手动，与 g_stop_turns OR 组合）。
+SummonProfileFields g_summon[5] = {
+    H3AutoPolicy::MakeDefaultSummonFields(),
+    H3AutoPolicy::MakeDefaultSummonFields(),
+    H3AutoPolicy::MakeDefaultSummonFields(),
+    H3AutoPolicy::MakeDefaultSummonFields(),
+    H3AutoPolicy::MakeDefaultSummonFields(),
+};
 
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
@@ -32,11 +44,13 @@ uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
 void ClearConfirmedProfiles()
 {
     const AutoStackRule def = MakeDefaultRule_();
+    const SummonProfileFields summon_def = H3AutoPolicy::MakeDefaultSummonFields();
     for (int p = 0; p < 5; ++p) {
         for (int s = 0; s < 21; ++s)
             g_profiles[p][s] = def;
         g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
         g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
+        g_summon[p] = summon_def;
     }
     g_active_profile = 0;
     for (int s = 0; s < 21; ++s)
@@ -341,7 +355,7 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 }
 
 // 方案存档：DLL 同目录，每个编号一个独立文件（H3Auto.profiles1.ini .. profiles5.ini，
-// 文本一行，格式见 PolicyCore H3AP5）。
+// 文本一行，格式见 PolicyCore H3AP6）。
 // 保存/加载的是面板草稿，不改变当前生效方案，也不暂停自动执行。
 // g_profiles_prefix 在 Entry 的 DllMain 里初始化。
 
@@ -349,11 +363,12 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 // SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
 static bool SaveProfileStoreRaw_(const int army_types[21],
     const int army_counts[21], const AutoStackRule rules[21],
-    uint8_t strategy, uint16_t stop_turns, int slot)
+    uint8_t strategy, uint16_t stop_turns,
+    const SummonProfileFields& summon, int slot)
 {
     char* text = new char[32 * 1024];
     const int n = H3AutoPolicy::EncodeProfileStoreText(army_types,
-        army_counts, strategy, rules, stop_turns, text, 32 * 1024);
+        army_counts, strategy, rules, stop_turns, summon, text, 32 * 1024);
     bool ok = false;
     if (n > 0) {
         char* path = new(std::nothrow) char[kPathCap_];
@@ -374,14 +389,15 @@ static bool SaveProfileStoreRaw_(const int army_types[21],
 
 static bool SaveProfileStore_(const int army_types[21],
     const int army_counts[21], const AutoStackRule rules[21],
-    uint8_t strategy, uint16_t stop_turns, int slot)
+    uint8_t strategy, uint16_t stop_turns,
+    const SummonProfileFields& summon, int slot)
 {
     bool ok = false;
     DWORD code = 0;
     void* fault = nullptr;
     __try {
         ok = SaveProfileStoreRaw_(army_types, army_counts, rules,
-            strategy, stop_turns, slot);
+            strategy, stop_turns, summon, slot);
     } __except (code = GetExceptionCode(),
                 fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
                 EXCEPTION_EXECUTE_HANDLER) {
@@ -394,7 +410,7 @@ static bool SaveProfileStore_(const int army_types[21],
 // 读档：读选中编号的独立文件（槽号 0..4，越界取 0）。
 static bool LoadProfileStore_(int army_types[21], int army_counts[21],
     AutoStackRule out_rules[21], uint8_t* strategy, uint16_t* stop_turns,
-    int slot)
+    SummonProfileFields* summon, int slot)
 {
     char* path = new(std::nothrow) char[kPathCap_];
     if (!path) return false;
@@ -413,7 +429,7 @@ static bool LoadProfileStore_(int army_types[21], int army_counts[21],
     if (n > 0 && !truncated) {
         text[n] = 0;
         ok = H3AutoPolicy::DecodeProfileStoreText(text, army_types,
-            army_counts, strategy, out_rules, stop_turns);
+            army_counts, strategy, out_rules, stop_turns, summon);
     }
     delete[] text;
     return ok;

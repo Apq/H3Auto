@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $gameDir = 'D:\Heroes3\Heroes3_2026.05.01'
 $packsDst = "$gameDir\_HD3_Data\Packs\打铁助手"
 $legacyDst = "$gameDir\_HD3_Data\Packs\战场自动化"

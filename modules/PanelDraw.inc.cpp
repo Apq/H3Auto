@@ -209,7 +209,7 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 412; // 原 336 + 日志级别行 + 打包日志按钮行
+    const int h = 440; // 原 336 + 日志级别行 + 打包日志按钮行 + 召唤说明行
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -251,7 +251,7 @@ static void GetHelpLogLevelRowY_(int* out_y)
 {
     int x = 0, y = 0, w = 0, h = 0;
     GetHelpModalRect_(&x, &y, &w, &h);
-    if (out_y) *out_y = y + 50 + 8 * 28 + 6; // 8 行说明之后
+    if (out_y) *out_y = y + 50 + 9 * 28 + 6; // 9 行说明之后
 }
 
 static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_h)
@@ -362,6 +362,7 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         T("help.line3"),
         T("help.line4"),
         T("help.line5"),
+        T("help.line_summon"),
         hotkey_line,
         T("help.line6"),
     };
@@ -442,9 +443,9 @@ static const char* PanelTipAt_(int px, int py)
         const int ty = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
         if (px >= TAB_X && px < TAB_X + TAB_ITEM_W
             && py >= ty && py < ty + TAB_ITEM_H)
-            return T(page == PAGE_ARMY ? "tips.tab_army" : "tips.tab_profile");
+            return T(page == PAGE_ARMY ? "tips.tab_army" : "tips.tab_summon");
     }
-    // 方案页：只有方案级控件与共通按钮的 tip。
+    // 非部队页：只有方案级控件与共通按钮的 tip。
     if (s_p.active_page != PAGE_ARMY) {
         struct P { int x, y, w, h; const char* k; };
         static const P kPageTips[] = {
@@ -454,9 +455,56 @@ static const char* PanelTipAt_(int px, int py)
             { PROTECT_DD_LABEL_X - 4, PROTECT_DD_Y - 4,
               STOP_LABEL_X - PROTECT_DD_LABEL_X, 30, "protect" },
             { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30, "tips.stop_row" },
+            { STOP_MANA_X - 4, PROTECT_DD_Y - 4,
+              STOP_MANA_HIT_W + 8, 30, "tips.stop_mana" },
             { OK_X, BTN_Y, BTN_W, BTN_H, "tips.btn_ok" },
             { CANCEL_X, BTN_Y, BTN_W, BTN_H, "tips.btn_cancel" },
         };
+        // 召唤页专属控件 tips（法术/行动按当前选中项动态取键，
+        // 与保活策略下拉的「protect」动态键同思路）。
+        if (s_p.active_page == PAGE_SUMMON) {
+            const SummonProfileFields& sf =
+                s_p.draft_summon[s_p.selected_profile];
+            if (px >= SUMMON_DD_X && px < SUMMON_DD_X + SUMMON_DD_W
+                && py >= SUMMON_ROW1_Y - 2
+                && py < SUMMON_ROW1_Y + SUMMON_DD_H + 2) {
+                char key[40] = {};
+                const int cur = (sf.spell_pick >= 0 && sf.spell_pick <= 4)
+                    ? sf.spell_pick : 0;
+                _snprintf(key, sizeof(key) - 1, "tips.summon_spell_opt%d", cur);
+                return T(key);
+            }
+            if (px >= SUMMON_CNT_LABEL_X
+                && px < SUMMON_CNT_BOX_X + SUMMON_CNT_BOX_W
+                && py >= SUMMON_ROW1_Y - 2
+                && py < SUMMON_ROW1_Y + SUMMON_DD_H + 2)
+                return T("tips.summon_count");
+            if (px >= SUMMON_HP_LABEL_X
+                && px < SUMMON_HP_BOX_X + SUMMON_HP_BOX_W
+                && py >= SUMMON_ROW1_Y - 2
+                && py < SUMMON_ROW1_Y + SUMMON_DD_H + 2)
+                return T("tips.summon_hp");
+            if (px >= SUMMON_ACT_LABEL_X
+                && px < SUMMON_ACT_DD_X + SUMMON_ACT_DD_W
+                && py >= SUMMON_ACT_DD_Y - 2
+                && py < SUMMON_ACT_DD_Y + SUMMON_ACT_DD_H + 2) {
+                const int act = (int)sf.summon_rule.action;
+                if (act >= 0 && act < AA_COUNT) {
+                    char key[32] = {};
+                    _snprintf(key, sizeof(key) - 1, "tips.action_opt%d", act);
+                    return T(key);
+                }
+                return T("tips.summon_action");
+            }
+            if (sf.summon_rule.action == AA_RANDOM_MOVE
+                && px >= SUMMON_FB_X
+                && px < SUMMON_FB_X + 10 + 4 + SUMMON_FB_TEXT_W
+                && py >= SUMMON_FB_Y - 2 && py < SUMMON_FB_Y + 14)
+                return T("tips.summon_fallback");
+            if (px >= GRID_FRAME_X && px < GRID_FRAME_X + GRID_FRAME_W
+                && py >= SUMMON_NOTE_Y && py < SUMMON_NOTE_Y + SUMMON_NOTE_H)
+                return T("panel.summon_note");
+        }
         for (const P& t : kPageTips) {
             if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) {
                 if (t.k[0] == 'p' && t.k[1] == 'r') { // 保活策略：跟随当前选中项
@@ -558,6 +606,7 @@ static const char* ProtectStrategyLabel_(int i)
     case 1: return T("panel.protect_opt1");
     case 2: return T("panel.protect_opt2");
     case 3: return T("panel.protect_opt3");
+    case 4: return T("panel.protect_opt4");
     default: return "?";
     }
 }
@@ -569,6 +618,7 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
     if (!scr) return;
     static const char* const kTabKeys[TAB_VISIBLE_COUNT] = {
         "panel.tab_army",
+        "panel.tab_summon",
     };
     H3Font* small_font = GetSmallFont();
     for (int i = 0; i < TAB_VISIBLE_COUNT; ++i) {
@@ -664,6 +714,12 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
             STOP_BOX_X, PROTECT_DD_Y, STOP_BOX_W, PROTECT_DD_H,
             (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
     }
+
+    // 「敌方法力≤6 时停」复选框（保活行最右，两页共通；框在文字前）。
+    DrawCheckbox_(scr, STOP_MANA_X,
+        PROTECT_DD_Y + (PROTECT_DD_H - 10) / 2,
+        s_p.draft_summon[s_p.selected_profile].stop_enemy_mana != 0,
+        T("panel.stop_mana_label"), STOP_MANA_TEXT_W, 10);
 }
 
 // 展开列表：每项单独底色+边框（同卡片下拉暖色主题），
@@ -751,6 +807,186 @@ static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
         eTextAlignment::MIDDLE_CENTER);
 }
 
+// ===== 召唤页（PAGE_SUMMON）：设置行 + 说明行 + 召唤物行动卡 =====
+
+static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
+    int* out_w, int* out_h)
+{
+    if (out_x) *out_x = SUMMON_DD_X;
+    if (out_y) *out_y = SUMMON_ROW1_Y + SUMMON_DD_H + item * SUMMON_DD_ITEM_H;
+    if (out_w) *out_w = SUMMON_DD_W;
+    if (out_h) *out_h = SUMMON_DD_ITEM_H;
+}
+
+static void GetSummonActDdItemRect_(int item, int* out_x, int* out_y,
+    int* out_w, int* out_h)
+{
+    if (out_x) *out_x = SUMMON_ACT_DD_X;
+    if (out_y) *out_y = SUMMON_ACT_DD_Y + SUMMON_ACT_DD_H
+        + item * SUMMON_ACT_DD_ITEM_H;
+    if (out_w) *out_w = SUMMON_ACT_DD_W;
+    if (out_h) *out_h = SUMMON_ACT_DD_ITEM_H;
+}
+
+// 阈值数字框（收起=居中显示草稿值；编辑=左对齐+光标，与停止回合框同款）。
+static void DrawSummonNumBox_(H3LoadedPcx16* scr, H3Font* small_font,
+    int which, int current_value)
+{
+    int box_x = 0, box_y = 0, box_w = 0, box_h = 0;
+    SummonNumBoxRect_(which, &box_x, &box_y, &box_w, &box_h);
+    const bool editing = (s_summon_edit_which == which);
+    char num[16] = {};
+    if (editing)
+        _snprintf(num, sizeof(num), "%s", s_summon_edit_text);
+    else
+        _snprintf(num, sizeof(num), "%d", current_value);
+    Fill(scr, box_x, box_y, box_w, box_h,
+        editing ? 104 : 74, editing ? 70 : 52, editing ? 28 : 24);
+    scr->DrawFrame(box_x, box_y, box_w, box_h, (BYTE)210, (BYTE)170, (BYTE)72);
+    if (editing) {
+        const int text_x = SummonNumBoxTextX_(which);
+        DrawTxt(scr, small_font, num, text_x, box_y, box_w - 12, box_h,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        const bool caret_on =
+            ((GetTickCount() - s_summon_edit_caret_tick) / 500) % 2 == 0;
+        if (caret_on) {
+            char prefix[16] = {};
+            const int caret = s_summon_edit_caret;
+            const int cap = (int)sizeof(prefix) - 1;
+            if (caret > 0) memcpy(prefix, num, caret < cap ? caret : cap);
+            const INT32 prefix_w =
+                small_font ? small_font->GetMaxLineWidth(prefix) : 0;
+            Fill(scr, text_x + prefix_w, box_y + (box_h - 10) / 2, 2, 10,
+                210, 170, 72); // 金色竖线光标
+        }
+    } else {
+        DrawTxt(scr, small_font, num[0] ? num : "0",
+            box_x, box_y, box_w, box_h,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+    }
+}
+
+// 通用小下拉框（收起态）：深棕底金框 + 当前项文字 + 三角箭头。
+static void DrawSummonCombo_(H3LoadedPcx16* scr, H3Font* small_font,
+    int x, int y, int w, int h, const char* text, bool open)
+{
+    Fill(scr, x, y, w, h, open ? 104 : 74, open ? 70 : 52, open ? 28 : 24);
+    scr->DrawFrame(x, y, w, h, (BYTE)210, (BYTE)170, (BYTE)72);
+    DrawTxt(scr, small_font, text, x + 6, y, w - 20, h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    CellControl_DrawArrow(scr, x + w - 14, y + h / 2 - 2, !open);
+}
+
+static void DrawSummonPage_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    H3Font* small_font = GetSmallFont();
+    const SummonProfileFields& sf = s_p.draft_summon[s_p.selected_profile];
+
+    // 设置行：法术下拉 + 队数/血量阈值框。
+    DrawTxt(scr, small_font, T("panel.summon_spell_label"),
+        SUMMON_DD_LABEL_X, SUMMON_ROW1_Y, SUMMON_DD_LABEL_W, SUMMON_DD_H,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+    DrawSummonCombo_(scr, small_font, SUMMON_DD_X, SUMMON_ROW1_Y,
+        SUMMON_DD_W, SUMMON_DD_H,
+        (sf.spell_pick >= 0 && sf.spell_pick <= 4)
+            ? SummonSpellOptLabel_(sf.spell_pick) : "?",
+        s_summon_spell_dd_open);
+    DrawTxt(scr, small_font, T("panel.summon_count_label"),
+        SUMMON_CNT_LABEL_X, SUMMON_ROW1_Y, SUMMON_CNT_LABEL_W, SUMMON_DD_H,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
+    DrawSummonNumBox_(scr, small_font, SUMMON_EDIT_COUNT, sf.count_th);
+    DrawTxt(scr, small_font, T("panel.summon_hp_label"),
+        SUMMON_HP_LABEL_X, SUMMON_ROW1_Y, SUMMON_HP_LABEL_W, SUMMON_DD_H,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
+    DrawSummonNumBox_(scr, small_font, SUMMON_EDIT_HP, sf.hp_th);
+
+    // 说明行：时机与口径（灰白小字）。
+    DrawTxt(scr, small_font, T("panel.summon_note"),
+        GRID_FRAME_X, SUMMON_NOTE_Y, GRID_FRAME_W, SUMMON_NOTE_H,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+
+    // 召唤物行动卡：与部队卡同高，风格统一（暖色双层框）。
+    Fill(scr, SUMMON_CARD_X, SUMMON_CARD_Y, SUMMON_CARD_W, SUMMON_CARD_H,
+        60, 40, 22);
+    scr->DrawFrame(SUMMON_CARD_X, SUMMON_CARD_Y, SUMMON_CARD_W, SUMMON_CARD_H,
+        (BYTE)166, (BYTE)112, (BYTE)40);
+    scr->DrawFrame(SUMMON_CARD_X + 2, SUMMON_CARD_Y + 2,
+        SUMMON_CARD_W - 4, SUMMON_CARD_H - 4, (BYTE)96, (BYTE)64, (BYTE)26);
+    DrawTxt(scr, small_font, T("panel.summon_action_label"),
+        SUMMON_ACT_LABEL_X, SUMMON_ACT_DD_Y, SUMMON_ACT_LABEL_W,
+        SUMMON_ACT_DD_H,
+        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
+    DrawSummonCombo_(scr, small_font, SUMMON_ACT_DD_X, SUMMON_ACT_DD_Y,
+        SUMMON_ACT_DD_W, SUMMON_ACT_DD_H,
+        SummonActOptLabel_(SummonActOptFromAction_(sf.summon_rule.action)),
+        s_summon_act_dd_open);
+    // 「允许降级为防御」复选框：仅随机移动时显示（框在文字前）。
+    if (sf.summon_rule.action == AA_RANDOM_MOVE) {
+        DrawCheckbox_(scr, SUMMON_FB_X, SUMMON_FB_Y,
+            sf.summon_rule.allowDefendFallback != 0,
+            T("cell.allow_fallback"), SUMMON_FB_TEXT_W, 10);
+    }
+}
+
+// 展开的下拉列表（每项底色+边框，与保活/卡片下拉同主题）。
+static void DrawSummonDropdownLists_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    H3Font* small_font = GetSmallFont();
+    if (s_summon_spell_dd_open) {
+        const int current = s_p.draft_summon[s_p.selected_profile].spell_pick;
+        for (int i = 0; i <= 4; ++i) {
+            int ix = 0, iy = 0, iw = 0, ih = 0;
+            GetSummonSpellDdItemRect_(i, &ix, &iy, &iw, &ih);
+            BYTE bg_r, bg_g, bg_b, frame_r, frame_g, frame_b;
+            if (i == s_summon_spell_dd_hover) {
+                bg_r = 184; bg_g = 136; bg_b = 48;
+                frame_r = 246; frame_g = 214; frame_b = 116;
+            } else if (i == current) {
+                bg_r = 136; bg_g = 88; bg_b = 24;
+                frame_r = 232; frame_g = 184; frame_b = 76;
+            } else {
+                bg_r = 68; bg_g = 42; bg_b = 18;
+                frame_r = 166; frame_g = 112; frame_b = 40;
+            }
+            Fill(scr, ix, iy, iw, ih, bg_r, bg_g, bg_b);
+            scr->DrawFrame(ix, iy, iw, ih, frame_r, frame_g, frame_b);
+            DrawTxt(scr, small_font, SummonSpellOptLabel_(i),
+                ix + 6, iy, iw - 12, ih,
+                (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        }
+    }
+    if (s_summon_act_dd_open) {
+        AutoActionKind acts[4] = {};
+        const int n = H3AutoPolicy::GetAllowedSummonActions(acts);
+        const int current = s_p.draft_summon[s_p.selected_profile]
+            .summon_rule.action;
+        for (int i = 0; i < n; ++i) {
+            int ix = 0, iy = 0, iw = 0, ih = 0;
+            GetSummonActDdItemRect_(i, &ix, &iy, &iw, &ih);
+            BYTE bg_r, bg_g, bg_b, frame_r, frame_g, frame_b;
+            if (i == s_summon_act_dd_hover) {
+                bg_r = 184; bg_g = 136; bg_b = 48;
+                frame_r = 246; frame_g = 214; frame_b = 116;
+            } else if ((int)acts[i] == current) {
+                bg_r = 136; bg_g = 88; bg_b = 24;
+                frame_r = 232; frame_g = 184; frame_b = 76;
+            } else {
+                bg_r = 68; bg_g = 42; bg_b = 18;
+                frame_r = 166; frame_g = 112; frame_b = 40;
+            }
+            Fill(scr, ix, iy, iw, ih, bg_r, bg_g, bg_b);
+            scr->DrawFrame(ix, iy, iw, ih, frame_r, frame_g, frame_b);
+            const char* label = g_action_labels[acts[i]]
+                ? g_action_labels[acts[i]] : "?";
+            DrawTxt(scr, small_font, label,
+                ix + 6, iy, iw - 12, ih,
+                (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        }
+    }
+}
+
 static void DrawPanelToBuffer_()
 {
     if (!s_p.active) return;
@@ -779,9 +1015,10 @@ static void DrawPanelToBuffer_()
     const int first_item = s_p.scroll_row * COLS;
     int max_redraw_bottom = 0; // 记录最下方的重绘边界
 
-    // 保活策略行：全局常显（原方案页专属；表格上方与上横线之间）。
+    // 保活策略行：全局常显（两页共通：策略/停止/敌方法力都在行上）。
     DrawProtectStrategyRow_(scr);
 
+    if (s_p.active_page == PAGE_ARMY) {
     // 21 槽卡片表（三趟 + 滚动条 + 金框）。
     {
     // 第一趟：画所有格子本体
@@ -818,6 +1055,10 @@ static void DrawPanelToBuffer_()
             max_redraw_bottom = dropRc.bottom;
     }
     } // PAGE_ARMY
+    } else if (s_p.active_page == PAGE_SUMMON) {
+        // 召唤页：设置行 + 说明行 + 召唤物行动卡（无滚动条）。
+        DrawSummonPage_(scr);
+    }
 
     DrawPanelButtons_(scr);
 
@@ -857,6 +1098,7 @@ static void DrawPanelToBuffer_()
 
     // 保活策略展开列表（盖住表格上缘，画在最后）。
     DrawProtectDropdownList_(scr);
+    DrawSummonDropdownLists_(scr);
 
     // 模态层最后绘制，盖住整张设置面板。
     if (s_spell_pick_cell >= 0)

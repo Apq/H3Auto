@@ -15,6 +15,9 @@ enum AutoActionKind : uint8_t {
     AA_MELEE_ATTACK,
     AA_RANGED_ATTACK,
     AA_FIRST_AID,
+    // 召唤物共享规则专用（普通部队行动下拉不出现）：
+    AA_SCATTER,       // 散开：与己方其它部队分级拉开距离（≥2 格 → ≥1 格 → 原地防御）
+    AA_RANDOM_MOVE,   // 随机移动：可达格均匀随机
     AA_COUNT
 };
 
@@ -51,6 +54,16 @@ static constexpr int CREATURE_ARROW_TOWER = 0x95;
 static constexpr int MELEE_PAIR_CAPACITY = 10;
 static constexpr int MOVE_WAYPOINT_CAPACITY = 16;
 static constexpr int SPELL_SLOT_CAPACITY = 10;
+
+// ---- 召唤通道常量（保活策略 = 兵力不足时召唤）----
+static constexpr int SUMMON_ELEMENT_COUNT = 4;   // 固定顺序：气/水/火/土（与法术下拉一致）
+static constexpr int kSummonSpellIds[SUMMON_ELEMENT_COUNT] = {69, 68, 66, 67};   // 气/水/火/土
+static constexpr int kSummonCreatureIds[SUMMON_ELEMENT_COUNT] = {112, 115, 114, 113};
+// 自动停止第二条件（敌方法力停手）阈值：约「最多再放一次」低阶法术的量。
+static constexpr int kSummonStopEnemyMana = 6;
+// 战场六格坐标（15×11，索引 = y*15+x；实参语义与原版距离对拍见实施文档 §5）。
+static constexpr int BATTLEFIELD_COLS = 15;
+static constexpr int BATTLEFIELD_HEXES = 165;
 
 inline bool IsQuickSpellDigit(int digit)
 {
@@ -218,11 +231,15 @@ inline void BuildStableStackSlotRemap(const StableStackIdentity* previous,
     }
 }
 
-// 面板准入纯规则：数量大于 0；弹药车永不进入；投石车必须有弹道术。
+// 面板准入纯规则：数量大于 0；弹药车永不进入；投石车必须有弹道术；
+// 召唤物/克隆物（稳定身份 STACK_ID_SUMMON，由集成层按与
+// MakeStableStackIdentity 同口径判定）不进部队页——其行动只由召唤页的
+// 共享规则控制，配置出口唯一（§2.6）。
 inline bool IsConfigurablePanelStack(int creature_type, int number_alive,
-    bool has_ballistics)
+    bool has_ballistics, bool is_summon_clone)
 {
     if (number_alive <= 0) return false;
+    if (is_summon_clone) return false;
     if (creature_type == CREATURE_AMMO_CART) return false;
     if (creature_type == CREATURE_CATAPULT) return has_ballistics;
     return true;
@@ -342,6 +359,9 @@ inline bool ActionUsesTwoHex(AutoActionKind action)
 inline bool ActionShowsFallback(int creature_type, AutoActionKind action)
 {
     if (IsWarMachineType(creature_type)) return false;
+    // 召唤动作：随机移动可配「允许降级为防御」；散开的降级链固定终于防御，不显示。
+    if (action == AA_RANDOM_MOVE) return true;
+    if (action == AA_SCATTER) return false;
     return action != AA_MANUAL && action != AA_DEFEND && action != AA_WAIT;
 }
 
@@ -420,11 +440,14 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
 }
 
 // 保活策略（方案级）：整个方案的保活触发方式；默认 0=无。
+// PS_SUMMON_LOW_FORCE = 召唤通道：时机条件由 SummonShouldCast 判定，
+// 不进 ProtectShouldCast（复活通道专用）。
 enum ProtectStrategy : uint8_t {
     PS_NONE = 0,          // 无：不保活
     PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储，默认 2；0=只救全灭）
     PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
     PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
+    PS_SUMMON_LOW_FORCE,  // 兵力不足时召唤：存活队数 ≤ 阈值 且 血量合计 ≤ 阈值 → 召唤通道
     PS_COUNT
 };
 
@@ -500,6 +523,184 @@ inline bool AutoStopShouldYield(int threshold, int baseline_hp,
     return left >= 0 && left <= threshold;
 }
 
+// ---------------------------------------------------------------------------
+// 召唤通道（保活策略 = PS_SUMMON_LOW_FORCE）与召唤物行动的纯判定。
+// ---------------------------------------------------------------------------
+
+// 自动停止第二条件：敌方英雄法力耗尽前停手。
+// 无英雄/无魔法书不触发（无书英雄法力常为 0，不能开战即误停）。
+inline bool ShouldStopOnEnemyMana(int stop_flag, bool has_enemy_hero,
+    bool has_spellbook, int enemy_mana, int threshold)
+{
+    if (!stop_flag) return false;
+    if (!has_enemy_hero || !has_spellbook) return false;
+    if (enemy_mana < 0) return false;
+    return enemy_mana <= threshold;
+}
+
+// 召唤时机：己方存活队数（含召唤物、不含战争机器）≤ 阈值 且
+// 剩余血量合计（同口径）≤ 阈值；本回合未施法、已学、法力够。
+inline bool SummonShouldCast(int stack_count, int count_th, int hp_total,
+    int hp_th, int mana, int mana_cost, bool hero_casted, bool learned)
+{
+    if (hero_casted) return false;
+    if (!learned) return false;
+    if (mana_cost > 0 && mana < mana_cost) return false;
+    if (stack_count > count_th) return false;
+    return hp_total <= hp_th;
+}
+
+inline bool IsSummonedElemental(int creature_id)
+{
+    for (int i = 0; i < SUMMON_ELEMENT_COUNT; ++i)
+        if (creature_id == kSummonCreatureIds[i]) return true;
+    return false;
+}
+
+// 选召唤法术。amounts[i]/learned[i]：各元素本次召唤总量（调用方按等级×力量×生物算好）
+// 与是否已学；spell_pick：0=自动，1..4=固定元素；locked_index：自动模式本场锁定（-1 无）。
+// 返回元素下标 0..3（对应 kSummonSpellIds/kSummonCreatureIds），-1 = 不召。
+// 固定未学 → 不召；自动有锁定 → 用锁定；否则取总量最大（平手取靠前，稳定可测）。
+inline int PickSummonSpell(const int amounts[SUMMON_ELEMENT_COUNT],
+    const bool learned[SUMMON_ELEMENT_COUNT], int spell_pick, int locked_index)
+{
+    if (spell_pick >= 1 && spell_pick <= SUMMON_ELEMENT_COUNT) {
+        const int fixed = spell_pick - 1;
+        return learned[fixed] ? fixed : -1;
+    }
+    if (locked_index >= 0 && locked_index < SUMMON_ELEMENT_COUNT)
+        return locked_index;
+    int best = -1;
+    for (int i = 0; i < SUMMON_ELEMENT_COUNT; ++i) {
+        if (!learned[i]) continue;
+        if (best < 0 || amounts[i] > amounts[best]) best = i;
+    }
+    return best;
+}
+
+// 己方存活侧统计（调用方先过滤：只传存活槽、剔除战争机器）。
+inline int CountAliveSideStacks(const TargetCandidate* stacks, int count)
+{
+    int alive = 0;
+    for (int i = 0; i < count; ++i)
+        if (stacks[i].count_current > 0) ++alive;
+    return alive;
+}
+
+inline int SumSideRemainingHp(const TargetCandidate* stacks, int count)
+{
+    int64_t total = 0;
+    for (int i = 0; i < count; ++i) {
+        if (stacks[i].count_current <= 0) continue;
+        total += StackRemainingHp(stacks[i]);
+        if (total > 0x7FFFFFFF) return 0x7FFFFFFF;
+    }
+    return static_cast<int>(total);
+}
+
+// 战场六格距离（15×11，odd-r：奇数行右移半格；转立方坐标取三轴最大差）。
+// 与原版距离的对拍列入实施文档 §5 上机验证。
+inline int HexCoordDistance(int hex_a, int hex_b)
+{
+    if (hex_a < 0 || hex_b < 0
+        || hex_a >= BATTLEFIELD_HEXES || hex_b >= BATTLEFIELD_HEXES)
+        return 0x7FFFFFFF;
+    const int x1 = hex_a % BATTLEFIELD_COLS, y1 = hex_a / BATTLEFIELD_COLS;
+    const int x2 = hex_b % BATTLEFIELD_COLS, y2 = hex_b / BATTLEFIELD_COLS;
+    const int cx1 = x1 - ((y1 - (y1 & 1)) >> 1);
+    const int cx2 = x2 - ((y2 - (y2 & 1)) >> 1);
+    const int dx = cx2 - cx1;
+    const int dz = y2 - y1;
+    const int dy = -dx - dz;
+    int d = dx < 0 ? -dx : dx;
+    const int ay = dy < 0 ? -dy : dy;
+    const int az = dz < 0 ? -dz : dz;
+    if (ay > d) d = ay;
+    if (az > d) d = az;
+    return d;
+}
+
+// 召唤物移动目标格。candidates：可达格；own_positions：己方其它存活部队格
+// （不含自身，含战争机器）。返回目标格；-1 = 原地（不动/防御）。
+// - AA_SCATTER 分级满足：先「与所有己方部队距离 ≥2」，降「≥1」，两档均无则原地；
+//   当前格已满足该档则不移动；该档多格取离部队最远者（平手取候选序靠前者，稳定可测）。
+// - AA_RANDOM_MOVE：排除当前格后均匀随机（rng 由调用方传入）。
+inline int ChooseSummonMoveHex(AutoActionKind kind, const int* candidates,
+    int cand_count, int cur_hex, const int* own_positions, int own_count,
+    uint32_t rng)
+{
+    if (kind == AA_RANDOM_MOVE) {
+        int pool[BATTLEFIELD_HEXES] = {};
+        int n = 0;
+        for (int i = 0; i < cand_count && n < BATTLEFIELD_HEXES; ++i) {
+            const int hex = candidates[i];
+            if (hex >= 0 && hex < BATTLEFIELD_HEXES && hex != cur_hex)
+                pool[n++] = hex;
+        }
+        if (n <= 0) return -1;
+        return pool[rng % static_cast<uint32_t>(n)];
+    }
+    if (kind != AA_SCATTER) return -1;
+    auto min_dist = [&](int hex) -> int {
+        int m = 0x7FFFFFFF;
+        for (int i = 0; i < own_count; ++i) {
+            const int d = HexCoordDistance(hex, own_positions[i]);
+            if (d < m) m = d;
+        }
+        return m;
+    };
+    for (int tier = 2; tier >= 1; --tier) {
+        // 当前格已满足该档：不动（原地防御由调用方提交）。
+        if (min_dist(cur_hex) >= tier) return -1;
+        int best = -1, best_d = -1;
+        for (int i = 0; i < cand_count; ++i) {
+            const int hex = candidates[i];
+            if (hex < 0 || hex >= BATTLEFIELD_HEXES || hex == cur_hex) continue;
+            const int d = min_dist(hex);
+            if (d >= tier && d > best_d) {
+                best = hex;
+                best_d = d;
+            }
+        }
+        if (best >= 0) return best;
+    }
+    return -1; // 两档都做不到：原地防御
+}
+
+// 召唤物共享规则的行动集（专用，不套用普通部队）。
+inline int GetAllowedSummonActions(AutoActionKind out_actions[4])
+{
+    if (!out_actions) return 0;
+    out_actions[0] = AA_MANUAL;
+    out_actions[1] = AA_DEFEND;
+    out_actions[2] = AA_SCATTER;
+    out_actions[3] = AA_RANDOM_MOVE;
+    return 4;
+}
+
+// 召唤共享规则规范化：行动裁剪到 4 动作集；无目标/施法/保活；
+// 「允许降级为防御」仅随机移动保留。
+inline void NormalizeSummonRule(AutoStackRule* rule)
+{
+    if (!rule) return;
+    bool action_ok = false;
+    AutoActionKind allowed[4] = {};
+    const int n = GetAllowedSummonActions(allowed);
+    for (int i = 0; i < n; ++i)
+        if (allowed[i] == rule->action) action_ok = true;
+    if (!action_ok) rule->action = AA_MANUAL;
+    rule->target = DefaultTargetForAction(AA_MANUAL);
+    rule->allowDefendFallback =
+        (rule->action == AA_RANDOM_MOVE) && rule->allowDefendFallback;
+    rule->quickCastFirst = false;
+    rule->spellSlot = 1;
+    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
+        rule->spellSlots[i] = -1;
+    rule->spellSlotCount = 0;
+    rule->protectEnable = 0;
+    rule->protectCountBelow = 2;
+}
+
 // 返回候选下标；平分时保留先出现者，与原执行器行为一致。
 // random_value 由生产侧传入 rand()，测试侧可传固定值。
 inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
@@ -547,12 +748,14 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 }
 
 // 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profilesN.ini）。
-// 纯编解码：一行文本 "H3AP5 <21×部队表> <策略> <停止回合> <21×规则>"，
-// 规则按槽位排列，每条 60 个十进制整数（H3AP4 及更早一律拒绝）。
+// 纯编解码：一行文本 "H3AP6 <21×部队表> <策略> <停止回合> <4 召唤整数>
+// <21 条规则> <1 条召唤共享规则>"。规则按槽位排列，每条 60 个十进制整数
+// （H3AP5 及更早一律拒绝；旧档读档失败需重新配置）。
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
 // 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
-// 文本在部队表之后有 1 个策略、1 个自动停止回合（0..999）。
-// 存档格式：21*2 部队 + 1 策略 + 1 停止回合 + 21 条规则（每条 60 个整数）。
+// 文本在部队表之后有 1 个策略（0..4）、1 个自动停止回合（0..999）、
+// 4 个召唤整数（队数阈值/血量阈值/法术选择/敌方法力停止勾选）。
+// 存档格式：21*2 部队 + 1 策略 + 1 停止回合 + 4 召唤 + 22 条规则（每条 60 整数）。
 static constexpr int PROFILE_STORE_SLOTS = 21;
 // 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
 // （曾因手写 34 与实写 59 脱节导致越界写堆 = 保存后崩溃的根因）。
@@ -567,11 +770,34 @@ static constexpr int PROFILE_STORE_LEGACY_INTS = 3575;
 // H3AP1（6205 整数，无部队表）：格式已废弃，同样拒绝。
 static constexpr int PROFILE_STORE_ARMY_INTS =
     PROFILE_STORE_SLOTS * 2;
+// 召唤整数：队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) / 敌方法力停(0..1)。
+static constexpr int PROFILE_STORE_SUMMON_INTS = 4;
+// 召唤共享规则也是一条 60 整数规则（21 条部队规则之外的第 22 条）。
 static constexpr int PROFILE_STORE_INTS =
     PROFILE_STORE_ARMY_INTS
-    + 1 + 1
-    + PROFILE_STORE_SLOTS * PROFILE_STORE_RULE_FIELDS;
+    + 1 + 1 + PROFILE_STORE_SUMMON_INTS
+    + (PROFILE_STORE_SLOTS + 1) * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
+
+// 方案级召唤配置（H3AP6 起随方案存档；时机在策略整数里 = PS_SUMMON_LOW_FORCE）。
+struct SummonProfileFields {
+    int count_th;         // 队数阈值，默认 2，0..21（战争机器不计、召唤物计）
+    int hp_th;            // 血量阈值，默认 750，≥0（口径同自动停止）
+    int spell_pick;       // 法术选择：0=自动；1..SUMMON_ELEMENT_COUNT=固定元素
+    int stop_enemy_mana;  // 自动停止第二条件勾选（0/1）
+    AutoStackRule summon_rule; // 召唤物共享行动规则
+};
+
+inline SummonProfileFields MakeDefaultSummonFields()
+{
+    SummonProfileFields fields = {};
+    fields.count_th = 2;
+    fields.hp_th = 750;
+    fields.spell_pick = 0;
+    fields.stop_enemy_mana = 0;
+    fields.summon_rule = MakeDefaultRule(); // 默认手动：召唤物不自动行动
+    return fields;
+}
 
 // 读档四轮关联（存档部队 → 当前部队槽）：
 //   轮 1：槽位 + 生物类型 + 初始数量（三项全等，零误配）
@@ -717,12 +943,13 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP5 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+// Decode 只接受以 "H3AP6 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
 inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     const int army_counts[PROFILE_STORE_SLOTS],
     uint8_t strategy,
     const AutoStackRule rules[PROFILE_STORE_SLOTS],
     uint16_t stop_turns,
+    const SummonProfileFields& summon,
     char* buffer, int buffer_size)
 {
     if (!army_types || !army_counts || !rules
@@ -736,7 +963,7 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
         }
         return true;
     };
-    if (!append("H3AP5")) return -1;
+    if (!append("H3AP6")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
@@ -748,7 +975,20 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     if (turns < 0) turns = 0;
     if (turns > 999) turns = 999;
     ints[n++] = turns;
+    ints[n++] = summon.count_th;
+    ints[n++] = summon.hp_th;
+    ints[n++] = summon.spell_pick;
+    ints[n++] = summon.stop_enemy_mana;
     bool ok = true;
+    if (ok) {
+        __try {
+            EncodeRuleInts(summon.summon_rule, ints + n);
+        } __except (1) {
+            delete[] ints;
+            return -200000;
+        }
+        n += PROFILE_STORE_RULE_FIELDS;
+    }
     for (int s = 0; ok && s < PROFILE_STORE_SLOTS; ++s) {
         __try {
             EncodeRuleInts(rules[s], ints + n);
@@ -782,11 +1022,12 @@ inline bool DecodeProfileStoreText(const char* text,
     int army_counts[PROFILE_STORE_SLOTS],
     uint8_t* strategy,
     AutoStackRule rules[PROFILE_STORE_SLOTS],
-    uint16_t* stop_turns)
+    uint16_t* stop_turns,
+    SummonProfileFields* summon)
 {
     if (!text || !army_types || !army_counts || !strategy || !rules
-        || !stop_turns) return false;
-    const char* magic = "H3AP5";
+        || !stop_turns || !summon) return false;
+    const char* magic = "H3AP6";
     for (int i = 0; magic[i]; ++i)
         if (text[i] != magic[i]) return false;
     const char* p = text + 5;
@@ -809,13 +1050,14 @@ inline bool DecodeProfileStoreText(const char* text,
         ints[count++] = sign * v;
     }
     if (bad || count != PROFILE_STORE_INTS) {
-        // 含旧格式（H3AP2 6247 整数 / 3575/3580 交错坏档），一律拒绝。
+        // 含旧格式（H3AP5 1304 整数 / H3AP2 6247 / 3575/3580 交错坏档），一律拒绝。
         delete[] ints;
         return false;
     }
 
     uint8_t decoded_strategy = 0;
     uint16_t decoded_stop = 0;
+    SummonProfileFields decoded_summon = {};
     int decoded_army_types[PROFILE_STORE_SLOTS] = {};
     int decoded_army_counts[PROFILE_STORE_SLOTS] = {};
     AutoStackRule decoded[PROFILE_STORE_SLOTS] = {};
@@ -830,6 +1072,28 @@ inline bool DecodeProfileStoreText(const char* text,
     decoded_strategy = static_cast<uint8_t>(ints[n++]);
     if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
     decoded_stop = static_cast<uint16_t>(ints[n++]);
+    decoded_summon.count_th = ints[n++];
+    decoded_summon.hp_th = ints[n++];
+    decoded_summon.spell_pick = ints[n++];
+    decoded_summon.stop_enemy_mana = ints[n++];
+    if (decoded_summon.count_th < 0
+        || decoded_summon.count_th > PROFILE_STORE_SLOTS) {
+        delete[] ints; return false;
+    }
+    if (decoded_summon.hp_th < 0) { delete[] ints; return false; }
+    if (decoded_summon.spell_pick < 0
+        || decoded_summon.spell_pick > SUMMON_ELEMENT_COUNT) {
+        delete[] ints; return false;
+    }
+    if (decoded_summon.stop_enemy_mana < 0
+        || decoded_summon.stop_enemy_mana > 1) {
+        delete[] ints; return false;
+    }
+    if (!DecodeRuleInts(ints + n, &decoded_summon.summon_rule)) {
+        delete[] ints; return false;
+    }
+    NormalizeSummonRule(&decoded_summon.summon_rule);
+    n += PROFILE_STORE_RULE_FIELDS;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
         if (!DecodeRuleInts(ints + n, &decoded[s])) { delete[] ints; return false; }
         n += PROFILE_STORE_RULE_FIELDS;
@@ -842,6 +1106,7 @@ inline bool DecodeProfileStoreText(const char* text,
     }
     *strategy = decoded_strategy;
     *stop_turns = decoded_stop;
+    *summon = decoded_summon;
     return true;
 }
 
@@ -976,6 +1241,8 @@ using H3AutoPolicy::AutoTargetSide;
 using H3AutoPolicy::AutoTargetSelector;
 using H3AutoPolicy::AutoTargetRule;
 using H3AutoPolicy::AutoStackRule;
+using H3AutoPolicy::SummonProfileFields;
+using H3AutoPolicy::MakeDefaultSummonFields;
 using H3AutoPolicy::AA_MANUAL;
 using H3AutoPolicy::AA_DEFEND;
 using H3AutoPolicy::AA_WAIT;
@@ -983,6 +1250,8 @@ using H3AutoPolicy::AA_MOVE;
 using H3AutoPolicy::AA_MELEE_ATTACK;
 using H3AutoPolicy::AA_RANGED_ATTACK;
 using H3AutoPolicy::AA_FIRST_AID;
+using H3AutoPolicy::AA_SCATTER;
+using H3AutoPolicy::AA_RANDOM_MOVE;
 using H3AutoPolicy::AA_COUNT;
 using H3AutoPolicy::AT_NONE;
 using H3AutoPolicy::AT_STACK;
