@@ -457,6 +457,9 @@ static const char* PanelTipAt_(int px, int py)
             { STOP_LABEL_X, PROTECT_DD_Y - 4, STOP_LABEL_W + STOP_BOX_W + 8, 30, "tips.stop_row" },
             { STOP_MANA_X - 4, PROTECT_DD_Y - 4,
               STOP_MANA_HIT_W + 8, 30, "tips.stop_mana" },
+            { STOP_MANA_TH_BOX_X, PROTECT_DD_Y - 4,
+              STOP_MANA_TH_BOX_W + 2 + STOP_MANA_TAIL_W, 30,
+              "tips.stop_mana_th" },
             { OK_X, BTN_Y, BTN_W, BTN_H, "tips.btn_ok" },
             { CANCEL_X, BTN_Y, BTN_W, BTN_H, "tips.btn_cancel" },
         };
@@ -715,11 +718,54 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
             (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
     }
 
-    // 「敌方法力≤6 时停」复选框（保活行最右，两页共通；框在文字前）。
-    DrawCheckbox_(scr, STOP_MANA_X,
-        PROTECT_DD_Y + (PROTECT_DD_H - 10) / 2,
-        s_p.draft_summon[s_p.selected_profile].stop_enemy_mana != 0,
-        T("panel.stop_mana_label"), STOP_MANA_TEXT_W, 10);
+    // 「[✓] 敌方魔力≤[框] 时停」组合（保活行最右，两页共通；复选框在文字前，
+    // 阈值框与停止框同款录入；勾选才生效，默认 6，0..32767）。
+    {
+        const SummonProfileFields& sf =
+            s_p.draft_summon[s_p.selected_profile];
+        DrawCheckbox_(scr, STOP_MANA_X,
+            PROTECT_DD_Y + (PROTECT_DD_H - 10) / 2,
+            sf.stop_enemy_mana != 0,
+            T("panel.stop_mana_label"), STOP_MANA_TEXT_W, 10);
+        char mnum[8] = {};
+        if (s_mana_th_editing)
+            _snprintf(mnum, sizeof(mnum), "%s", s_mana_th_text);
+        else
+            _snprintf(mnum, sizeof(mnum), "%d", sf.stop_mana_th);
+        Fill(scr, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+            STOP_MANA_TH_BOX_W, PROTECT_DD_H,
+            s_mana_th_editing ? 104 : 74,
+            s_mana_th_editing ? 70 : 52,
+            s_mana_th_editing ? 28 : 24);
+        scr->DrawFrame(STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+            STOP_MANA_TH_BOX_W, PROTECT_DD_H, (BYTE)210, (BYTE)170, (BYTE)72);
+        if (s_mana_th_editing) {
+            const int text_x = STOP_MANA_TH_BOX_X + 8;
+            DrawTxt(scr, small_font, mnum, text_x, PROTECT_DD_Y,
+                STOP_MANA_TH_BOX_W - 12, PROTECT_DD_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            const bool mcaret_on =
+                ((GetTickCount() - s_mana_th_caret_tick) / 500) % 2 == 0;
+            if (mcaret_on) {
+                char mprefix[8] = {};
+                const int mcaret = s_mana_th_caret;
+                if (mcaret > 0)
+                    memcpy(mprefix, mnum, mcaret < 7 ? mcaret : 7);
+                const INT32 mprefix_w =
+                    small_font ? small_font->GetMaxLineWidth(mprefix) : 0;
+                Fill(scr, text_x + mprefix_w,
+                    PROTECT_DD_Y + (PROTECT_DD_H - 10) / 2, 2, 10,
+                    210, 170, 72);
+            }
+        } else {
+            DrawTxt(scr, small_font, mnum, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+                STOP_MANA_TH_BOX_W, PROTECT_DD_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+        }
+        DrawTxt(scr, small_font, T("panel.stop_mana_tail"),
+            STOP_MANA_TAIL_X, PROTECT_DD_Y, STOP_MANA_TAIL_W, PROTECT_DD_H,
+            (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+    }
 }
 
 // 展开列表：每项单独底色+边框（同卡片下拉暖色主题），

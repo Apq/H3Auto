@@ -59,8 +59,9 @@ static constexpr int SPELL_SLOT_CAPACITY = 10;
 static constexpr int SUMMON_ELEMENT_COUNT = 4;   // 固定顺序：气/水/火/土（与法术下拉一致）
 static constexpr int kSummonSpellIds[SUMMON_ELEMENT_COUNT] = {69, 68, 66, 67};   // 气/水/火/土
 static constexpr int kSummonCreatureIds[SUMMON_ELEMENT_COUNT] = {112, 115, 114, 113};
-// 自动停止第二条件（敌方法力停手）阈值：约「最多再放一次」低阶法术的量。
-static constexpr int kSummonStopEnemyMana = 6;
+// 自动停止第二条件（敌方魔力停手）默认阈值：约「最多再放一次」低阶法术的量。
+// 随方案可调（0..32767，H3AP7 起存档）。
+static constexpr int kSummonStopManaDefault = 6; // 敌方魔力阈值默认（0..32767 可调）
 // 战场六格坐标（15×11，索引 = y*15+x；实参语义与原版距离对拍见实施文档 §5）。
 static constexpr int BATTLEFIELD_COLS = 15;
 static constexpr int BATTLEFIELD_HEXES = 165;
@@ -754,7 +755,7 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
 // 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
 // 文本在部队表之后有 1 个策略（0..4）、1 个自动停止回合（0..999）、
-// 4 个召唤整数（队数阈值/血量阈值/法术选择/敌方法力停止勾选）。
+// 5 个召唤整数（队数阈值/血量阈值/法术选择/敌方魔力停止勾选/敌方魔力阈值）。
 // 存档格式：21*2 部队 + 1 策略 + 1 停止回合 + 4 召唤 + 22 条规则（每条 60 整数）。
 static constexpr int PROFILE_STORE_SLOTS = 21;
 // 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
@@ -770,8 +771,9 @@ static constexpr int PROFILE_STORE_LEGACY_INTS = 3575;
 // H3AP1（6205 整数，无部队表）：格式已废弃，同样拒绝。
 static constexpr int PROFILE_STORE_ARMY_INTS =
     PROFILE_STORE_SLOTS * 2;
-// 召唤整数：队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) / 敌方法力停(0..1)。
-static constexpr int PROFILE_STORE_SUMMON_INTS = 4;
+// 召唤整数：队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) /
+// 敌方魔力停勾选(0..1) / 敌方魔力阈值(0..32767，H3AP7 起)。
+static constexpr int PROFILE_STORE_SUMMON_INTS = 5;
 // 召唤共享规则也是一条 60 整数规则（21 条部队规则之外的第 22 条）。
 static constexpr int PROFILE_STORE_INTS =
     PROFILE_STORE_ARMY_INTS
@@ -785,6 +787,7 @@ struct SummonProfileFields {
     int hp_th;            // 血量阈值，默认 750，≥0（口径同自动停止）
     int spell_pick;       // 法术选择：0=自动；1..SUMMON_ELEMENT_COUNT=固定元素
     int stop_enemy_mana;  // 自动停止第二条件勾选（0/1）
+    int stop_mana_th;     // 敌方魔力阈值，默认 6，0..32767（勾选时生效）
     AutoStackRule summon_rule; // 召唤物共享行动规则
 };
 
@@ -794,8 +797,10 @@ inline SummonProfileFields MakeDefaultSummonFields()
     fields.count_th = 2;
     fields.hp_th = 750;
     fields.spell_pick = 0;
-    fields.stop_enemy_mana = 0;
-    fields.summon_rule = MakeDefaultRule(); // 默认手动：召唤物不自动行动
+    fields.stop_enemy_mana = 1; // 默认勾选：敌方魔力≤阈值即停（阈值默认 6）
+    fields.stop_mana_th = kSummonStopManaDefault;
+    fields.summon_rule = MakeDefaultRule();
+    fields.summon_rule.action = AA_DEFEND; // 召唤物默认防御（可改手动/散开/随机）
     return fields;
 }
 
@@ -943,7 +948,8 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP6 " 开头且整数个数恰好为 PROFILE_STORE_INTS 的文本。
+// Decode 只接受以 "H3AP7 "（新）或 "H3AP6 "（旧，阈值字段缺省 6）开头
+// 且整数个数恰好匹配的文本。
 inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     const int army_counts[PROFILE_STORE_SLOTS],
     uint8_t strategy,
@@ -963,7 +969,7 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
         }
         return true;
     };
-    if (!append("H3AP6")) return -1;
+    if (!append("H3AP7")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
@@ -978,7 +984,11 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     ints[n++] = summon.count_th;
     ints[n++] = summon.hp_th;
     ints[n++] = summon.spell_pick;
-    ints[n++] = summon.stop_enemy_mana;
+    ints[n++] = summon.stop_enemy_mana ? 1 : 0;
+    int mana_th = summon.stop_mana_th;
+    if (mana_th < 0) mana_th = 0;
+    if (mana_th > 32767) mana_th = 32767;
+    ints[n++] = mana_th;
     bool ok = true;
     if (ok) {
         __try {
@@ -1027,9 +1037,23 @@ inline bool DecodeProfileStoreText(const char* text,
 {
     if (!text || !army_types || !army_counts || !strategy || !rules
         || !stop_turns || !summon) return false;
-    const char* magic = "H3AP6";
-    for (int i = 0; magic[i]; ++i)
-        if (text[i] != magic[i]) return false;
+    // 双格式：H3AP7（PROFILE_STORE_INTS，含敌方魔力阈值）；
+    // H3AP6（少 1 个整数，阈值字段缺省 kSummonStopManaDefault）。
+    const char* magic_v7 = "H3AP7";
+    const char* magic_v6 = "H3AP6";
+    bool is_v6 = false;
+    if (text[0] == magic_v7[0] && text[1] == magic_v7[1]
+        && text[2] == magic_v7[2] && text[3] == magic_v7[3]
+        && text[4] == magic_v7[4]) {
+        is_v6 = false;
+    } else if (text[0] == magic_v6[0] && text[1] == magic_v6[1]
+        && text[2] == magic_v6[2] && text[3] == magic_v6[3]
+        && text[4] == magic_v6[4]) {
+        is_v6 = true;
+    } else {
+        return false;
+    }
+    const int expected = is_v6 ? PROFILE_STORE_INTS - 1 : PROFILE_STORE_INTS;
     const char* p = text + 5;
 
     int* ints = new int[PROFILE_STORE_INTS];
@@ -1038,7 +1062,7 @@ inline bool DecodeProfileStoreText(const char* text,
     while (*p && !bad) {
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
         if (!*p) break;
-        if (count >= PROFILE_STORE_INTS) { bad = true; break; }
+        if (count >= expected) { bad = true; break; }
         int sign = 1;
         if (*p == '-') { sign = -1; ++p; }
         if (*p < '0' || *p > '9') { bad = true; break; }
@@ -1049,8 +1073,9 @@ inline bool DecodeProfileStoreText(const char* text,
         }
         ints[count++] = sign * v;
     }
-    if (bad || count != PROFILE_STORE_INTS) {
-        // 含旧格式（H3AP5 1304 整数 / H3AP2 6247 / 3575/3580 交错坏档），一律拒绝。
+    if (bad || count != expected) {
+        // 含更旧格式（H3AP5 1304 整数 / H3AP2 6247 / 3575/3580 交错坏档），
+        // 一律拒绝。
         delete[] ints;
         return false;
     }
@@ -1076,6 +1101,9 @@ inline bool DecodeProfileStoreText(const char* text,
     decoded_summon.hp_th = ints[n++];
     decoded_summon.spell_pick = ints[n++];
     decoded_summon.stop_enemy_mana = ints[n++];
+    // H3AP6 无阈值整数：缺省默认（原固定常量语义）；H3AP7 读入并校验。
+    decoded_summon.stop_mana_th = is_v6
+        ? kSummonStopManaDefault : ints[n++];
     if (decoded_summon.count_th < 0
         || decoded_summon.count_th > PROFILE_STORE_SLOTS) {
         delete[] ints; return false;
@@ -1087,6 +1115,10 @@ inline bool DecodeProfileStoreText(const char* text,
     }
     if (decoded_summon.stop_enemy_mana < 0
         || decoded_summon.stop_enemy_mana > 1) {
+        delete[] ints; return false;
+    }
+    if (decoded_summon.stop_mana_th < 0
+        || decoded_summon.stop_mana_th > 32767) {
         delete[] ints; return false;
     }
     if (!DecodeRuleInts(ints + n, &decoded_summon.summon_rule)) {

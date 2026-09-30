@@ -92,12 +92,20 @@ static const int PROTECT_DD_ITEM_H   = 18;
 
 // 保活行最右侧：自动停止回合数。点击后用数字键录入（可编辑文本框：
 // 预填当前值、光标可左右移动、退格删除；见 s_stop_turns_* 状态）。
-// 其右还有「敌方法力≤6 时停」复选框，停止组整体左移让位。
-static const int STOP_MANA_CHECK_W = 12;   // 复选框边长（框在文字前）
-static const int STOP_MANA_TEXT_W  = 124;  // 「敌方法力≤6 时停」
-static const int STOP_MANA_X       = GRID_FRAME_X + GRID_FRAME_W
-    - STOP_MANA_TEXT_W - 4 - STOP_MANA_CHECK_W;
+// 其右是「[✓] 敌方魔力≤ [框] 时停」组合（复选框=启用，框=阈值 0..32767
+// 默认 6，见 s_mana_th_* 状态），停止组整体左移让位。
+static const int STOP_MANA_CHECK_W = 12;    // 复选框边长（框在文字前）
+static const int STOP_MANA_TEXT_W  = 72;    // 「敌方魔力≤」（5 字符）
 static const int STOP_MANA_HIT_W   = STOP_MANA_CHECK_W + 4 + STOP_MANA_TEXT_W;
+static const int STOP_MANA_TH_BOX_W = 36;   // 魔力阈值数字框
+static const int STOP_MANA_TAIL_W  = 30;    // 「时停」
+static const int STOP_MANA_X       = GRID_FRAME_X + GRID_FRAME_W
+    - STOP_MANA_TAIL_W - STOP_MANA_TH_BOX_W - 2 - STOP_MANA_TEXT_W
+    - 4 - STOP_MANA_CHECK_W;
+static const int STOP_MANA_TH_BOX_X = STOP_MANA_X + STOP_MANA_HIT_W;
+static const int STOP_MANA_TAIL_X   = STOP_MANA_TH_BOX_X
+    + STOP_MANA_TH_BOX_W + 2;
+static const int STOP_MANA_TH_MAX_DIGITS = 5; // 0..32767
 static const int STOP_BOX_W = 52;
 static const int STOP_BOX_X = STOP_MANA_X - 10 - STOP_BOX_W;
 static const int STOP_LABEL_W = 42;

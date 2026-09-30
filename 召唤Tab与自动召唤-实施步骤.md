@@ -184,3 +184,9 @@ uint8_t g_stop_enemy_mana[5];    // 敌方法力停止勾选（0/1，默认 0）
 - [x] 步骤 5（文案与文档）：帮助模态加第 9 行 `help.line_summon` 并改 `help.line3`（模态 412→440，行 A 公式 8→9 行），line_summon/line3 双侧（kUiTextsDefaults + zh-CN.ini）同步；`使用说明.txt` 保活第 5 策略 + 新「七、召唤」章节 + 自动停止补敌方法力条件（后续章节顺延编号至十四）；README 加「自动召唤」段；`设计文档.md`：§3.1.1 策略表加第 5 项、§3.1.2 加第二条件、新增 §3.7 召唤通道、§4.1 枚举 AA_SCATTER=7/AA_RANDOM_MOVE=8、§4.3 g_summon[5]、§4.4 动态部队补绑口径、§8.6 存档 H3AP6（1368 整数）与帮助行、§8.7 五项下拉 + 敌方法力复选框、新增 §8.8 召唤页、§10.2 散开/随机移动提交、§10.4 分派与 TryAutoStop_ 顺序、§11.9 上机对拍项。
 - [x] 步骤 6（回归）：MSBuild `-t:Rebuild` Release Win32 全量 0 error（642 函数全编译）；PolicyCoreTests 221 项全过；T() 键静态三方核对（modules 引用 76 键 / kUiTextsDefaults / lang/zh-CN.ini）无缺失；`[actions]` 7=散开/8=随机移动 与 DEFAULT_ACTION_LABELS 双侧齐备。设计文档/使用说明/README/§6 记录同步完成（本文件含 §2 与代码差异勘误）。剩余：上机 §5 清单（法力消耗/召唤量公式/target hex 语义/锁定兜底/敌方法力读取对拍）。
 - [ ] 上机验证（§5 清单逐项）：
+
+## 勘误（后续升级记录）
+
+- **敌方魔力阈值可调 + 默认勾选（升级 §0 第二条件）**：「敌方法力≤6 时停」升级为「[✓] 敌方魔力≤[输入框] 时停」——复选框保留为启用开关（**默认勾上**），固定常量 6 改为数字框（默认 6，范围 0..32767，随方案存档）。存档格式 H3AP6→H3AP7（召唤整数 4→5 个，共 1369 个整数）；兼容读旧 H3AP6 档（阈值缺省 6，勾选态按档内值）。§0 中「阈值先取常量 6，要做成数字框后续再升级」已完成；「默认不勾」已改为「默认勾选」。
+- **g_profiles 驻留默认（修复）**：原 `g_profiles[5][21] = {}` 全零与 `MakeDefaultRule()` 默认不一致（剩≤ 显示 0 并随勾号固化）；改为同 TU 静态初始化器 `DefaultRulesInit_` 回填默认规则。
+- **召唤物默认行动改防御**：`MakeDefaultSummonFields()` 的 `summon_rule.action` 由默认手动（AA_MANUAL）改为默认防御（AA_DEFEND，在 `GetAllowedSummonActions` 允许集内，`NormalizeSummonRule` 不裁）；存档内行动按档内值还原。

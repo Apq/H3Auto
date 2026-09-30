@@ -16,6 +16,24 @@ int g_active_profile = 0;
 // 当前生效方案（运行时视图 = g_profiles[g_active_profile]）
 AutoStackRule g_active_rules[21] = {};
 
+// 上面的 = {} 是全零而非 MakeDefaultRule_() 默认（剩≤阈值 2 等）：
+// 启动后、首次 ClearConfirmedProfiles / 存读档之前打开面板，「剩≤」
+// 会显示 0 且点勾号后固化。同 TU 内定义顺序保证本初始化器在两个数组
+// 之后执行（进入任何钩子前），回填与 ClearConfirmedProfiles 同款默认。
+namespace {
+struct DefaultRulesInit_ {
+    DefaultRulesInit_()
+    {
+        const AutoStackRule def = MakeDefaultRule_();
+        for (int p = 0; p < 5; ++p)
+            for (int s = 0; s < 21; ++s)
+                g_profiles[p][s] = def;
+        for (int s = 0; s < 21; ++s)
+            g_active_rules[s] = def;
+    }
+} g_default_rules_init_;
+}
+
 // 上次勾号生效的槽位（0..4），user.ini [General] LastProfile 持久化；进面板自动选中，
 // 不自动读档。跨战斗保留。
 int g_last_profile = 0;
@@ -27,9 +45,10 @@ uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS }; // 0=关闭，0..999
 
-// 召唤通道配置（方案级，H3AP6 起随方案存档）：时机在 g_protect_strategy，
-// 阈值/法术选择/召唤物共享规则在此；stop_enemy_mana 是自动停止第二条件
-// （敌方法力 ≤ kSummonStopEnemyMana 时整场切回手动，与 g_stop_turns OR 组合）。
+// 召唤通道配置（方案级，H3AP7 起随方案存档）：时机在 g_protect_strategy，
+// 阈值/法术选择/召唤物共享规则在此；stop_enemy_mana+stop_mana_th 是自动停止
+// 第二条件（勾选后敌方英雄魔力 ≤ 阈值（默认 6，0..32767）时整场切回手动，
+// 与 g_stop_turns OR 组合）。
 SummonProfileFields g_summon[5] = {
     H3AutoPolicy::MakeDefaultSummonFields(),
     H3AutoPolicy::MakeDefaultSummonFields(),
@@ -426,10 +445,17 @@ static bool LoadProfileStore_(int army_types[21], int army_counts[21],
     const int truncated = fgetc(fp) != EOF;
     fclose(fp);
     bool ok = false;
+    bool legacy_v6 = false;
     if (n > 0 && !truncated) {
         text[n] = 0;
+        // 兼容留痕：H3AP6 无敌方魔力阈值整数，读入时缺省 6（PolicyCore 侧）。
+        legacy_v6 = n >= 5 && text[0] == 'H' && text[1] == '3' && text[2] == 'A'
+            && text[3] == 'P' && text[4] == '6';
         ok = H3AutoPolicy::DecodeProfileStoreText(text, army_types,
             army_counts, strategy, out_rules, stop_turns, summon);
+        if (ok && legacy_v6)
+            LogInfo("[Profile] 读档兼容旧格式 H3AP6：敌方魔力阈值缺省 6（slot=%d）",
+                slot + 1);
     }
     delete[] text;
     return ok;

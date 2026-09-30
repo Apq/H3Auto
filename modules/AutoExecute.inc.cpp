@@ -1128,11 +1128,14 @@ static void TryAutoStop_(_BattleMgr_* mgr)
     if (profile < 0 || profile >= 5) return;
     const int threshold = g_stop_turns[profile];
 
-    // —— 第二停止条件：敌方英雄法力 ≤ 阈值（常量 6）——
+    // —— 第二停止条件：敌方英雄魔力 ≤ 阈值（方案级，默认 6，0..32767）——
     // 勾选 stop_enemy_mana 且敌方有英雄、有魔法书才判；与停止回合数
-    // OR 组合，任一触发即切手动。无书英雄法力常为 0，不判书会开战即误停。
+    // OR 组合，任一触发即切手动。无书英雄魔力常为 0，不判书会开战即误停。
     // 每次控制权交还玩家都判（与停止回合数同评估点，不受回合取样约束）。
     if (g_summon[profile].stop_enemy_mana) {
+        int mana_th = g_summon[profile].stop_mana_th;
+        if (mana_th < 0) mana_th = 0;
+        if (mana_th > 32767) mana_th = 32767;
         const int side = ResolveHumanSide_(mgr);
         if (side >= 0 && side <= 1 && mgr->hero[1 - side]) {
             bool has_book = false;
@@ -1143,14 +1146,14 @@ static void TryAutoStop_(_BattleMgr_* mgr)
                 has_book = false;
             }
             const int enemy_mana = GetHeroMana_(mgr, 1 - side);
-            LogDebug("[AutoStop] enemy mana check book=%d mana=%d",
-                has_book ? 1 : 0, enemy_mana);
+            LogDebug("[AutoStop] enemy mana check book=%d mana=%d th=%d",
+                has_book ? 1 : 0, enemy_mana, mana_th);
             if (H3AutoPolicy::ShouldStopOnEnemyMana(1, true, has_book,
-                    enemy_mana, H3AutoPolicy::kSummonStopEnemyMana)) {
+                    enemy_mana, mana_th)) {
                 g_control = CM_MANUAL; // 与停止回合数同款：切回手动
                 ClearOneShotManual_();
-                LogInfo("[AutoStop] enemy mana low: 敌方法力 %d ≤ %d，切回手动",
-                    enemy_mana, H3AutoPolicy::kSummonStopEnemyMana);
+                LogInfo("[AutoStop] enemy mana low: 敌方魔力 %d ≤ %d，切回手动",
+                    enemy_mana, mana_th);
                 RefreshControlStatusHint_();
                 return;
             }
@@ -1436,6 +1439,8 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
             || fields.spell_pick > H3AutoPolicy::SUMMON_ELEMENT_COUNT)
             fields.spell_pick = 0;
         fields.stop_enemy_mana = fields.stop_enemy_mana ? 1 : 0;
+        if (fields.stop_mana_th < 0) fields.stop_mana_th = 0;
+        if (fields.stop_mana_th > 32767) fields.stop_mana_th = 32767;
         H3AutoPolicy::NormalizeSummonRule(&fields.summon_rule);
         g_summon[p] = fields;
     }
@@ -1460,6 +1465,17 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     }
     LogInfo("[Auto] 5 profiles committed; active profile=%d actions=%d spells=%d",
         g_active_profile + 1, action_rules, spell_rules);
+    // 生效方案召唤/停止参数留痕（测试核对：默认勾选+阈值 6+召唤物默认防御）。
+    {
+        const SummonProfileFields& sf = g_summon[g_active_profile];
+        LogInfo("[Auto] active cfg: strategy=%d stop_turns=%d "
+            "mana_stop=%d mana_th=%d summon(spell=%d count<= %d hp<= %d act=%d)",
+            (int)g_protect_strategy[g_active_profile],
+            (int)g_stop_turns[g_active_profile],
+            (int)sf.stop_enemy_mana, sf.stop_mana_th,
+            (int)sf.spell_pick, sf.count_th, sf.hp_th,
+            (int)sf.summon_rule.action);
+    }
     // 提交后立即绑定本场部队身份；后续执行依赖跟踪校验。
     BindStackTrackingFromBattle_();
 }

@@ -580,10 +580,14 @@ void TestProfileStoreRoundtrip()
     summon.hp_th = 900;
     summon.spell_pick = 2;
     summon.stop_enemy_mana = 1;
+    summon.stop_mana_th = 258;
     summon.summon_rule.action = AA_SCATTER;
     summon.summon_rule.allowDefendFallback = true; // 散开须清掉
 
-    Check(PROFILE_STORE_INTS == 1368, "h3ap6 profile store has 1368 ints");
+    Check(PROFILE_STORE_INTS == 1369, "h3ap7 profile store has 1369 ints");
+    Check(summon.stop_mana_th == 258
+        && MakeDefaultSummonFields().stop_mana_th == 6,
+        "summon mana threshold default 6");
 
     char text[32 * 1024] = {};
     const int written = EncodeProfileStoreText(army_types, army_counts,
@@ -623,7 +627,8 @@ void TestProfileStoreRoundtrip()
     Check(out_rules[0].action == AA_MANUAL, "default slot stays manual");
     Check(out_stop == stop_turns, "stop turns roundtrip");
     Check(out_summon.count_th == 3 && out_summon.hp_th == 900
-        && out_summon.spell_pick == 2 && out_summon.stop_enemy_mana == 1,
+        && out_summon.spell_pick == 2 && out_summon.stop_enemy_mana == 1
+        && out_summon.stop_mana_th == 258,
         "summon fields roundtrip");
     Check(out_summon.summon_rule.action == AA_SCATTER,
         "summon rule action roundtrip");
@@ -647,6 +652,36 @@ void TestProfileStoreRoundtrip()
             out_rules, &out_stop, &out_summon),
         "h3ap4 store rejected");
     text[4] = '6';
+    // H3AP6 旧档兼容读：删去第 49 个整数（stop_mana_th）+ 头改 v6，
+    // 其余原样 → 阈值应缺省为 6（原固定常量语义），其余字段保留。
+    {
+        const char* src = text + 5;
+        static char v6text[32 * 1024] = "H3AP6";
+        int vlen = 5, skipped = 0, seen = 0;
+        while (*src) {
+            while (*src == ' ') ++src;
+            if (!*src) break;
+            const char* tok = src;
+            while (*src && *src != ' ') ++src;
+            ++seen; // 1-based 序号；49 = 42 部队 + 策略 + 停止 + 4 召唤之后
+            if (seen != 42 + 1 + 1 + 4 + 1) {
+                v6text[vlen++] = ' ';
+                for (const char* q = tok; q < src; ++q) v6text[vlen++] = *q;
+            } else ++skipped;
+        }
+        v6text[vlen] = 0;
+        Check(skipped == 1, "h3ap6 compat text drops one int");
+        Check(DecodeProfileStoreText(v6text, out_types, out_counts,
+                &out_strategy, out_rules, &out_stop, &out_summon),
+            "h3ap6 legacy store still decodes");
+        Check(out_summon.stop_mana_th == 6 && out_summon.count_th == 3
+            && out_summon.stop_enemy_mana == 1 && out_stop == 25,
+            "h3ap6 legacy mana threshold defaults to 6");
+        // H3AP6 头 + 新整数数（1369）不匹配 → 拒绝（v6 只认 1368）。
+        Check(!DecodeProfileStoreText(text, out_types, out_counts,
+                &out_strategy, out_rules, &out_stop, &out_summon),
+            "h3ap6 magic with v7 int count rejected");
+    }
     text[0] = 'X';
     Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
             out_rules, &out_stop, &out_summon),
@@ -842,7 +877,8 @@ void TestSummonRuleNormalization()
 
     const SummonProfileFields def = MakeDefaultSummonFields();
     Check(def.count_th == 2 && def.hp_th == 750 && def.spell_pick == 0
-        && def.stop_enemy_mana == 0 && def.summon_rule.action == AA_MANUAL,
+        && def.stop_enemy_mana == 1 && def.stop_mana_th == 6
+        && def.summon_rule.action == AA_DEFEND,
         "default summon fields");
 
     // 普通规则 NormalizeRule 仍会把召唤动作裁掉（双保险）。

@@ -73,6 +73,11 @@ static bool s_stop_turns_editing = false; // 正在录入当前方案的停止�
 static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
 static int  s_stop_turns_caret = 0;        // 插入位置（0..文本长度）
 static DWORD s_stop_turns_caret_tick = 0;  // 光标闪烁基准（按键后重置，输入即可见）
+// 「敌方魔力≤[框] 时停」阈值录入（与停止回合同款；0..32767，默认 6）。
+static bool s_mana_th_editing = false;
+static char s_mana_th_text[8] = {};        // 最多 5 位 + 结束符
+static int  s_mana_th_caret = 0;
+static DWORD s_mana_th_caret_tick = 0;
 static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到 999
 static char s_status_text[512] = {};
 static DWORD s_status_until = 0;
@@ -632,6 +637,29 @@ static void CancelStopTurnsEdit_()
     s_stop_turns_caret = 0;
 }
 
+// 敌方魔力阈值录入提交：空=0（与停止回合/「剩≤」同款下限语义），
+// 溢出截到 32767；写回当前方案召唤草稿。
+static void CommitManaThEdit_()
+{
+    int value = 0;
+    for (int i = 0; s_mana_th_text[i]; ++i)
+        value = value * 10 + (s_mana_th_text[i] - '0');
+    if (value > 32767) value = 32767;
+    s_p.draft_summon[s_p.selected_profile].stop_mana_th = value;
+    s_mana_th_editing = false;
+    s_mana_th_text[0] = 0;
+    s_mana_th_caret = 0;
+    LogInfo("[Panel] 敌方魔力阈值=%d (方案%d)", value,
+        s_p.selected_profile + 1);
+}
+
+static void CancelManaThEdit_()
+{
+    s_mana_th_editing = false;
+    s_mana_th_text[0] = 0;
+    s_mana_th_caret = 0;
+}
+
 // ===== 召唤页（PAGE_SUMMON）控件状态 =====
 // 两个下拉（法术/召唤物行动）悬停高亮；法术下拉选项 0..4（自动+四系）。
 static bool s_summon_spell_dd_open = false;
@@ -1029,6 +1057,7 @@ static void LoadProfilesFromDisk_()
         s_p.draft_stop_turns[s_p.selected_profile] = stop_turns;
         s_p.draft_summon[s_p.selected_profile] = summon;
         s_stop_turns_editing = false;
+        CancelManaThEdit_();        // 草稿整体被替换：录入作废
         CancelSummonNumEdit_();    // 草稿整体被替换：录入作废
         CloseSummonDropdowns_();
         PanelCancelAllProtectCountEdits_();
@@ -1060,6 +1089,7 @@ static void SwitchPanelPage_(int page)
 {
     if (page < 0 || page >= PAGE_COUNT || page == s_p.active_page) return;
     if (s_stop_turns_editing) CommitStopTurnsEdit_();
+    if (s_mana_th_editing) CommitManaThEdit_();
     CommitSummonNumEdit_();        // 召唤页阈值录入跨页收尾
     CloseSummonDropdowns_();
     s_protect_dd_open = false;
@@ -1082,6 +1112,7 @@ static void SelectProfile_(int profile)
         return;
     SaveCurrentCellsToDraft_();
     if (s_stop_turns_editing) CommitStopTurnsEdit_();
+    if (s_mana_th_editing) CommitManaThEdit_(); // 魔力阈值属于旧编号
     CommitSummonNumEdit_();        // 召唤阈值属于旧编号：切换前提交
     CloseSummonDropdowns_();
     s_p.selected_profile = profile;
@@ -1140,6 +1171,7 @@ void OpenSettingsPanel_()
     memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
     memcpy(s_p.draft_summon, g_summon, sizeof(s_p.draft_summon));
     s_stop_turns_editing = false;
+    CancelManaThEdit_();
     for (int i = 0; i < CELL_COUNT; ++i)
         CellControl_Init(&s_p.cells[i]);
 
@@ -1246,6 +1278,7 @@ void CloseSettingsPanel()
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
     if (s_stop_turns_editing) CancelStopTurnsEdit_();
+    if (s_mana_th_editing) CancelManaThEdit_();
     CancelSummonNumEdit_();
     CloseSummonDropdowns_();
     PanelCancelAllProtectCountEdits_();
@@ -1583,6 +1616,42 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
+    // 敌方魔力阈值录入中：与停止回合同款（点外提交、点内按光标定位）。
+    if (s_mana_th_editing && (raw_command == 8 || raw_command == 16)) {
+        if (!PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+                STOP_MANA_TH_BOX_W, PROTECT_DD_H) && raw_command == 16) {
+            CommitManaThEdit_();
+            DrawPanelToBuffer_();
+        } else if (raw_command == 8
+            && PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+                STOP_MANA_TH_BOX_W, PROTECT_DD_H)) {
+            H3Font* fnt = GetSmallFont();
+            const int text_x = STOP_MANA_TH_BOX_X + 8; // 与绘制端一致
+            const int len = (int)strlen(s_mana_th_text);
+            int best = len, best_dist = 0x7FFFFFFF;
+            for (int i = 0; i <= len; ++i) {
+                char prefix[8] = {};
+                if (i > 0) memcpy(prefix, s_mana_th_text, i);
+                const int bx = text_x
+                    + (fnt ? fnt->GetMaxLineWidth(prefix) : 0);
+                int dist = px - bx;
+                if (dist < 0) dist = -dist;
+                if (dist < best_dist) { best_dist = dist; best = i; }
+            }
+            if (best != s_mana_th_caret) {
+                s_mana_th_caret = best;
+                s_mana_th_caret_tick = GetTickCount();
+                DrawPanelToBuffer_();
+            }
+        }
+        if (raw_command == 16 && PanelAnyProtectCountEditing_()
+            && !s_cnt_lb_in_box) {
+            PanelCommitAllProtectCountEdits_();
+            DrawPanelToBuffer_();
+        }
+        return;
+    }
+
     // 召唤页阈值录入中：与停止回合同款（点外提交、点内按光标定位）。
     if (s_summon_edit_which != SUMMON_EDIT_NONE
         && (raw_command == 8 || raw_command == 16)) {
@@ -1820,13 +1889,34 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             return;
         }
 
-        // 「敌方法力≤6 时停」复选框（保活行最右，两页共通；框在文字前）。
+        // 「敌方魔力≤[框] 时停」阈值框：与停止框同款进入编辑
+        // （预填当前值、光标在末尾；已在编辑态点框内不重置）。
+        if (PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
+                STOP_MANA_TH_BOX_W, PROTECT_DD_H)) {
+            if (!s_mana_th_editing) {
+                s_mana_th_editing = true;
+                const int cur =
+                    s_p.draft_summon[s_p.selected_profile].stop_mana_th;
+                s_mana_th_text[0] = 0;
+                if (cur > 0)
+                    _snprintf(s_mana_th_text, sizeof(s_mana_th_text),
+                        "%d", cur);
+                s_mana_th_caret = (int)strlen(s_mana_th_text);
+                s_mana_th_caret_tick = GetTickCount();
+                DrawPanelToBuffer_();
+            }
+            return;
+        }
+
+        // 「[✓] 敌方魔力≤N 时停」复选框（命中=框+「敌方魔力≤」文字；
+        // 点阈值框是录入，不切勾选）。
         if (PointInRect_(px, py, STOP_MANA_X, PROTECT_DD_Y,
                 STOP_MANA_HIT_W, PROTECT_DD_H)) {
             SummonProfileFields& sf =
                 s_p.draft_summon[s_p.selected_profile];
             sf.stop_enemy_mana = sf.stop_enemy_mana ? 0 : 1;
-            LogInfo("[Panel] 敌方法力停止=%d (方案%d)", sf.stop_enemy_mana,
+            LogInfo("[Panel] 敌方魔力停止=%d 阈值=%d (方案%d)",
+                sf.stop_enemy_mana, sf.stop_mana_th,
                 s_p.selected_profile + 1);
             DrawPanelToBuffer_();
             return;
@@ -2114,7 +2204,8 @@ void HandlePanelInput_()
     // 停止回合编辑态例外：输入法常驻窗会盖住游戏窗口（modal_depth>=2 且
     // 前台判定失败），两条键盘路径都被掐死。GetAsyncKeyState 不依赖焦点，
     // 编辑态放行；滚屏/翻页仍受前台判定保护。
-    if (!IsGameWindowForeground_() && !s_stop_turns_editing) {
+    if (!IsGameWindowForeground_() && !s_stop_turns_editing
+        && !s_mana_th_editing) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
         previous_down_down = down_down;
