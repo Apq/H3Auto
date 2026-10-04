@@ -194,8 +194,13 @@ inline int ChooseBuffToRefresh(const int* durations, int count)
     return best;
 }
 
-// 敌方减速：己方必须是专家群体。enemy_durations 覆盖全部存活敌方，
-// 以剩余回合最少的那队为准；-1 表示该队不存在。
+// 敌方减速：己方必须是专家群体。enemy_durations 覆盖全部存活敌方。
+// 语义 A（2026-10-05 用户定）：群体迟缓按「全体覆盖」算达标——敌方已
+// 有任意一队带迟缓 buff（剩余 > kStatusRefreshTurns）就不再施，只有
+// 敌方没有任何一队被覆盖时才施全群体。理由：敌方可能有抵抗术，部分
+// 命中是常态，若按「任一队缺失即补」会在被抵抗后连续多回合重复施放，
+// 挤占一回合一次的施法位与魔力；被抵抗的队留到全体 buff 将断时随群
+// 体一起重新覆盖。-1 表示该队不存在/免疫，不参与覆盖判定。
 inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
     const int* enemy_durations, const int* enemy_hexes, int enemy_count)
 {
@@ -204,8 +209,9 @@ inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
         return choice;
     int best = -1;
     for (int i = 0; i < enemy_count; ++i) {
-        if (enemy_durations[i] < 0) continue;
-        if (enemy_durations[i] > kStatusRefreshTurns) continue;
+        if (enemy_durations[i] < 0) continue;      // 不存在/免疫：跳过
+        if (enemy_durations[i] > kStatusRefreshTurns)
+            return choice;                         // 已有覆盖：达标，不再施
         if (best < 0 || enemy_durations[i] < enemy_durations[best]) best = i;
     }
     if (best < 0) return choice;

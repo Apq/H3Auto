@@ -147,6 +147,8 @@ static int g_enemy_hp_value[2] = {};
 // 召唤通道运行态：自动模式本场锁定的元素下标（0..3，-1 未锁定）。
 // 首次成功施放后锁定，战斗结束/重打/状态重置清空（ResetAutoState）。
 static int g_summon_locked_spell = -1;
+// 一回合一次施法不插件记账：读写均用游戏 heroCasted[side]（0x54B4），
+// 施法成功后 MarkHeroCastThisTurn_ 补写玩家方，见该函数注释。
 
 static bool CreatureInfoIndexValid_(int creature_id)
 {
@@ -1073,6 +1075,58 @@ static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
     return -1;
 }
 
+// ==== 一回合一次施法：统一用游戏自己的 heroCasted[side] ====
+// 游戏 0x5A0140 施法核心内部无条件写 heroCasted[currentActiveSide]=1
+// （blk_5a0000.c L446，0x132C0）。插件在 0x4744D0 钩子里施法时该字段
+// 以行动循环的更新时序为准，可能滞后置错边；玩家方的 heroCasted 仍是 0
+// → 下一次控制权交还判「未施过」连发（含士气额外行动），即绕过一回合
+// 一次的现象。修法：施法成功后由插件把玩家方 heroCasted[side] 补写为 1，
+// 读取端继续用游戏字段（玩家手动施法也置它，天然统一）；每回合清零由
+// 游戏回合推进自己做，插件不记账。
+static void MarkHeroCastThisTurn_(_BattleMgr_* mgr, int side)
+{
+    if (!mgr || side < 0 || side > 1) return;
+    __try {
+        mgr->hero_casted[side] = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// 施法进行中门卫：CastSpell(0x5A0140) 内部播施法动画（约 0.4~0.8s），
+// 动画期间游戏消息循环继续跑，0x4744D0 被再次调用 → TryProtectCast_
+// 重入。此刻 heroCasted 置位（动画后）与 MarkHeroCastThisTurn_（函数
+// 返回后）都还没执行，挡板读到 0 → 同一回合嵌套施出第二个法术（实测
+// 圣灵+迟缓同回合双施即此根因，done 日志顺序倒置可证嵌套）。三处
+// CastSpell 调用点前置 true、except/正常两路复位；入口判它短路重入。
+static bool g_cast_in_flight = false;
+
+// ==== 施法方临时校正（currentActiveSide guard） ====
+// CastSpell(0x5A0140) 内部按 currentActiveSide(0x132C0) 口径执行：目标方
+// 取 1-currentActiveSide（blk_5a0000.c L258）、单体路径重算 expertise、
+// heroCasted 置位、耗魔记账同侧。0x4744D0 钩子时刻该字段若滞后于行动方，
+// 群体法术会整体错边不生效（实测：群体迟缓 turn=6 施放无效果、turn=7
+// 同参数生效，即两回合连施的根源）。游戏在 blk_440000 L1451-1459 自身
+// 也用「临时翻转→调用→翻回」模式操作该字段，故施法前校正为玩家方、
+// 施完恢复是安全口径。返回校正前原值（<0 = 异常/无需恢复）。
+static int CastSideGuardEnter_(H3CombatManager* cm, int side)
+{
+    if (!cm || side < 0 || side > 1) return -1;
+    __try {
+        const int saved = cm->currentActiveSide;
+        if (saved != side) cm->currentActiveSide = side;
+        return saved;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+static void CastSideGuardLeave_(H3CombatManager* cm, int saved)
+{
+    if (!cm || saved < 0 || saved > 1) return;
+    __try {
+        cm->currentActiveSide = saved;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 // 敌方当前总血量：存活数 × 满血 − 顶层已损。战争机器不计入。
 static int EnemyAliveHp_(_BattleMgr_* mgr)
 {
@@ -1199,16 +1253,22 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
 
     const int mana_before = GetHeroMana_(mgr, side);
     const int casted_before = GetHeroCasted_(mgr, side);
+    const int summon_cas = CastSideGuardEnter_(cm, side);
+    g_cast_in_flight = true;
     __try {
-        LogDebug("[Summon] cast spell=%d hex=%d exp=%d power=%d alive=%d/%d hp=%d/%d",
+        LogDebug("[Summon] cast spell=%d hex=%d exp=%d power=%d alive=%d/%d hp=%d/%d cas=%d",
             spell_id, anchor_hex, expertise, spell_power,
-            alive, sf.count_th, hp_total, sf.hp_th);
+            alive, sf.count_th, hp_total, sf.hp_th, summon_cas);
         cm->CastSpell(spell_id, anchor_hex, 0, -1, expertise, spell_power);
     } __except (1) {
+        g_cast_in_flight = false;
+        CastSideGuardLeave_(cm, summon_cas);
         LogWarn("[Summon] cast exception code=0x%08X spell=%d",
             GetExceptionCode(), spell_id);
         return false;
     }
+    g_cast_in_flight = false;
+    CastSideGuardLeave_(cm, summon_cas);
     // 成功（法力扣减或施法标志翻转）才记锁定；槽位占满等静默失败不记。
     const bool cast_ok =
         GetHeroMana_(mgr, side) < mana_before
@@ -1219,6 +1279,7 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
             GetHeroCasted_(mgr, side));
         return false;
     }
+    MarkHeroCastThisTurn_(mgr, side); // 补写玩家方 heroCasted（cast_ok 即已生效）
     if (sf.spell_pick == 0 && g_summon_locked_spell < 0)
         g_summon_locked_spell = pick;   // 自动模式：首次成功即本场锁定
     LogInfo("[Summon] 召唤成功 spell=%d 元素下标=%d 锚格=%d (方案%d 队数<%d 血量≤%d)",
@@ -1324,7 +1385,19 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
     const int side = ResolveHumanSide_(mgr);
     if (side < 0 || side > 1) return false;
-    if (GetHeroCasted_(mgr, side)) return false;
+    // 一回合一次：读游戏 heroCasted[side]（插件施法成功后由
+    // MarkHeroCastThisTurn_ 补写，玩家手动施法游戏自己置位）。
+    if (g_cast_in_flight) return false; // 施法动画期间的消息循环重入
+    if (GetHeroCasted_(mgr, side)) {
+        // 按回合去重留痕：区分「挡板没生效」与「通道没判」，定位连发类问题。
+        static int s_block_logged_turn = -2;
+        if (s_block_logged_turn != turn) {
+            s_block_logged_turn = turn;
+            LogDebug("[Protect] heroCasted blocks all channels turn=%d side=%d",
+                turn, side);
+        }
+        return false;
+    }
 
     H3CombatManager* cm = H3CombatManager::Get();
     if (!cm) return false;
@@ -1452,16 +1525,29 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     _BattleStack_* st = &mgr->stack[side][best_slot];
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     // 原版施法失败不能逃出战斗回调。
+    const int prot_mana_before = GetHeroMana_(mgr, side);
+    const int prot_casted_before = GetHeroCasted_(mgr, side);
+    const int prot_cas = CastSideGuardEnter_(cm, side);
+    g_cast_in_flight = true;
     __try {
-        LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d",
+        LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d mana=%d casted=%d cas=%d",
             best_spell, best_slot, StackHex_(st), best_exp, spell_power,
-            best_remaining, best_wound);
+            best_remaining, best_wound, prot_mana_before, prot_casted_before,
+            prot_cas);
         cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
     } __except (1) {
+        g_cast_in_flight = false;
+        CastSideGuardLeave_(cm, prot_cas);
         LogDebug("[Protect] cast exception code=0x%08X spell=%d slot=%d",
             GetExceptionCode(), best_spell, best_slot);
         return false;
     }
+    g_cast_in_flight = false;
+    CastSideGuardLeave_(cm, prot_cas);
+    MarkHeroCastThisTurn_(mgr, side); // 补写玩家方 heroCasted（异常路径已 return）
+    LogDebug("[Protect] cast done spell=%d mana=%d->%d casted=%d->%d",
+        best_spell, prot_mana_before, GetHeroMana_(mgr, side),
+        prot_casted_before, GetHeroCasted_(mgr, side));
     return true;
 }
 
@@ -1470,6 +1556,7 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     H3CombatManager* cm, H3Hero* hero, int spell_power)
 {
     if (!mgr || !cm || !hero || side < 0 || side > 1) return false;
+    const int status_turn = GetCurrentBattleTurn_(mgr);
     const int enemy_side = side ^ 1;
     auto can_receive = [](_BattleStack_* st, int spell) -> bool {
         if (!st || spell <= 0) return false;
@@ -1503,6 +1590,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             best_slot = slot;
         }
     }
+    if (best_index >= 0)
+        LogDebug("[Status] buff pick spell=%d slot=%d remain=%d turn=%d",
+            status.slots[best_index], best_slot, best_duration, status_turn);
     int spell_id = best_index >= 0 ? status.slots[best_index] : -1;
     (void)best_slot;
     if (spell_id < 0) {
@@ -1527,6 +1617,24 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             H3AutoPolicy::ChooseSlowTarget(
                 expertise >= 3, enemy_durations, enemy_hexes, 21);
         spell_id = slow.spell_id;
+        // 实锤快照：cas=施法前 currentActiveSide；slow_low/min=敌方迟缓
+        // 剩余时长 ≤1 的队数与最小值（-1 视为无/免疫，不参与）。
+        int slow_low = 0;
+        int slow_min = 99;
+        for (int q = 0; q < 21; ++q) {
+            if (enemy_durations[q] >= 0
+                    && enemy_durations[q] <= H3AutoPolicy::kStatusRefreshTurns) {
+                ++slow_low;
+                if (enemy_durations[q] < slow_min) slow_min = enemy_durations[q];
+            }
+        }
+        int cas_now = -1;
+        __try {
+            if (cm) cas_now = cm->currentActiveSide;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        LogDebug("[Status] slow branch want=%d exp=%d pick=%d turn=%d cas=%d slow_low=%d slow_min=%d",
+            want_slow ? 1 : 0, expertise, spell_id, status_turn, cas_now,
+            slow_low, slow_min == 99 ? -1 : slow_min);
         if (expertise < 3) return false;
     }
     // 保持状态列表里的法术都是全体魔法，不指定目标格。
@@ -1536,11 +1644,29 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (expertise <= 0) return false;
+    const int st_mana_before = GetHeroMana_(mgr, side);
+    const int st_casted_before = GetHeroCasted_(mgr, side);
+    const int st_cas = CastSideGuardEnter_(cm, side);
+    g_cast_in_flight = true;
     __try {
+        LogDebug("[Status] cast spell=%d exp=%d power=%d slot=%d turn=%d mana=%d casted=%d cas=%d",
+            spell_id, expertise, spell_power, best_slot, status_turn,
+            st_mana_before, st_casted_before, st_cas);
         cm->CastSpell(spell_id, -1, 1, -1, expertise, spell_power);
     } __except (1) {
+        g_cast_in_flight = false;
+        CastSideGuardLeave_(cm, st_cas);
+        LogWarn("[Status] cast exception code=0x%08X spell=%d",
+            GetExceptionCode(), spell_id);
         return false;
     }
+    g_cast_in_flight = false;
+    CastSideGuardLeave_(cm, st_cas);
+    const int casted_by_game = GetHeroCasted_(mgr, side);
+    MarkHeroCastThisTurn_(mgr, side); // 补写玩家方 heroCasted（异常路径已 return）
+    LogDebug("[Status] cast done spell=%d mana=%d->%d casted=%d->%d(game=%d mark=1)",
+        spell_id, st_mana_before, GetHeroMana_(mgr, side), st_casted_before,
+        GetHeroCasted_(mgr, side), casted_by_game);
     return true;
 }
 

@@ -53,8 +53,13 @@ static char* IniTrim_(char* s)
 
 // 读整个文件到堆缓冲（UTF-8 原样字节，追加 '\0'）。
 // 返回 new[] 缓冲（调用方 delete[]），失败返回 nullptr。
+// 防失控：本插件所有 ini（default/user/lang）正常都在几十 KB 内，超过
+// 64KB 视为历史 bug 污染的空行堆积，不读入直接当文件不存在——旧版曾对
+// 224MB 的 user.ini 走 new char[234MB]，32 位进程分配失败抛 bad_alloc
+// 会直接崩游戏。写入侧（IniWriteKeyUtf8）对超限文件会整体重建。
 static char* IniReadFileToBuffer_(const char* path, long* out_size)
 {
+    static const long kIniReadCap_ = 64 * 1024;
     if (!path || !path[0]) return nullptr;
     FILE* fp = nullptr;
     wchar_t* wpath = Utf8ToWideAlloc_(path);
@@ -64,7 +69,7 @@ static char* IniReadFileToBuffer_(const char* path, long* out_size)
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    if (sz < 0) { fclose(fp); return nullptr; }
+    if (sz < 0 || sz > kIniReadCap_) { fclose(fp); return nullptr; }
     char* buf = new char[sz + 1];
     const size_t got = fread(buf, 1, (size_t)sz, fp);
     fclose(fp);
@@ -85,8 +90,11 @@ static bool IniFindValue_(char* buf, const char* section, const char* key,
         char* line = p;
         while (*p && *p != '\r' && *p != '\n') ++p;
         if (*p) {
+            // 先存终止符再写 0（同 IniWriteKeyUtf8：写 0 后 p[-1] 读到的是
+            // 0 而不是 '\r'，CRLF 的 \n 必须靠 term 判断）。
+            const char term = *p;
             *p++ = 0;
-            if (p[-1] == '\r' && *p == '\n') ++p;
+            if (term == '\r' && *p == '\n') ++p;
         }
         char* s = IniTrim_(line);
         if (!*s) continue;
@@ -163,6 +171,15 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
     if (!path || !path[0] || !section || !key) return false;
     long sz = 0;
     char* old = IniReadFileToBuffer_(path, &sz);
+    // 防失控保险：user.ini 只有几行配置，超 64KB 必然是历史 bug 污染出的
+    // 空行堆积（旧版换行判断错误导致每写一次空行翻倍），保留旧内容只会
+    // 越滚越大直到 32 位进程写回时分配失败崩溃。超限即整体重建最小文件。
+    static const long kIniRebuildThreshold_ = 64 * 1024;
+    if (old && sz > kIniRebuildThreshold_) {
+        delete[] old;
+        old = nullptr;
+        sz = 0; // 此处在 LogInfo 声明之前，无法记日志；丢弃即重建
+    }
     // 输出缓冲按需扩容。旧实现按「原大小 + 固定余量」一次算死容量，而写回时
     // 开头要补 3 字节 BOM、LF 要换成 CRLF，输出经常比输入长；append 用
     // out_len + n < cap 判断，超了就静默丢弃——文件里只要有注释或空行，
@@ -198,8 +215,12 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
             while (*p && *p != '\r' && *p != '\n') ++p;
             bool had_newline = *p != 0;
             if (*p) {
+                // 必须先存终止符再写 0：写完之后 p[-1] 读到的是刚写的 0，
+                // 旧版在此判断 p[-1]=='\r' 恒为假，CRLF 里的 \n 不会被消费
+                // 而是成为下一行的行首，每写一次文件空行翻倍。
+                const char term = *p;
                 *p++ = 0;
-                if (p[-1] == '\r' && *p == '\n') ++p;
+                if (term == '\r' && *p == '\n') ++p;
             }
             // 跳过旧 BOM
             char* s = line;
