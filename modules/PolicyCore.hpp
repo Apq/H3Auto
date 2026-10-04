@@ -55,12 +55,12 @@ static constexpr int MELEE_PAIR_CAPACITY = 10;
 static constexpr int MOVE_WAYPOINT_CAPACITY = 16;
 static constexpr int SPELL_SLOT_CAPACITY = 10;
 
-// ---- 召唤通道常量（保活策略 = 兵力不足时召唤）----
+// ---- 召唤通道常量（保活通道 = 兵力不足时召唤）----
 static constexpr int SUMMON_ELEMENT_COUNT = 4;   // 固定顺序：气/水/火/土（与法术下拉一致）
 static constexpr int kSummonSpellIds[SUMMON_ELEMENT_COUNT] = {69, 68, 66, 67};   // 气/水/火/土
 static constexpr int kSummonCreatureIds[SUMMON_ELEMENT_COUNT] = {112, 115, 114, 113};
 // 自动停止第二条件（敌方魔力停手）默认阈值：约「最多再放一次」低阶法术的量。
-// 随方案可调（0..32767，H3AP7 起存档）。
+// 随方案可调（0..32767，随 H3AP9 方案存档）。
 static constexpr int kSummonStopManaDefault = 6; // 敌方魔力阈值默认（0..32767 可调）
 // 战场六格坐标（15×11，索引 = y*15+x；实参语义与原版距离对拍见实施文档 §5）。
 static constexpr int BATTLEFIELD_COLS = 15;
@@ -84,6 +84,15 @@ struct AutoTargetRule {
     int8_t meleePairCount;
 };
 
+// 保活方式（部队级，三选一）：挂在每条规则上。
+// PM_NONE=不保活（默认）：该队永不参与保活施法。
+enum ProtectMode : uint8_t {
+    PM_COUNT_BELOW = 0,   // 按剩余数量：剩余数量 ≤ 该队阈值才救（默认 2；0=只救全灭）
+    PM_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 严格大于一次可恢复量才救
+    PM_NONE,              // 不保活：该队不参与（默认）
+    PM_COUNT
+};
+
 struct AutoStackRule {
     AutoActionKind action;
     AutoTargetRule target;
@@ -93,10 +102,10 @@ struct AutoStackRule {
     int8_t spellSlots[SPELL_SLOT_CAPACITY];
     int8_t spellSlotCount;
 
-    // 首动保活（§3.1.1）：挂单支部队，随方案/槽位一起存储与重排。
-    uint8_t         protectEnable;       // 0=关闭；1=加入保活队列
-    // 按数量保活阈值（PS_COUNT_BELOW）：该队剩余数量 ≤ 此值才救。
-    // 每队各自一份，默认 2，范围 0..2147483647。
+    // 保活方式三选一（默认不保活）；法术自动选：亡灵用聚灵、活体用复活。
+    uint8_t         protectMode;         // ProtectMode：0=按剩余数量；1=损失量大于恢复量；2=不保活
+    // 按数量保活阈值（PM_COUNT_BELOW）：该队剩余数量 ≤ 此值才救。
+    // 每队各自一份，默认 2，范围 0..2147483647；损失量方式下不参与判定。
     int             protectCountBelow;
 };
 
@@ -123,7 +132,7 @@ inline AutoStackRule MakeDefaultRule()
     for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
         r.spellSlots[i] = -1;
     r.spellSlotCount = 0;
-    r.protectEnable = 0;
+    r.protectMode = PM_NONE;
     r.protectCountBelow = 2;
     return r;
 }
@@ -506,8 +515,9 @@ inline int StackRemainingHp(const TargetCandidate& candidate)
     return static_cast<int>(total);
 }
 
-// 首动保活（§3.1.1）纯判定逻辑。
-// 可恢复量：复活/聚灵按法术等级 基础 50×力量 / 高级 75×力量 / 专家 100×力量。
+// 保活复活（§3.1.1）纯判定逻辑。
+// 可恢复量 = 法术表 baseValue[等级] + 力量 × spEffect（H3Spell::GetBaseEffect）。
+// 读不到法术表时退回旧估算：基础 50×力量 / 高级 75×力量 / 专家 100×力量。
 inline int ResurrectionRestoreHp(int expertise, int spell_power)
 {
     if (spell_power <= 0) return 0;
@@ -519,34 +529,37 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
     return base * spell_power;
 }
 
-// 保活策略（方案级）：整个方案的保活触发方式；默认 0=无。
-// PS_SUMMON_LOW_FORCE = 召唤通道：时机条件由 SummonShouldCast 判定，
-// 不进 ProtectShouldCast（复活通道专用）。
-enum ProtectStrategy : uint8_t {
-    PS_NONE = 0,          // 无：不保活
-    PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储，默认 2；0=只救全灭）
-    PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
-    PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
-    PS_SUMMON_LOW_FORCE,  // 兵力不足时召唤：存活队数 ≤ 阈值 或 血量合计 ≤ 阈值 → 召唤通道
-    PS_COUNT
-};
+inline int ResurrectionRestoreHp(int base_value, int sp_effect,
+    int expertise, int spell_power)
+{
+    if (expertise <= 0 || expertise > 3 || spell_power <= 0) return 0;
+    if (base_value < 0 || sp_effect <= 0)
+        return ResurrectionRestoreHp(expertise, spell_power);
+    const int64_t total = static_cast<int64_t>(base_value)
+        + static_cast<int64_t>(spell_power) * sp_effect;
+    if (total <= 0) return ResurrectionRestoreHp(expertise, spell_power);
+    if (total > 0x7FFFFFFF) return 0x7FFFFFFF;
+    return static_cast<int>(total);
+}
 
-// 是否够格：未入队不触发；无损失不触发；按方案策略判定。
-// PS_COUNT_BELOW 要求剩余数量 ≤ 该队阈值（全灭数量 0 天然满足，0=只救全灭）；
-// PS_FIRST_ACTION 有损失即救；
-// PS_LOSS_GT_RESTORE 要求已损 HP 严格大于一次可恢复量。
-inline bool ProtectShouldCast(bool enabled, ProtectStrategy strategy,
+// 保活与召唤是同一条施法通道，没有方案级通道选择：每次行动（还有施法
+// 次数时）先按各队的 ProtectMode 判保活（§3.1.1，默认不保活），
+// 没人要救且召唤已启用（SummonProfileFields.enabled）再判召唤（§3.7）。
+
+// 是否够格：无损失不触发；按该队自己的保活方式判定。
+// PM_COUNT_BELOW 要求剩余数量 ≤ 该队阈值（全灭数量 0 天然满足，0=只救全灭）；
+// PM_LOSS_GT_RESTORE 要求已损 HP 严格大于一次可恢复量；PM_NONE 永不触发。
+inline bool ProtectShouldCast(ProtectMode mode,
     int restorable_hp, int wound_value,
     int count_current, int count_below)
 {
-    if (!enabled) return false;
+    if (mode == PM_NONE) return false;
     if (wound_value <= 0) return false;
-    switch (strategy) {
-    case PS_FIRST_ACTION:    return true;
-    case PS_LOSS_GT_RESTORE: return restorable_hp > 0
+    switch (mode) {
+    case PM_LOSS_GT_RESTORE: return restorable_hp > 0
         && wound_value > restorable_hp;
-    case PS_COUNT_BELOW:     return count_current <= count_below;
-    default:                 return false; // PS_NONE
+    case PM_COUNT_BELOW:     return count_current <= count_below;
+    default:                 return false;
     }
 }
 
@@ -604,7 +617,7 @@ inline bool AutoStopShouldYield(int threshold, int baseline_hp,
 }
 
 // ---------------------------------------------------------------------------
-// 召唤通道（保活策略 = PS_SUMMON_LOW_FORCE）与召唤物行动的纯判定。
+// 召唤通道（保活复活的兜底：无人可救且已启用时）与召唤物行动的纯判定。
 // ---------------------------------------------------------------------------
 
 // 自动停止第二条件：敌方英雄法力耗尽前停手。
@@ -618,16 +631,24 @@ inline bool ShouldStopOnEnemyMana(int stop_flag, bool has_enemy_hero,
     return enemy_mana <= threshold;
 }
 
-// 召唤时机：己方存活队数（含召唤物、不含战争机器）≤ 阈值，或
-// 剩余血量合计（同口径）≤ 阈值，满足任一即召；本回合未施法、已学、法力够。
-// 两个阈值是「或」关系：只剩很少队、或血量掉得很低，都该补一队。
+// 队数/血量两条件的组合方式：0=和（两者都满足才召，默认）；1=或（任一满足即召）。
+static constexpr int SUMMON_COMBINE_AND = 0;
+static constexpr int SUMMON_COMBINE_OR  = 1;
+
+// 召唤时机：己方存活队数（含召唤物、不含战争机器）< 阈值（严格小于）、
+// 剩余血量合计（同口径）≤ 阈值；组合方式 cond_combine：和=都满足、或=任一。
+// 本回合未施法、已学、法力够。
 inline bool SummonShouldCast(int stack_count, int count_th, int hp_total,
-    int hp_th, int mana, int mana_cost, bool hero_casted, bool learned)
+    int hp_th, int cond_combine, int mana, int mana_cost, bool hero_casted,
+    bool learned)
 {
     if (hero_casted) return false;
     if (!learned) return false;
     if (mana_cost > 0 && mana < mana_cost) return false;
-    return stack_count <= count_th || hp_total <= hp_th;
+    const bool count_ok = stack_count < count_th;
+    const bool hp_ok = hp_total <= hp_th;
+    return cond_combine == SUMMON_COMBINE_OR ? (count_ok || hp_ok)
+                                             : (count_ok && hp_ok);
 }
 
 inline bool IsSummonedElemental(int creature_id)
@@ -777,7 +798,7 @@ inline void NormalizeSummonRule(AutoStackRule* rule)
     for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
         rule->spellSlots[i] = -1;
     rule->spellSlotCount = 0;
-    rule->protectEnable = 0;
+    rule->protectMode = PM_NONE;   // 召唤物共享规则不走保活
     rule->protectCountBelow = 2;
 }
 
@@ -828,43 +849,45 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 }
 
 // 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profilesN.ini）。
-// 纯编解码：一行文本 "H3AP6 <21×部队表> <策略> <停止回合> <4 召唤整数>
+// 纯编解码：一行文本 "H3AP9 <21×部队表> <停止回合> <7 召唤整数>
 // <21 条规则> <1 条召唤共享规则>"。规则按槽位排列，每条 60 个十进制整数
-// （H3AP5 及更早一律拒绝；旧档读档失败需重新配置）。
+// （H3AP8 及更早一律拒绝；旧档读档失败需重新配置）。
 // 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
 // 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
-// 文本在部队表之后有 1 个策略（0..4）、1 个自动停止回合（0..999）、
-// 5 个召唤整数（队数阈值/血量阈值/法术选择/敌方魔力停止勾选/敌方魔力阈值）。
-// 存档格式：21*2 部队 + 1 策略 + 1 停止回合 + 4 召唤 + 22 条规则（每条 60 整数）。
+// 文本在部队表之后有 1 个自动停止回合（0..999）与
+// 7 个召唤整数（启用/队数阈值/血量阈值/法术选择/条件组合/敌方魔力停止勾选/
+// 敌方魔力阈值）。
+// 存档格式：21*2 部队 + 1 停止回合 + 7 召唤 + 22 条规则（每条 60 整数）。
 static constexpr int PROFILE_STORE_SLOTS = 21;
 // 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
 // （曾因手写 34 与实写 59 脱节导致越界写堆 = 保存后崩溃的根因）。
 // 用表达式自校验：6 头 + 16 航点 + 1 计数 + 2*10 近战对 + 1 计数 + 3 杂项
-// + 10 施法槽 + 3 尾（+保活数量阈值）= 60。
+// + 10 施法槽 + 3 尾（施法槽数量 + 保活方式 + 保活数量阈值）= 60。
 static constexpr int PROFILE_STORE_RULE_FIELDS =
     6 + MOVE_WAYPOINT_CAPACITY + 1 + 2 * MELEE_PAIR_CAPACITY + 1 + 3
     + SPELL_SLOT_CAPACITY + 3;
-// 旧档（3575/3580 整数）由越界写堆的坏版本写出：交错覆盖、不可靠且
-// 按新步进读会越界读，一律拒绝（读档失败，需重新配置）。
-static constexpr int PROFILE_STORE_LEGACY_INTS = 3575;
 // H3AP1（6205 整数，无部队表）：格式已废弃，同样拒绝。
 static constexpr int PROFILE_STORE_ARMY_INTS =
     PROFILE_STORE_SLOTS * 2;
-// 召唤整数：队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) /
-// 敌方魔力停勾选(0..1) / 敌方魔力阈值(0..32767，H3AP7 起)。
-static constexpr int PROFILE_STORE_SUMMON_INTS = 5;
+// 召唤整数：启用(0..1) / 队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) /
+// 条件组合(0..1) / 敌方魔力停勾选(0..1) / 敌方魔力阈值(0..32767)。
+static constexpr int PROFILE_STORE_SUMMON_INTS = 7;
 // 召唤共享规则也是一条 60 整数规则（21 条部队规则之外的第 22 条）。
+// 42 部队 + 1 停止回合 + 7 召唤（含启用位）+ 22*60 = 1370。
 static constexpr int PROFILE_STORE_INTS =
     PROFILE_STORE_ARMY_INTS
-    + 1 + 1 + PROFILE_STORE_SUMMON_INTS
+    + 1 + PROFILE_STORE_SUMMON_INTS
     + (PROFILE_STORE_SLOTS + 1) * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
 
-// 方案级召唤配置（H3AP6 起随方案存档；时机在策略整数里 = PS_SUMMON_LOW_FORCE）。
+// 方案级召唤配置（随 H3AP9 方案存档）。保活与召唤同一条施法通道：
+// 保活优先，无人可救且 enabled 时才走召唤。
 struct SummonProfileFields {
-    int count_th;         // 队数阈值，默认 2，0..21（战争机器不计、召唤物计）
+    int enabled;          // 是否启用自动召唤（0/1，默认 0）：复活无人可救时的兜底
+    int count_th;         // 队数阈值，默认 2，0..21（存活队数严格小于此值才触发；0=队数条件永不触发）
     int hp_th;            // 血量阈值，默认 750，≥0（口径同自动停止）
     int spell_pick;       // 法术选择：0=自动；1..SUMMON_ELEMENT_COUNT=固定元素
+    int cond_combine;     // 队数/血量两条件组合：0=和（默认）；1=或
     int stop_enemy_mana;  // 自动停止第二条件勾选（0/1）
     int stop_mana_th;     // 敌方魔力阈值，默认 6，0..32767（勾选时生效）
     AutoStackRule summon_rule; // 召唤物共享行动规则
@@ -873,9 +896,11 @@ struct SummonProfileFields {
 inline SummonProfileFields MakeDefaultSummonFields()
 {
     SummonProfileFields fields = {};
+    fields.enabled = 0;   // 默认不召唤：只保活复活
     fields.count_th = 2;
     fields.hp_th = 750;
     fields.spell_pick = 0;
+    fields.cond_combine = SUMMON_COMBINE_AND; // 默认「和」：两条件都满足才召
     fields.stop_enemy_mana = 1; // 默认勾选：敌方魔力≤阈值即停（阈值默认 6）
     fields.stop_mana_th = kSummonStopManaDefault;
     fields.summon_rule = MakeDefaultRule();
@@ -892,7 +917,6 @@ struct BattleStoreRecord {
     char time[20];                  // "yyyymmdd-hhmmss"
     int  active;                    // 0..4
     AutoStackRule rules[5][21];
-    uint8_t strategy[5];
     uint16_t stop_turns[5];
     SummonProfileFields summon[5];
 };
@@ -912,7 +936,6 @@ inline bool BattleStoreRecordContentEquals(const BattleStoreRecord& a,
     };
     if (a.active != b.active) return false;
     for (int p = 0; p < 5; ++p) {
-        if (a.strategy[p] != b.strategy[p]) return false;
         if (a.stop_turns[p] != b.stop_turns[p]) return false;
         if (!bytes_equal(&a.summon[p], &b.summon[p], sizeof(SummonProfileFields)))
             return false;
@@ -1048,7 +1071,7 @@ inline void EncodeRuleInts(const AutoStackRule& rule, int* out)
     for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
         out[n++] = rule.spellSlots[i];
     out[n++] = rule.spellSlotCount;
-    out[n++] = rule.protectEnable ? 1 : 0;
+    out[n++] = rule.protectMode;
     out[n++] = rule.protectCountBelow;
 }
 
@@ -1077,7 +1100,11 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
     for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
         r.spellSlots[i] = static_cast<int8_t>(in[n++]);
     r.spellSlotCount = static_cast<int8_t>(in[n++]);
-    r.protectEnable = in[n++] != 0 ? 1 : 0;
+    // 第 59 个整数是保活方式（ProtectMode，三选一；越界按不保活）。
+    r.protectMode = (in[n] == (int)PM_COUNT_BELOW
+            || in[n] == (int)PM_LOSS_GT_RESTORE)
+        ? static_cast<ProtectMode>(in[n]) : PM_NONE;
+    ++n;
     r.protectCountBelow = in[n++];
     if (r.protectCountBelow < 0) r.protectCountBelow = 0;
     if (n != PROFILE_STORE_RULE_FIELDS) return false;
@@ -1090,11 +1117,10 @@ inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
 }
 
 // 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP7 "（新）或 "H3AP6 "（旧，阈值字段缺省 6）开头
-// 且整数个数恰好匹配的文本。
+// Decode 只接受以 "H3AP9 " 开头且整数个数恰好匹配的文本；
+// 旧版存档（H3AP8 及更早）一律拒绝，重新配置即可。
 inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     const int army_counts[PROFILE_STORE_SLOTS],
-    uint8_t strategy,
     const AutoStackRule rules[PROFILE_STORE_SLOTS],
     uint16_t stop_turns,
     const SummonProfileFields& summon,
@@ -1111,14 +1137,14 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
         }
         return true;
     };
-    if (!append("H3AP7")) return -1;
+    if (!append("H3AP9")) return -1;
     int* ints = new int[PROFILE_STORE_INTS];
     int n = 0;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
         ints[n++] = army_types[s];
         ints[n++] = army_counts[s];
     }
-    ints[n++] = strategy;
+    ints[n++] = summon.enabled ? 1 : 0;
     int turns = stop_turns;
     if (turns < 0) turns = 0;
     if (turns > 999) turns = 999;
@@ -1126,6 +1152,8 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
     ints[n++] = summon.count_th;
     ints[n++] = summon.hp_th;
     ints[n++] = summon.spell_pick;
+    ints[n++] = (summon.cond_combine == SUMMON_COMBINE_OR)
+        ? SUMMON_COMBINE_OR : SUMMON_COMBINE_AND;
     ints[n++] = summon.stop_enemy_mana ? 1 : 0;
     int mana_th = summon.stop_mana_th;
     if (mana_th < 0) mana_th = 0;
@@ -1172,30 +1200,19 @@ inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
 inline bool DecodeProfileStoreText(const char* text,
     int army_types[PROFILE_STORE_SLOTS],
     int army_counts[PROFILE_STORE_SLOTS],
-    uint8_t* strategy,
     AutoStackRule rules[PROFILE_STORE_SLOTS],
     uint16_t* stop_turns,
     SummonProfileFields* summon)
 {
-    if (!text || !army_types || !army_counts || !strategy || !rules
+    if (!text || !army_types || !army_counts || !rules
         || !stop_turns || !summon) return false;
-    // 双格式：H3AP7（PROFILE_STORE_INTS，含敌方魔力阈值）；
-    // H3AP6（少 1 个整数，阈值字段缺省 kSummonStopManaDefault）。
-    const char* magic_v7 = "H3AP7";
-    const char* magic_v6 = "H3AP6";
-    bool is_v6 = false;
-    if (text[0] == magic_v7[0] && text[1] == magic_v7[1]
-        && text[2] == magic_v7[2] && text[3] == magic_v7[3]
-        && text[4] == magic_v7[4]) {
-        is_v6 = false;
-    } else if (text[0] == magic_v6[0] && text[1] == magic_v6[1]
-        && text[2] == magic_v6[2] && text[3] == magic_v6[3]
-        && text[4] == magic_v6[4]) {
-        is_v6 = true;
-    } else {
-        return false;
-    }
-    const int expected = is_v6 ? PROFILE_STORE_INTS - 1 : PROFILE_STORE_INTS;
+    // 只认 H3AP9（PROFILE_STORE_INTS，每规则 60 整数含保活方式、
+    // 召唤 7 整数含启用位与条件组合）。
+    // 旧版存档（H3AP8 及更早）不兼容，直接拒绝，用户重新配置即可。
+    static const char magic[6] = "H3AP9";
+    for (int i = 0; i < 5; ++i)
+        if (text[i] != magic[i]) return false;
+    const int expected = PROFILE_STORE_INTS;
     const char* p = text + 5;
 
     int* ints = new int[PROFILE_STORE_INTS];
@@ -1222,7 +1239,6 @@ inline bool DecodeProfileStoreText(const char* text,
         return false;
     }
 
-    uint8_t decoded_strategy = 0;
     uint16_t decoded_stop = 0;
     SummonProfileFields decoded_summon = {};
     int decoded_army_types[PROFILE_STORE_SLOTS] = {};
@@ -1235,17 +1251,20 @@ inline bool DecodeProfileStoreText(const char* text,
         if (ints[n] < -1 || ints[n + 1] < 0) { delete[] ints; return false; }
         n += 2;
     }
-    if (ints[n] < PS_NONE || ints[n] >= PS_COUNT) { delete[] ints; return false; }
-    decoded_strategy = static_cast<uint8_t>(ints[n++]);
+    // 召唤启用位：0=不召唤（只保活复活），1=启用兜底召唤。
+    if (ints[n] < 0 || ints[n] > 1) {
+        delete[] ints;
+        return false;
+    }
+    decoded_summon.enabled = ints[n++];
     if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
     decoded_stop = static_cast<uint16_t>(ints[n++]);
     decoded_summon.count_th = ints[n++];
     decoded_summon.hp_th = ints[n++];
     decoded_summon.spell_pick = ints[n++];
+    decoded_summon.cond_combine = ints[n++];
     decoded_summon.stop_enemy_mana = ints[n++];
-    // H3AP6 无阈值整数：缺省默认（原固定常量语义）；H3AP7 读入并校验。
-    decoded_summon.stop_mana_th = is_v6
-        ? kSummonStopManaDefault : ints[n++];
+    decoded_summon.stop_mana_th = ints[n++];
     if (decoded_summon.count_th < 0
         || decoded_summon.count_th > PROFILE_STORE_SLOTS) {
         delete[] ints; return false;
@@ -1253,6 +1272,10 @@ inline bool DecodeProfileStoreText(const char* text,
     if (decoded_summon.hp_th < 0) { delete[] ints; return false; }
     if (decoded_summon.spell_pick < 0
         || decoded_summon.spell_pick > SUMMON_ELEMENT_COUNT) {
+        delete[] ints; return false;
+    }
+    if (decoded_summon.cond_combine != SUMMON_COMBINE_AND
+        && decoded_summon.cond_combine != SUMMON_COMBINE_OR) {
         delete[] ints; return false;
     }
     if (decoded_summon.stop_enemy_mana < 0
@@ -1269,7 +1292,9 @@ inline bool DecodeProfileStoreText(const char* text,
     NormalizeSummonRule(&decoded_summon.summon_rule);
     n += PROFILE_STORE_RULE_FIELDS;
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-        if (!DecodeRuleInts(ints + n, &decoded[s])) { delete[] ints; return false; }
+        if (!DecodeRuleInts(ints + n, &decoded[s])) {
+            delete[] ints; return false;
+        }
         n += PROFILE_STORE_RULE_FIELDS;
     }
     delete[] ints;
@@ -1278,7 +1303,6 @@ inline bool DecodeProfileStoreText(const char* text,
         army_counts[s] = decoded_army_counts[s];
         rules[s] = decoded[s];
     }
-    *strategy = decoded_strategy;
     *stop_turns = decoded_stop;
     *summon = decoded_summon;
     return true;
@@ -1352,6 +1376,7 @@ inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged
 {
     if (!rule) return;
     if (rule->protectCountBelow < 0) rule->protectCountBelow = 0;
+    if (rule->protectMode >= PM_COUNT) rule->protectMode = PM_NONE;
 
     AutoActionKind allowed[AA_COUNT] = {};
     const int n = GetAllowedActions(creature_type, is_ranged,

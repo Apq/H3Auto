@@ -66,7 +66,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             } else if (s_summon_edit_which != SUMMON_EDIT_NONE) {
                 CancelSummonNumEdit_();
                 DrawPanelToBuffer_();
-            } else if (s_summon_spell_dd_open || s_summon_act_dd_open) {
+            } else if (s_summon_spell_dd_open || s_summon_cond_dd_open
+                || s_summon_act_dd_open) {
                 CloseSummonDropdowns_();
                 DrawPanelToBuffer_();
             } else if (s_stop_turns_editing) {
@@ -77,10 +78,6 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 DrawPanelToBuffer_();
             } else if (PanelAnyProtectCountEditing_()) {
                 PanelCancelAllProtectCountEdits_();
-                DrawPanelToBuffer_();
-            } else if (s_protect_dd_open) {
-                s_protect_dd_open = false;
-                s_protect_dd_hover = -1;
                 DrawPanelToBuffer_();
             } else if (s_spell_pick_cell >= 0)
                 EndSpellPick_();
@@ -101,11 +98,11 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             DrawPanelToBuffer_();
             return 1;
         }
-        // 帮助/快捷键模态或保活下拉展开时：Enter 不提交设置面板，仅吞掉。
+        // 帮助/快捷键模态或召唤下拉展开时：Enter 不提交设置面板，仅吞掉。
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && s_spell_pick_cell < 0 && !s_help_modal_open
-            && !s_protect_dd_open
-            && !s_summon_spell_dd_open && !s_summon_act_dd_open) {
+            && !s_summon_spell_dd_open && !s_summon_cond_dd_open
+            && !s_summon_act_dd_open) {
             SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
@@ -373,9 +370,8 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         // 有下拉展开时才需要即时刷新高亮。召唤页的法术/行动下拉漏在这里
         // 会导致悬停高亮函数根本不被调用（绘制侧的高亮分支是好的，只是
         // hover 值永远停在 -1）。
-        bool any_expanded = s_protect_dd_open
-            || s_summon_spell_dd_open || s_summon_act_dd_open
-            || s_battle_dd_open;
+        bool any_expanded = s_summon_spell_dd_open || s_summon_cond_dd_open
+            || s_summon_act_dd_open || s_battle_dd_open;
         for (int i = 0; i < CELL_COUNT; ++i) {
             if (s_p.cells[i].expanded != CEX_NONE) {
                 any_expanded = true;

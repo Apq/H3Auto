@@ -13,9 +13,9 @@ static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void GetProtectDdItemRect_(int item, int* out_x, int* out_y,
-    int* out_w, int* out_h);
 static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
+    int* out_w, int* out_h);
+static void GetSummonCondDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetSummonActDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);

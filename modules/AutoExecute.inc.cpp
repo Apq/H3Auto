@@ -4,14 +4,13 @@
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
+    const uint16_t stop_turns[5],
     const SummonProfileFields summon[5], bool* out_store_added);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
 extern int  g_active_profile;
 extern int  g_last_profile;
-extern uint8_t  g_protect_strategy[5];
 extern uint16_t g_stop_turns[5];
 extern SummonProfileFields g_summon[5];
 extern bool IsPanelActive();
@@ -129,7 +128,7 @@ struct StackTrackEntry {
     int   creature_id;   // 绑定身份
     int   hex;           // 当前位置
     int   count_alive;   // 当前数量
-    int   count_start;   // 绑定时刻/开战数量
+    int   count_start;   // 本场首次见到时的开战数量（F9/确定都不改）
     // 本场运行游标：配置只保存序列，进度只存在跟踪表。
     int   move_cursor;
     int   melee_cursor;
@@ -140,8 +139,6 @@ static int  g_track_side = -1;
 static bool g_track_active = false;
 static int  g_battle_attempt_id = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
-// 首动保活：已判定过的战斗回合号（-1=尚未判定本回合）。
-static int  g_protect_checked_turn = -1;
 // 自动停止：最近两笔敌方血量。两笔都有效才外推，更早的不参与。
 static int g_enemy_hp_turn[2] = { -1, -1 };
 static int g_enemy_hp_value[2] = {};
@@ -174,6 +171,21 @@ static void ClearStackTracking_()
     memset(g_stack_track, 0, sizeof(g_stack_track));
     g_track_side = -1;
     g_track_active = false;
+}
+
+// 损失量基准：英雄头像 Alt+右键显示的战前军队数量（H3Hero::army，
+// 读档关联用的同一份）。战斗中不写回，F9 重打和按确定都不改它。
+// 召唤物、克隆、战争机器没有这份数量，退回战场数量。
+static int ProtectBaselineCount_(_BattleMgr_* mgr, int side, _BattleStack_* s)
+{
+    if (!s) return 0;
+    const int army = s->source_army_slot;
+    if (mgr && side >= 0 && side <= 1 && mgr->hero[side]
+        && army >= 0 && army <= 6 && s->clone_id <= 0) {
+        const int pre = mgr->hero[side]->army_count[army];
+        if (pre > 0) return pre;
+    }
+    return (s->count_at_start > 0) ? s->count_at_start : s->count_current;
 }
 
 static void BuildStableIdentitiesFromBattle_(_BattleMgr_* mgr, int side,
@@ -218,7 +230,6 @@ static void BindStackTrackingFromBattle_()
         LogWarn("[Track] bind skipped: invalid human side");
         return;
     }
-
     H3AutoPolicy::StableStackIdentity current_identities[21] = {};
     BuildStableIdentitiesFromBattle_(mgr, side, current_identities);
 
@@ -241,15 +252,14 @@ static void BindStackTrackingFromBattle_()
         t.creature_id = s->creature_id;
         t.hex = s->hex_ix;
         t.count_alive = s->count_current;
-        t.count_start = (s->count_at_start > 0) ? s->count_at_start : s->count_current;
+        t.count_start = ProtectBaselineCount_(mgr, side, s);
         t.alive = s->count_current > 0;
         t.move_cursor = 0;
         t.melee_cursor = 0;
         t.spell_cursor = 0;
         // 绑定时刻已在场的召唤物（重开面板再勾号的场景）：
-        // 召唤策略下直接套用共享规则。
-        if (g_protect_strategy[g_active_profile]
-                == (uint8_t)H3AutoPolicy::PS_SUMMON_LOW_FORCE
+        // 召唤启用时直接套用共享规则。
+        if (g_summon[g_active_profile].enabled
             && current_identities[i].kind == H3AutoPolicy::STACK_ID_SUMMON
             && H3AutoPolicy::IsSummonedElemental(s->creature_id)) {
             g_active_rules[i] = g_summon[g_active_profile].summon_rule;
@@ -282,7 +292,6 @@ static void UpdateStackTracking_()
         return;
     _BattleMgr_* mgr = o_BattleMgr;
     if (!mgr) return;
-
     H3AutoPolicy::StableStackIdentity current_identities[21] = {};
     BuildStableIdentitiesFromBattle_(mgr, g_track_side, current_identities);
 
@@ -326,9 +335,8 @@ static void UpdateStackTracking_()
     // —— 动态补绑召唤物（§2.3）——
     // 首次出现的四系元素（身份 STACK_ID_SUMMON + 槽未绑定）在本场内接管：
     // 绑定跟踪条目并套用召唤共享规则（游标归零）。克隆物（类型不在四系）
-    // 不绑、保持手动。仅保活策略 = 兵力不足时召唤时补绑。
-    if (g_protect_strategy[g_active_profile]
-        == (uint8_t)H3AutoPolicy::PS_SUMMON_LOW_FORCE) {
+    // 不绑、保持手动。仅召唤启用（enabled）时补绑。
+    if (g_summon[g_active_profile].enabled) {
         for (int i = 0; i < 21; ++i) {
             if (g_stack_track[i].bound) continue;
             const H3AutoPolicy::StableStackIdentity& id = current_identities[i];
@@ -735,7 +743,6 @@ void ResetAutoState()
     // F9 全手动是用户对"本场谁执行"的显式选择；取消重打/重绑不清，
     // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
     // 只清单次接管与施法等待等运行时数据。
-    g_protect_checked_turn = -1;   // 战斗状态重置后重新判定首动保活
     g_enemy_hp_turn[0] = -1;       // 自动停止的最近两笔取样作废
     g_enemy_hp_turn[1] = -1;
     g_enemy_hp_value[0] = 0;
@@ -779,7 +786,7 @@ void EnsureStackTrackingBound()
     memcpy(g_profiles, remapped, sizeof(g_profiles));
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     memcpy(g_rule_identities, current_identities, sizeof(g_rule_identities));
-    // 首动保活字段在 AutoStackRule 内，随槽位规则整体重排，无单独处理。
+    // 保活方式字段在 AutoStackRule 内，随槽位规则整体重排，无单独处理。
 
     ++g_battle_attempt_id;
     ResetAutoState();
@@ -1019,21 +1026,19 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
     return hero->spell_points;
 }
 
-// ==== 首动保活（§3.1.1） ====
-// 每回合第一次把控制权交给玩家时（含本插件接管）判一次：遍历队列
-// （卡片勾选「加入保活队列」）内的己方部队，按方案级策略
-// （无 / 按数量 / 回合内首动 / 损失量大于恢复量）判定够格，
+// ==== 保活复活（§3.1.1） ====
+// 每次把控制权交给玩家时判一次：遍历己方部队（按队保活方式，默认不保活），
+// 每队按自己的保活方式（剩余数量 ≤ 阈值 / 损失量大于恢复量）判定够格，
 // 够格者中取血量最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，
-// 直接 CastSpell 施放。每回合只判一次（成败不重试）；英雄本回合已施法
-// 跳过；不占快捷施法、不推进任何部队的循环施法游标。
+// 直接 CastSpell 施放。英雄本回合已施法跳过；不占快捷施法、
+// 不推进任何部队的循环施法游标。复活无人可救且召唤启用（enabled）
+// 时走召唤兜底（SummonChannel_）。
 
-// 设置面板提交后调用：作废已判定标记，当前/下一回合重新判定。
+// 设置面板提交后调用：当前/下一回合重新判定（事件型判定无需作废标记，
+// 保留空函数供提交路径调用，日志指明配置已生效）。
 void SyncActiveProtect()
 {
-    if (g_protect_checked_turn != -1) {
-        g_protect_checked_turn = -1;
-        LogInfo("[Protect] settings committed; player turn re-checks");
-    }
+    LogInfo("[Protect] settings committed; next control hand-in re-checks");
 }
 
 // 设置保存后进入「停」：保存只落方案，不立即自动执行；
@@ -1089,7 +1094,7 @@ static int EnemyAliveHp_(_BattleMgr_* mgr)
     return static_cast<int>(total);
 }
 
-// ==== 召唤通道（保活策略 = 兵力不足时召唤，§2.3）====
+// ==== 召唤通道（保活复活的兜底，§2.3）====
 // 事件型判定：每次控制权交玩家都判（无回合标记）；英雄已施法则跳过
 // （TryProtectCast_ 共享守卫已查）。法力消耗与召唤量常量表为暂定口径，
 // 上机逆向确认后修订（§5 清单项）。
@@ -1104,7 +1109,11 @@ static int SummonCountAmount_(int expertise, int spell_power)
     return spell_power * mult;
 }
 
-// 己方存活统计（含召唤物、不含战争机器）喂纯函数：存活队数 + 血量合计。
+// 己方存活统计喂纯函数：存活队数 + 血量合计。
+// 队数口径 = 存活的本体部队（军队槽 0..6）+ 存活的召唤物（四系元素，
+// 开战时不存在、count_at_start 常为 0，不能用它过滤），不含战争机器与克隆。
+// 身份口径与 MakeStableStackIdentity 一致：source_army_slot 0..6 = 本体，
+// 其余非战争机器非克隆 = 召唤物。
 static void OwnSideForceStats_(_BattleMgr_* mgr, int side,
     int* out_alive, int* out_hp)
 {
@@ -1115,14 +1124,24 @@ static void OwnSideForceStats_(_BattleMgr_* mgr, int side,
     int n = 0;
     for (int i = 0; i < 21; ++i) {
         _BattleStack_* st = &mgr->stack[side][i];
-        if (st->count_current <= 0 || st->count_at_start <= 0) continue;
+        if (st->count_current <= 0) continue;
         if (!CreatureInfoIndexValid_(st->creature_id)) continue;
         if (H3AutoPolicy::IsWarMachineType(st->creature_id)) continue;
+        if (st->clone_id > 0) continue;                 // 克隆/镜像不计入
+        const bool army = st->source_army_slot >= 0
+            && st->source_army_slot < 7;
+        const bool summon = !army
+            && H3AutoPolicy::IsSummonedElemental(st->creature_id);
+        if (!army && !summon) continue;
         H3AutoPolicy::TargetCandidate& c = alive[n++];
         c.count_current = st->count_current;
-        c.count_at_start = st->count_at_start;
+        c.count_at_start = (st->count_at_start > 0)
+            ? st->count_at_start : st->count_current;
         c.hit_points = st->creature.hit_points;
         c.lost_hp = st->lost_hp;
+        LogDebug("[Summon] stack slot=%d cid=0x%X src=%d clone=%d cnt=%d start=%d %s",
+            i, st->creature_id, st->source_army_slot, st->clone_id,
+            st->count_current, st->count_at_start, summon ? "summon" : "army");
     }
     if (out_alive) *out_alive = H3AutoPolicy::CountAliveSideStacks(alive, n);
     if (out_hp) *out_hp = H3AutoPolicy::SumSideRemainingHp(alive, n);
@@ -1161,7 +1180,8 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
     const int spell_id = H3AutoPolicy::kSummonSpellIds[pick];
     const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
     if (!H3AutoPolicy::SummonShouldCast(alive, sf.count_th, hp_total,
-            sf.hp_th, GetHeroMana_(mgr, side), kSummonManaCostProvisional,
+            sf.hp_th, sf.cond_combine, GetHeroMana_(mgr, side),
+            kSummonManaCostProvisional,
             GetHeroCasted_(mgr, side) != 0, expertise > 0))
         return false;   // 时机不满足：静默跳过，不记失败（§0）
 
@@ -1199,7 +1219,7 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
     }
     if (sf.spell_pick == 0 && g_summon_locked_spell < 0)
         g_summon_locked_spell = pick;   // 自动模式：首次成功即本场锁定
-    LogInfo("[Summon] 召唤成功 spell=%d 元素下标=%d 锚格=%d (方案%d 队数≤%d 血量≤%d)",
+    LogInfo("[Summon] 召唤成功 spell=%d 元素下标=%d 锚格=%d (方案%d 队数<%d 血量≤%d)",
         spell_id, pick, anchor_hex, profile + 1, sf.count_th, sf.hp_th);
     return true;
 }
@@ -1286,82 +1306,63 @@ static void TryAutoStop_(_BattleMgr_* mgr)
 
 // 守卫（S5）：仅战斗中·面板关 + 自动模式下判（设计文档 §3.1.1：
 // 全手动、单次接管时不判、不施——原实现缺此守卫，本次修正）。
+// 保活与召唤是同一条施法通道（§3.1.1/§2.3）：保活优先——每次行动
+// （还有施法次数时）先按各队 ProtectMode 判复活；无人可救且召唤已启用
+// （g_summon[p].enabled）再走召唤兜底。一回合只施一次法，两边天然互斥。
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
     if (g_phase != BP_COMBAT_CLOSED) return false;
     if (g_control != CM_AUTO) return false; // AUTO 才判保活/施法（§3.1.1）
 
-    const int strategy = g_protect_strategy[g_active_profile];
-    if (strategy == H3AutoPolicy::PS_NONE) return false;
-
-    // 判定时机按策略分派：
-    // - 回合内首动：每回合只判一次（判过即记，无论是否施法）；
-    // - 按数量 / 损失量大于恢复量：事件型，每次行动（控制权交玩家）
-    //   都判。游戏一回合只允许施法一次：已施法/法力不足时静默跳过，
-    //   不记回合标记，之后的行动继续判。
-    const bool once_per_turn =
-        strategy == (int)H3AutoPolicy::PS_FIRST_ACTION;
     const int turn = GetCurrentBattleTurn_(mgr);
     if (turn < 0) return false;
-    if (once_per_turn) {
-        if (turn == g_protect_checked_turn) return false;
-        g_protect_checked_turn = turn;      // 本回合只判这一次
-    }
 
     const int side = ResolveHumanSide_(mgr);
     if (side < 0 || side > 1) return false;
-    if (GetHeroCasted_(mgr, side)) {
-        if (once_per_turn)
-            LogWarn("[Protect] turn=%d hero already casted; skip", turn);
-        return false;
-    }
+    if (GetHeroCasted_(mgr, side)) return false;
 
     H3CombatManager* cm = H3CombatManager::Get();
     if (!cm) return false;
     H3Hero* hero = reinterpret_cast<H3Hero*>(mgr->hero[side]);
     if (!hero) return false;
-    // 复活/聚灵固定耗魔 10（SoD，不随等级变化）。
-    if (GetHeroMana_(mgr, side) < 10) {
-        if (once_per_turn)
-            LogWarn("[Protect] turn=%d mana<10; skip", turn);
-        return false;
-    }
     const int spell_power = cm->heroSpellPower[side];
 
-    // 策略分派（§2.3）：兵力不足时召唤 → 召唤通道（事件型，自查法力）；
-    // 其余策略走原复活通道（复活固定耗魔 10）。
-    if (strategy == (int)H3AutoPolicy::PS_SUMMON_LOW_FORCE)
-        return SummonChannel_(mgr, side, cm, hero, spell_power);
+    // 复活固定耗魔 10（SoD，不随等级变化）；召唤法术耗魔由 SummonChannel_
+    // 自查。法力 <10 时复活必不能施，但先收集候选再统一判（日志完整）。
+    const int mana = GetHeroMana_(mgr, side);
 
-    // 收集队列内够格候选：勾选 + 按方案策略判定。
-    // 够格者中统一取血量最低（全灭者剩余 0 天然最前）。
+    // 收集己方部队（按队保活方式，选「不保活」的队永不入选；战争机器与召唤物克隆槽不参与）
+    // 按各队自己的方式判定。够格者中统一取血量最低（全灭者剩余 0 天然最前）。
     H3AutoPolicy::TargetCandidate cands[21] = {};
     int cand_slot[21] = {}, cand_spell[21] = {}, cand_exp[21] = {};
+    int cand_restore[21] = {};
     int cand_count = 0;
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = g_active_rules[slot];
-        if (!rule.protectEnable) continue;
 
         const StackTrackEntry& te = g_stack_track[slot];
         if (!te.bound || te.side != side) continue;
         _BattleStack_* st = &mgr->stack[side][slot];
-        if (!st || st->count_at_start <= 0) continue;
+        if (!st) continue;
+        const int baseline = ProtectBaselineCount_(mgr, side, st);
+        if (baseline <= 0) continue;
         if (!CreatureInfoIndexValid_(st->creature_id)) continue;
+        if (H3AutoPolicy::IsWarMachineType(st->creature_id)) continue;
         const bool dead = st->count_current <= 0;
         if (dead && StackHex_(st) < 0) continue;          // 没有可施法的尸体格
 
         // 损失口径与急救"失血数值"一致：死亡数×满血 + 顶层已损。
-        // 满血取战场单位内嵌 CreatureInfo（st+0x74 再 +0x4C）。
+        // 死亡数从英雄战前军队数量算，不用 F9 重打后或按确定时的数量。
         H3AutoPolicy::TargetCandidate cand = {};
         cand.count_current = st->count_current;
-        cand.count_at_start = st->count_at_start;
+        cand.count_at_start = baseline;
         cand.hit_points     = st->creature.hit_points;
         cand.lost_hp        = st->lost_hp;
         const int wound = H3AutoPolicy::WoundValue(cand);
         // 队列槽位快照（debug）：还原「该救不救」判定的完整输入。
-        LogDebug("[Protect] queue slot=%d cnt=%d start=%d wound=%d dead=%d rem=%d th=%d",
-            slot, st->count_current, st->count_at_start, wound,
-            dead ? 1 : 0, H3AutoPolicy::StackRemainingHp(cand),
+        LogDebug("[Protect] queue slot=%d mode=%d cnt=%d start=%d origin=%d wound=%d dead=%d rem=%d th=%d",
+            slot, (int)rule.protectMode, st->count_current, st->count_at_start, baseline,
+            wound, dead ? 1 : 0, H3AutoPolicy::StackRemainingHp(cand),
             rule.protectCountBelow);
 
         // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
@@ -1373,11 +1374,36 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
                 slot, spell_id);
             continue;                                   // 没学该法术
         }
-        const int restorable =
-            H3AutoPolicy::ResurrectionRestoreHp(expertise, spell_power);
+        int spell_base = -1;
+        int spell_effect = -1;
+        __try {
+            BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
+            if (spell_table && spell_id >= 0 && spell_id < 81) {
+                BYTE* spell = spell_table + spell_id * 0x88;
+                spell_effect = *reinterpret_cast<int*>(spell + 0x30);
+                spell_base = *reinterpret_cast<int*>(spell + 0x34
+                    + expertise * 4);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        int restorable = (spell_base >= 0 && spell_effect >= 0)
+            ? H3AutoPolicy::ResurrectionRestoreHp(
+                spell_base, spell_effect, expertise, spell_power)
+            : H3AutoPolicy::ResurrectionRestoreHp(expertise, spell_power);
+        // 复活与聚灵都要加英雄法术特长（0x4E6260），无特长返回 0。
+        // 等级取全局生物表 +4，战场内嵌生物信息从血量起、不含等级。
+        int creature_level = 0;
+        if (CreatureInfoIndexValid_(st->creature_id))
+            creature_level = P_CreatureInformation[st->creature_id].level;
+        int specialty = 0;
+        __try {
+            specialty = mgr->hero[side]->GetSpell_Specialisation_Bonuses(
+                spell_id, creature_level, restorable);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (specialty > 0 && restorable <= 0x7FFFFFFF - specialty)
+            restorable += specialty;
 
-        if (!H3AutoPolicy::ProtectShouldCast(true,
-                (H3AutoPolicy::ProtectStrategy)strategy,
+        if (!H3AutoPolicy::ProtectShouldCast(
+                (H3AutoPolicy::ProtectMode)rule.protectMode,
                 restorable, wound,
                 st->count_current, rule.protectCountBelow))
             continue;
@@ -1385,18 +1411,23 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         cand_slot[cand_count] = slot;
         cand_spell[cand_count] = spell_id;
         cand_exp[cand_count] = expertise;
+        cand_restore[cand_count] = restorable;
         ++cand_count;
     }
     const int picked = H3AutoPolicy::SelectProtectTargetIndex(cands, cand_count);
     if (picked < 0) {
-        LogDebug("[Protect] no qualified target strategy=%d turn=%d cands=%d",
-            strategy, turn, cand_count);
-        return false;
+        LogDebug("[Protect] no qualified target turn=%d cands=%d summon=%d",
+            turn, cand_count, g_summon[g_active_profile].enabled ? 1 : 0);
+        // 复活无人可救 → 召唤兜底（启用时才判；法力/已学/时机自查）。
+        if (!g_summon[g_active_profile].enabled) return false;
+        return SummonChannel_(mgr, side, cm, hero, spell_power);
     }
+    if (mana < 10) return false;                       // 有人该救但法力不够
     // 候选明细（debug）：定位“该救不救/救错对象”类问题。
     for (int i = 0; i < cand_count; ++i)
-        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
+        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d restore=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
             i, cand_count, cand_slot[i], cand_spell[i], cand_exp[i],
+            cand_restore[i],
             H3AutoPolicy::WoundValue(cands[i]),
             H3AutoPolicy::StackRemainingHp(cands[i]),
             cands[i].count_current <= 0 ? 1 : 0,
@@ -1414,9 +1445,9 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     // 原版施法失败不能逃出战斗回调。
     __try {
-        LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d strategy=%d",
+        LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d",
             best_spell, best_slot, StackHex_(st), best_exp, spell_power,
-            best_remaining, best_wound, strategy);
+            best_remaining, best_wound);
         cm->CastSpell(best_spell, StackHex_(st), 0, -1, best_exp, spell_power);
     } __except (1) {
         LogDebug("[Protect] cast exception code=0x%08X spell=%d slot=%d",
@@ -1506,10 +1537,10 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 }
 
 // CommitProfiles：勾号/Enter 一次性提交全部 5 套内存方案，当前选中方案立即生效。
-// 召唤通道参数（阈值/法术选择/召唤物共享规则/敌方法力停）随方案一起提交，
+// 召唤通道参数（启用/阈值/法术选择/召唤物共享规则/敌方法力停）随方案一起提交，
 // 共享规则在此再过一次 NormalizeSummonRule（草稿来源不可信原则）。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
-    const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
+    const uint16_t stop_turns[5],
     const SummonProfileFields summon[5], bool* out_store_added)
 {
     if (out_store_added) *out_store_added = false;
@@ -1517,19 +1548,23 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         active_profile = 0;
     memcpy(g_profiles, rules, sizeof(g_profiles));
     for (int p = 0; p < 5; ++p) {
-        g_protect_strategy[p] = protect_strategy ? protect_strategy[p] : 0;
         int turns = stop_turns ? stop_turns[p] : H3AutoPolicy::DEFAULT_STOP_TURNS;
         if (turns < 0) turns = 0;
         if (turns > 999) turns = 999;
         g_stop_turns[p] = static_cast<uint16_t>(turns);
         SummonProfileFields fields = summon
             ? summon[p] : H3AutoPolicy::MakeDefaultSummonFields();
+        fields.enabled = fields.enabled ? 1 : 0;
         if (fields.count_th < 0) fields.count_th = 0;
         if (fields.count_th > 21) fields.count_th = 21;
         if (fields.hp_th < 0) fields.hp_th = 0;
         if (fields.spell_pick < 0
             || fields.spell_pick > H3AutoPolicy::SUMMON_ELEMENT_COUNT)
             fields.spell_pick = 0;
+        fields.cond_combine =
+            (fields.cond_combine == H3AutoPolicy::SUMMON_COMBINE_OR)
+            ? H3AutoPolicy::SUMMON_COMBINE_OR
+            : H3AutoPolicy::SUMMON_COMBINE_AND;
         fields.stop_enemy_mana = fields.stop_enemy_mana ? 1 : 0;
         if (fields.stop_mana_th < 0) fields.stop_mana_th = 0;
         if (fields.stop_mana_th > 32767) fields.stop_mana_th = 32767;
@@ -1560,13 +1595,13 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     // 生效方案召唤/停止参数留痕（测试核对：默认勾选+阈值 6+召唤物默认防御）。
     {
         const SummonProfileFields& sf = g_summon[g_active_profile];
-        LogInfo("[Auto] active cfg: strategy=%d stop_turns=%d "
-            "mana_stop=%d mana_th=%d summon(spell=%d count<= %d hp<= %d act=%d)",
-            (int)g_protect_strategy[g_active_profile],
+        LogInfo("[Auto] active cfg: stop_turns=%d "
+            "mana_stop=%d mana_th=%d summon(on=%d spell=%d combine=%d "
+            "count<%d hp<=%d act=%d)",
             (int)g_stop_turns[g_active_profile],
             (int)sf.stop_enemy_mana, sf.stop_mana_th,
-            (int)sf.spell_pick, sf.count_th, sf.hp_th,
-            (int)sf.summon_rule.action);
+            (int)sf.enabled, (int)sf.spell_pick, sf.cond_combine,
+            sf.count_th, sf.hp_th, (int)sf.summon_rule.action);
     }
     // 提交后立即绑定本场部队身份；后续执行依赖跟踪校验。
     BindStackTrackingFromBattle_();
@@ -1575,7 +1610,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     if (g_battle_fp_valid) {
         bool skipped = false;
         if (AppendBattleStoreRecord(g_battle_fp,
-                (const AutoStackRule(*)[21])g_profiles, g_protect_strategy,
+                (const AutoStackRule(*)[21])g_profiles,
                 g_stop_turns, g_summon, g_active_profile, &skipped)) {
             LogInfo("[BattleStore] %s（active=%d）",
                 skipped ? "内容未变，不新增存档" : "已存档", g_active_profile + 1);
@@ -2424,8 +2459,8 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
     }
     __try {
         PollControlHotkeys_(This);
-        // 每次行动（控制权交玩家）都判保活：回合内首动每回合只判一次；
-        // 按数量 / 损失量大于恢复量为事件型，每次行动都判，
+        // 每次行动（控制权交玩家）都判保活（事件型，无回合标记）：
+        // 复活按各队方式（剩余数量≤/损失量大于恢复量），召唤按阈值，
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         TryAutoStop_(This);

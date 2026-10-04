@@ -113,8 +113,8 @@ void TestBattleStoreRecord()
     r1.active = 1;
     r1.rules[0][0].action = AA_DEFEND;
     r1.rules[3][20].action = AA_RANGED_ATTACK;
-    r1.strategy[1] = 2;
     r1.stop_turns[4] = 7;
+    r1.summon[2].enabled = 1;
     r1.summon[2].count_th = 3;
     r1.summon[2].hp_th = 800;
 
@@ -132,8 +132,8 @@ void TestBattleStoreRecord()
     Check(!BattleStoreRecordContentEquals(r1, r3), "active change differs");
     BattleStoreRecord r4 = r1; r4.rules[3][20].action = AA_DEFEND;
     Check(!BattleStoreRecordContentEquals(r1, r4), "one rule change differs");
-    BattleStoreRecord r5 = r1; r5.strategy[1] = 0;
-    Check(!BattleStoreRecordContentEquals(r1, r5), "strategy change differs");
+    BattleStoreRecord r5 = r1; r5.summon[2].enabled = 0;
+    Check(!BattleStoreRecordContentEquals(r1, r5), "summon enable differs");
     BattleStoreRecord r6 = r1; r6.stop_turns[4] = 8;
     Check(!BattleStoreRecordContentEquals(r1, r6), "stop turns change differs");
     BattleStoreRecord r7 = r1; r7.summon[2].hp_th = 801;
@@ -584,35 +584,36 @@ void TestProtect()
     Check(ResurrectionRestoreHp(2, 10) == 750, "advanced resurrection restores 75*power");
     Check(ResurrectionRestoreHp(3, 10) == 1000, "expert resurrection restores 100*power");
     Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
+    // 原版口径：baseValue[等级] + 力量 × spEffect。表值非法时退回旧估算。
+    Check(ResurrectionRestoreHp(40, 50, 3, 33) == 1690,
+        "spell table restore is base plus power times effect");
+    Check(ResurrectionRestoreHp(-1, 50, 3, 33) == 3300,
+        "invalid spell table falls back to level times power");
 
-    // 方案级策略门槛：无 / 按数量 / 回合内首动 / 损失量大于恢复量。
-    Check(!ProtectShouldCast(true, PS_NONE, 500, 600, 999, 20),
-        "PS_NONE never casts");
-    Check(ProtectShouldCast(true, PS_FIRST_ACTION, 500, 1, 999, 20),
-        "first-action strategy casts on any loss");
-    Check(!ProtectShouldCast(true, PS_FIRST_ACTION, 500, 0, 999, 20),
-        "first-action strategy skips undamaged stacks");
-    Check(ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 501, 999, 20),
+    // 保活方式（部队级，三选一，默认不保活）。
+    Check(!ProtectShouldCast(PM_NONE, 500, 600, 0, 20),
+        "protect off never casts");
+    Check(!ProtectShouldCast(PM_NONE, 500, 600, 5, 0),
+        "protect off ignores count threshold 0");
+    Check(ProtectShouldCast(PM_LOSS_GT_RESTORE, 500, 501, 999, 20),
         "loss above restorable casts");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 500, 500, 999, 20),
+    Check(!ProtectShouldCast(PM_LOSS_GT_RESTORE, 500, 500, 999, 20),
         "loss equal to restorable does not cast");
-    Check(!ProtectShouldCast(true, PS_LOSS_GT_RESTORE, 0, 500, 0, 20),
+    Check(!ProtectShouldCast(PM_LOSS_GT_RESTORE, 0, 500, 0, 20),
         "unlearned spell never casts");
-    Check(!ProtectShouldCast(false, PS_FIRST_ACTION, 500, 600, 999, 20),
-        "not in queue disables");
 
-    // 按数量策略：剩余数量 ≤ 该队阈值才救（阈值默认 2，范围 0..INT_MAX）。
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 15, 20),
+    // 剩余数量方式：剩余数量 ≤ 该队阈值才救（阈值默认 2，范围 0..INT_MAX）。
+    Check(ProtectShouldCast(PM_COUNT_BELOW, 500, 600, 15, 20),
         "count at threshold qualifies");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 5, 20),
+    Check(ProtectShouldCast(PM_COUNT_BELOW, 500, 600, 5, 20),
         "count below threshold qualifies");
-    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 21, 20),
+    Check(!ProtectShouldCast(PM_COUNT_BELOW, 500, 600, 21, 20),
         "count above threshold does not qualify");
-    Check(!ProtectShouldCast(true, PS_COUNT_BELOW, 500, 0, 5, 20),
+    Check(!ProtectShouldCast(PM_COUNT_BELOW, 500, 0, 5, 20),
         "undamaged stack never qualifies");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600, 0, 0),
+    Check(ProtectShouldCast(PM_COUNT_BELOW, 500, 600, 0, 0),
         "count zero qualifies at threshold 0");
-    Check(ProtectShouldCast(true, PS_COUNT_BELOW, 500, 600,
+    Check(ProtectShouldCast(PM_COUNT_BELOW, 500, 600,
             2147483647, 2147483647),
         "int-max threshold accepts any count");
 
@@ -644,14 +645,15 @@ void TestProtect()
             "empty candidate list returns -1");
     }
 
-    // 默认规则：未入保活队列。
+    // 默认规则：保活默认不开启（三选一），阈值默认 2。
     const AutoStackRule def = MakeDefaultRule();
-    Check(def.protectEnable == 0, "default rule is not in the protect queue");
+    Check(def.protectMode == PM_NONE,
+        "default rule does not protect");
+    Check(def.protectCountBelow == 2, "default protect threshold is 2");
 }
 
 void TestProfileStoreRoundtrip()
 {
-    uint8_t strategy = PS_SUMMON_LOW_FORCE;
     AutoStackRule rules[PROFILE_STORE_SLOTS] = {};
     for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
         rules[s] = MakeDefaultRule();
@@ -663,7 +665,7 @@ void TestProfileStoreRoundtrip()
     rules[7].target.moveWaypointCount = 1;
     rules[7].spellSlots[0] = 3;
     rules[7].spellSlotCount = 1;
-    rules[7].protectEnable = 1;
+    rules[7].protectMode = PM_LOSS_GT_RESTORE;
     rules[7].protectCountBelow = 123;
     rules[7].allowDefendFallback = true;
     rules[20].action = AA_RANGED_ATTACK;
@@ -677,38 +679,43 @@ void TestProfileStoreRoundtrip()
     army_types[2] = 12; army_counts[2] = 40;
 
     SummonProfileFields summon = MakeDefaultSummonFields();
+    summon.enabled = 1;
     summon.count_th = 3;
     summon.hp_th = 900;
     summon.spell_pick = 2;
+    summon.cond_combine = SUMMON_COMBINE_OR;
     summon.stop_enemy_mana = 1;
     summon.stop_mana_th = 258;
     summon.summon_rule.action = AA_SCATTER;
     summon.summon_rule.allowDefendFallback = true; // 散开须清掉
 
-    Check(PROFILE_STORE_INTS == 1369, "h3ap7 profile store has 1369 ints");
+    Check(PROFILE_STORE_INTS == 1370, "h3ap9 profile store has 1370 ints");
     Check(summon.stop_mana_th == 258
         && MakeDefaultSummonFields().stop_mana_th == 6,
         "summon mana threshold default 6");
+    Check(MakeDefaultSummonFields().enabled == 0,
+        "summon disabled by default");
+    Check(MakeDefaultSummonFields().cond_combine == SUMMON_COMBINE_AND,
+        "summon conditions default to AND");
 
     char text[32 * 1024] = {};
     const int written = EncodeProfileStoreText(army_types, army_counts,
-        strategy, rules, stop_turns, summon, text, sizeof(text));
+        rules, stop_turns, summon, text, sizeof(text));
     Check(written > 0, "profile store encodes");
 
-    uint8_t out_strategy = 0;
     uint16_t out_stop = 0;
     int out_types[PROFILE_STORE_SLOTS] = {};
     int out_counts[PROFILE_STORE_SLOTS] = {};
     AutoStackRule out_rules[PROFILE_STORE_SLOTS] = {};
     SummonProfileFields out_summon = {};
-    Check(DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+    Check(DecodeProfileStoreText(text, out_types, out_counts,
             out_rules, &out_stop, &out_summon),
         "profile store decodes");
     Check(out_types[0] == 10 && out_counts[0] == 20
         && out_types[2] == 12 && out_counts[2] == 40,
         "army table roundtrip");
     Check(out_types[3] == -1 && out_counts[3] == 0, "empty slot roundtrip");
-    Check(out_strategy == strategy, "summon strategy roundtrip");
+    Check(out_summon.enabled == 1, "summon enable roundtrip");
     Check(out_rules[7].action == AA_MELEE_ATTACK, "rule action roundtrip");
     Check(out_rules[7].target.meleeStandHex == 125, "melee stand roundtrip");
     Check(out_rules[7].target.meleeAttackHex == 108, "melee attack roundtrip");
@@ -717,8 +724,11 @@ void TestProfileStoreRoundtrip()
     Check(out_rules[7].target.moveWaypointCount == 1, "waypoint count roundtrip");
     Check(out_rules[7].spellSlots[0] == 3, "spell slot roundtrip");
     Check(out_rules[7].spellSlotCount == 1, "spell count roundtrip");
-    Check(out_rules[7].protectEnable == 1, "protect enable roundtrip");
+    Check(out_rules[7].protectMode == PM_LOSS_GT_RESTORE,
+        "protect mode roundtrip");
     Check(out_rules[7].protectCountBelow == 123, "protect count threshold roundtrip");
+    Check(out_rules[20].protectMode == PM_NONE,
+        "protect mode default is off");
     Check(out_rules[20].protectCountBelow == 2,
         "protect count default is 2");
     Check(out_rules[7].allowDefendFallback, "fallback roundtrip");
@@ -728,63 +738,59 @@ void TestProfileStoreRoundtrip()
     Check(out_rules[0].action == AA_MANUAL, "default slot stays manual");
     Check(out_stop == stop_turns, "stop turns roundtrip");
     Check(out_summon.count_th == 3 && out_summon.hp_th == 900
-        && out_summon.spell_pick == 2 && out_summon.stop_enemy_mana == 1
+        && out_summon.spell_pick == 2 && out_summon.cond_combine == SUMMON_COMBINE_OR
+        && out_summon.stop_enemy_mana == 1
         && out_summon.stop_mana_th == 258,
         "summon fields roundtrip");
     Check(out_summon.summon_rule.action == AA_SCATTER,
         "summon rule action roundtrip");
     Check(!out_summon.summon_rule.allowDefendFallback,
         "scatter clears fallback on decode");
-    Check(out_summon.summon_rule.protectEnable == 0,
-        "summon rule never joins protect queue");
+    Check(out_summon.summon_rule.protectMode == PM_NONE,
+        "summon rule uses protect off");
 
     Check(!DecodeProfileStoreText("H3AP3 1 2 3", out_types, out_counts,
-            &out_strategy, out_rules, &out_stop, &out_summon),
+            out_rules, &out_stop, &out_summon),
         "truncated store rejected");
     Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
-            &out_strategy, out_rules, &out_stop, &out_summon),
+            out_rules, &out_stop, &out_summon),
         "legacy five-slot magic rejected");
-    text[4] = '5'; // H3AP6 -> H3AP5：上一版格式（无召唤字段）拒绝
-    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+    text[4] = '5'; // H3AP9 -> H3AP5：旧格式（无保活方式字段）拒绝
+    Check(!DecodeProfileStoreText(text, out_types, out_counts,
             out_rules, &out_stop, &out_summon),
         "h3ap5 store rejected after format bump");
-    text[4] = '4'; // H3AP4：59 字段规则旧格式拒绝
-    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+    text[4] = '7'; // H3AP7：旧格式（无保活方式字段）拒绝
+    Check(!DecodeProfileStoreText(text, out_types, out_counts,
             out_rules, &out_stop, &out_summon),
-        "h3ap4 store rejected");
-    text[4] = '6';
-    // H3AP6 旧档兼容读：删去第 49 个整数（stop_mana_th）+ 头改 v6，
-    // 其余原样 → 阈值应缺省为 6（原固定常量语义），其余字段保留。
+        "h3ap7 store rejected after format bump");
+    text[4] = '8'; // H3AP8：上一版格式（6 召唤整数、无条件组合）拒绝
+    Check(!DecodeProfileStoreText(text, out_types, out_counts,
+            out_rules, &out_stop, &out_summon),
+        "h3ap8 store rejected after format bump");
+    text[4] = '9';
+    // H3AP9 头 + 少 1 个整数（模拟旧版无 protectMode 的规则）→ 拒绝。
     {
         const char* src = text + 5;
-        static char v6text[32 * 1024] = "H3AP6";
-        int vlen = 5, skipped = 0, seen = 0;
+        static char trimmed[32 * 1024] = "H3AP9";
+        int vlen = 5, seen = 0, dropped = 0;
         while (*src) {
             while (*src == ' ') ++src;
             if (!*src) break;
             const char* tok = src;
             while (*src && *src != ' ') ++src;
-            ++seen; // 1-based 序号；49 = 42 部队 + 策略 + 停止 + 4 召唤之后
-            if (seen != 42 + 1 + 1 + 4 + 1) {
-                v6text[vlen++] = ' ';
-                for (const char* q = tok; q < src; ++q) v6text[vlen++] = *q;
-            } else ++skipped;
+            ++seen; // 1-based；规则区从第 50 位起，每条 60 个的末位
+            if (seen >= 50 && ((seen - 50) % 60 == 59)) { ++dropped; continue; }
+            trimmed[vlen++] = ' ';
+            for (const char* q = tok; q < src; ++q) trimmed[vlen++] = *q;
         }
-        v6text[vlen] = 0;
-        Check(skipped == 1, "h3ap6 compat text drops one int");
-        Check(DecodeProfileStoreText(v6text, out_types, out_counts,
-                &out_strategy, out_rules, &out_stop, &out_summon),
-            "h3ap6 legacy store still decodes");
-        Check(out_summon.stop_mana_th == 6 && out_summon.count_th == 3
-            && out_summon.stop_enemy_mana == 1 && out_stop == 25,
-            "h3ap6 legacy mana threshold defaults to 6");
-        // H3AP6 头 + 新整数数（1369）不匹配 → 拒绝（v6 只认 1368）。
-        Check(!DecodeProfileStoreText(text, out_types, out_counts,
-                &out_strategy, out_rules, &out_stop, &out_summon),
-            "h3ap6 magic with v7 int count rejected");
+        trimmed[vlen] = 0;
+        Check(dropped == 22, "trimmed text drops one int per rule");
+        Check(!DecodeProfileStoreText(trimmed, out_types, out_counts,
+                out_rules, &out_stop, &out_summon),
+            "wrong int count rejected");
     }
     text[0] = 'X';
-    Check(!DecodeProfileStoreText(text, out_types, out_counts, &out_strategy,
+    Check(!DecodeProfileStoreText(text, out_types, out_counts,
             out_rules, &out_stop, &out_summon),
         "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
@@ -797,24 +803,37 @@ void TestProfileStoreRoundtrip()
 
 void TestSummonChannel()
 {
-    // 时机判定：队数与血量任一阈值 + 施法/已学/法力守卫（或关系）。
-    Check(SummonShouldCast(2, 2, 750, 750, 30, 15, false, true),
-        "both thresholds met casts");
-    Check(SummonShouldCast(2, 2, 4000, 750, 30, 15, false, true),
-        "stack count alone below threshold casts");
-    Check(SummonShouldCast(5, 2, 750, 750, 30, 15, false, true),
-        "hp total alone below threshold casts");
-    Check(!SummonShouldCast(3, 2, 751, 750, 30, 15, false, true),
-        "neither threshold met does not cast");
-    Check(SummonShouldCast(0, 0, 5000, 0, 30, 15, false, true),
-        "zero count threshold casts when no stacks remain");
-    Check(!SummonShouldCast(2, 2, 750, 750, 30, 15, true, true),
+    // 时机判定：队数严格小于阈值、血量 ≤ 阈值，按「和/或」组合，加施法/已学/法力守卫。
+    // 默认「和」：两个条件都满足才召。
+    Check(!SummonShouldCast(2, 2, 751, 750, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: count equal and hp above does not cast");
+    Check(SummonShouldCast(1, 2, 750, 750, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: both conditions met casts");
+    Check(!SummonShouldCast(1, 2, 4000, 750, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: count alone does not cast");
+    Check(!SummonShouldCast(5, 2, 750, 750, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: hp alone does not cast");
+    Check(SummonShouldCast(0, 1, 0, 0, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: both zero thresholds met with nothing alive");
+    Check(!SummonShouldCast(0, 0, 5000, 0, SUMMON_COMBINE_AND, 30, 15, false, true),
+        "AND: zero count threshold never satisfied");
+    // 「或」：任一满足即召。
+    Check(SummonShouldCast(1, 2, 4000, 750, SUMMON_COMBINE_OR, 30, 15, false, true),
+        "OR: stack count alone below threshold casts");
+    Check(SummonShouldCast(5, 2, 750, 750, SUMMON_COMBINE_OR, 30, 15, false, true),
+        "OR: hp total alone at threshold casts");
+    Check(!SummonShouldCast(3, 2, 751, 750, SUMMON_COMBINE_OR, 30, 15, false, true),
+        "OR: neither threshold met does not cast");
+    Check(SummonShouldCast(0, 0, 0, 0, SUMMON_COMBINE_OR, 30, 15, false, true),
+        "OR: zero count threshold still casts via hp zero");
+    // 守卫与组合方式无关。
+    Check(!SummonShouldCast(1, 2, 750, 750, SUMMON_COMBINE_AND, 30, 15, true, true),
         "already casted this turn blocks");
-    Check(!SummonShouldCast(2, 2, 750, 750, 14, 15, false, true),
+    Check(!SummonShouldCast(1, 2, 750, 750, SUMMON_COMBINE_OR, 14, 15, false, true),
         "not enough mana blocks");
-    Check(SummonShouldCast(2, 2, 750, 750, 30, 0, false, true),
+    Check(SummonShouldCast(1, 2, 750, 750, SUMMON_COMBINE_AND, 30, 0, false, true),
         "zero mana cost never blocks mana check");
-    Check(!SummonShouldCast(2, 2, 750, 750, 30, 15, false, false),
+    Check(!SummonShouldCast(1, 2, 750, 750, SUMMON_COMBINE_OR, 30, 15, false, false),
         "unlearned spell never casts");
 
     // 元素判定：气112/土113/火114/水115。
@@ -954,7 +973,7 @@ void TestSummonRuleNormalization()
     AutoStackRule rule = MakeDefaultRule();
     rule.action = AA_SCATTER;
     rule.allowDefendFallback = true;
-    rule.protectEnable = 1;
+    rule.protectMode = PM_LOSS_GT_RESTORE;
     rule.quickCastFirst = true;
     rule.spellSlotCount = 2;
     rule.spellSlots[0] = 1;
@@ -962,7 +981,7 @@ void TestSummonRuleNormalization()
     NormalizeSummonRule(&rule);
     Check(rule.action == AA_SCATTER, "scatter survives normalization");
     Check(!rule.allowDefendFallback, "scatter loses fallback");
-    Check(rule.protectEnable == 0, "summon rule leaves protect queue");
+    Check(rule.protectMode == PM_NONE, "summon rule resets protect mode");
     Check(!rule.quickCastFirst && rule.spellSlotCount == 0,
         "summon rule has no quick cast");
 

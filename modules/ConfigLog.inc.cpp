@@ -9,7 +9,7 @@ static AutoStackRule MakeDefaultRule_()
 // 5 套方案驻留内存（每个编号一份草稿/已确认方案）：切换编号时各自的
 // 草稿独立保留，未存档也不丢。方案编号 1-5 同时是存档文件编号
 // （H3Auto.profilesN.ini）。
-// 首动保活的勾选（protectEnable）在 AutoStackRule 内随方案走；策略是方案级。
+// 保活方式（protectMode，三选一，默认不保活）在 AutoStackRule 内随方案走。
 AutoStackRule g_profiles[5][21] = {};
 int g_active_profile = 0;
 
@@ -38,14 +38,14 @@ struct DefaultRulesInit_ {
 // 不自动读档。跨战斗保留。
 int g_last_profile = 0;
 
-// 保活策略（方案级）：部队勾选（protectEnable）在规则里，何时施救的策略随方案走。
-// 策略 1-4 = 复活/聚灵通道；PS_SUMMON_LOW_FORCE = 召唤通道（时机与参数见 g_summon）。
-uint8_t g_protect_strategy[5] = {};   // ProtectStrategy，默认 0=PS_NONE（无）
+// 保活与召唤是同一条施法通道（保活优先，召唤兜底），无方案级通道选择。
+// 保活按队三选一（不保活/剩余数量/损失量，默认不保活）挂在每条规则上
+// （protectMode），随方案走；召唤是否启用在 g_summon[p].enabled（默认不启用）。
 uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS,
     H3AutoPolicy::DEFAULT_STOP_TURNS, H3AutoPolicy::DEFAULT_STOP_TURNS }; // 0=关闭，0..999
 
-// 召唤通道配置（方案级，H3AP7 起随方案存档）：时机在 g_protect_strategy，
+// 召唤通道配置（方案级，随 H3AP9 方案存档）：enabled=是否启用召唤兜底；
 // 阈值/法术选择/召唤物共享规则在此；stop_enemy_mana+stop_mana_th 是自动停止
 // 第二条件（勾选后敌方英雄魔力 ≤ 阈值（默认 6，0..32767）时整场切回手动，
 // 与 g_stop_turns OR 组合）。
@@ -70,7 +70,6 @@ void ClearConfirmedProfiles()
     for (int p = 0; p < 5; ++p) {
         for (int s = 0; s < 21; ++s)
             g_profiles[p][s] = def;
-        g_protect_strategy[p] = H3AutoPolicy::PS_NONE;
         g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         g_summon[p] = summon_def;
     }
@@ -375,9 +374,9 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 // 只保留最近 kBattlesKeep_ 条（旧的丢弃）。JSON 结构：
 //   {"version":1,"battle":"<hex16>","entries":[
 //     {"time":"yyyymmdd-hhmmss","active":1..5,
-//      "p":["H3AP7 …","H3AP7 …","H3AP7 …","H3AP7 …","H3AP7 …"]}, … ]}
+//      "p":["H3AP9 …","H3AP9 …","H3AP9 …","H3AP9 …","H3AP9 …"]}, … ]}
 // 每方案的规则文本复用 EncodeProfileStoreText/DecodeProfileStoreText
-// （输出仅 H3AP7+数字+空格，JSON 字符串无需转义）。army 表喂 0：
+// （输出仅 H3AP9+数字+空格，JSON 字符串无需转义）。army 表喂 0：
 // 同指纹战斗即同部队，无需四轮关联，表仅存档格式占位。
 // 跨文件再按 mtime LRU 保留最近 kBattlesKeep_ 场。
 // ======================================================================
@@ -488,14 +487,13 @@ static bool ParseRecordText_(const char* obj, BattleStoreRecord* rec)
         if (!JsonReadString_(pv, one, 32 * 1024)) { ok = false; break; }
         int zero_types[21] = {};
         int zero_counts[21] = {};
-        uint8_t st = 0; uint16_t turns = 0;
+        uint16_t turns = 0;
         SummonProfileFields sf = {};
         if (!H3AutoPolicy::DecodeProfileStoreText(one, zero_types,
-                zero_counts, &st, rec->rules[p], &turns, &sf)) {
+                zero_counts, rec->rules[p], &turns, &sf)) {
             ok = false;
             break;
         }
-        rec->strategy[p] = st;
         rec->stop_turns[p] = turns;
         rec->summon[p] = sf;
         // 跳到下一个字符串值：pv 此时指向当前串的「开引号」（JsonReadString_
@@ -569,7 +567,7 @@ static bool SaveBattleStoreRaw_(unsigned long long fp,
             if (p) text[off++] = ',';
             text[off++] = '"';
             const int n = H3AutoPolicy::EncodeProfileStoreText(zero_types,
-                zero_counts, r.strategy[p], r.rules[p], r.stop_turns[p],
+                zero_counts, r.rules[p], r.stop_turns[p],
                 r.summon[p], text + off, 32 * 1024);
             if (n <= 0) { ok = false; break; }
             off += n;
@@ -610,7 +608,7 @@ bool LoadBattleStore(unsigned long long fp, BattleStoreRecord* records,
 // 「确定」时追加一条：时间戳取当前；与最后一条内容相同则不新增
 // （*skipped_same=true）；超 kBattlesKeep_ 条裁最老。返回是否落盘成功。
 bool AppendBattleStoreRecord(unsigned long long fp,
-    const AutoStackRule rules[5][21], const uint8_t strategy[5],
+    const AutoStackRule rules[5][21],
     const uint16_t stop_turns[5], const SummonProfileFields summon[5],
     int active, bool* skipped_same)
 {
@@ -626,7 +624,6 @@ bool AppendBattleStoreRecord(unsigned long long fp,
         NowStamp_(rec->time, sizeof(rec->time));
         rec->active = active >= 0 && active <= 4 ? active : 0;
         memcpy(rec->rules, rules, sizeof(rec->rules));
-        memcpy(rec->strategy, strategy, sizeof(rec->strategy));
         memcpy(rec->stop_turns, stop_turns, sizeof(rec->stop_turns));
         memcpy(rec->summon, summon, sizeof(rec->summon));
         if (n > 0

@@ -114,7 +114,11 @@ struct _Hero_ {
     int   dest_z;
     char _pad41[0x55 - 0x41];
     short level;
-    char _pad57[0xC9 - 0x57];
+    char _pad57[0x91 - 0x57];
+    // H3Hero::army 位于 0x91：英雄头像 Alt+右键显示的战前军队数量。
+    // 战斗中不会写回，作为损失量方式的唯一开战基准。
+    int   army_type[7];
+    int   army_count[7];
     unsigned char second_skill[28];
     char _padE5[0x12D - 0xE5];
     _Artifact_ doll_art[19];

@@ -33,9 +33,8 @@ static struct Panel {
     bool active;
     int x, y;
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS]; // 5 套草稿（每编号一份，切走不丢）
-    uint8_t draft_protect_strategy[PROFILE_COUNT]; // 保活策略草稿（方案级）
     uint16_t draft_stop_turns[PROFILE_COUNT];       // 自动停止回合草稿，0=关闭，0..999
-    SummonProfileFields draft_summon[PROFILE_COUNT]; // 召唤通道草稿（阈值/法术/召唤物规则/敌方法力停）
+    SummonProfileFields draft_summon[PROFILE_COUNT]; // 召唤通道草稿（启用/阈值/法术/召唤物规则/敌方法力停）
     int selected_profile;                           // 当前编号 0..4（存档文件编号 = 界面方案 1-5）
     int pressed_profile;
     int count;                 // 可配置部队总数（可大于可见行）
@@ -68,8 +67,6 @@ static void DrawPanelToBuffer_();
 static bool s_help_modal_open = false;
 static bool s_help_log_dd_open = false;
 static DWORD s_help_link_flash_tick = 0; // 复制开源地址成功时刻，地址行闪绿 1.2s
-static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
-static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
 static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
 static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
 static int  s_stop_turns_caret = 0;        // 插入位置（0..文本长度）
@@ -113,7 +110,7 @@ static bool s_pick_wait_button_release = false;
 static int s_move_pick_cell = -1;
 static int s_move_pick_wp = -1;
 
-// ===== 保活策略下拉（方案级）与数字键拦截 =====
+// ===== 保活通道下拉（方案级）与数字键拦截 =====
 
 // 设置面板存活期间（含隐藏拾取态）拦截 0-9/小键盘，避免原版快捷施法抢键。
 static void CommitStopTurnsEdit_();
@@ -656,7 +653,7 @@ INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 }
 
 
-// ===== 保活策略下拉行（方案级，随当前选中方案的草稿） =====
+// ===== 保活通道下拉行（方案级，随当前选中方案的草稿） =====
 static void CommitStopTurnsEdit_()
 {
     int value = 0;
@@ -701,9 +698,11 @@ static void CancelManaThEdit_()
 }
 
 // ===== 召唤页（PAGE_SUMMON）控件状态 =====
-// 两个下拉（法术/召唤物行动）悬停高亮；法术下拉选项 0..4（自动+四系）。
+// 三个下拉（法术/条件组合/召唤物行动）悬停高亮；法术下拉选项 0..4（自动+四系）。
 static bool s_summon_spell_dd_open = false;
 static int  s_summon_spell_dd_hover = -1;
+static bool s_summon_cond_dd_open = false;
+static int  s_summon_cond_dd_hover = -1;
 static bool s_summon_act_dd_open = false;
 static int  s_summon_act_dd_hover = -1;
 // 队数/血量阈值数字录入：与停止回合同款（预填当前值、光标可移动）。
@@ -714,14 +713,16 @@ static int  s_summon_edit_caret = 0;
 static DWORD s_summon_edit_caret_tick = 0;
 
 // 召唤页数字框矩形（which: SUMMON_EDIT_COUNT / SUMMON_EDIT_HP）。
+// 两条件分两行左对齐：队数在设置行一（法术行右半），血量在设置行二。
 static void SummonNumBoxRect_(int which, int* out_x, int* out_y,
     int* out_w, int* out_h)
 {
     const bool is_hp = (which == SUMMON_EDIT_HP);
     const int x = is_hp ? SUMMON_HP_BOX_X : SUMMON_CNT_BOX_X;
+    const int y = is_hp ? SUMMON_ROW2_Y : SUMMON_ROW1_Y;
     const int w = is_hp ? SUMMON_HP_BOX_W : SUMMON_CNT_BOX_W;
     if (out_x) *out_x = x;
-    if (out_y) *out_y = SUMMON_ROW1_Y;
+    if (out_y) *out_y = y;
     if (out_w) *out_w = w;
     if (out_h) *out_h = SUMMON_DD_H;
 }
@@ -754,7 +755,7 @@ static void CommitSummonNumEdit_()
         if (value > 2147483647LL) value = 2147483647LL;
         sf.hp_th = (int)value;
     }
-    LogInfo("[Panel] 召唤阈值：队数≤%d 血量≤%d (方案%d)", sf.count_th, sf.hp_th,
+    LogInfo("[Panel] 召唤阈值：队数<%d 血量≤%d (方案%d)", sf.count_th, sf.hp_th,
         s_p.selected_profile + 1);
     s_summon_edit_which = SUMMON_EDIT_NONE;
     s_summon_edit_text[0] = 0;
@@ -785,11 +786,13 @@ static void BeginSummonNumEdit_(int which)
     s_summon_edit_caret_tick = GetTickCount();
 }
 
-// 收起召唤页两个下拉与录入态（切页/切方案/关面板/开帮助时）。
+// 收起召唤页三个下拉与录入态（切页/切方案/关面板/开帮助时）。
 static void CloseSummonDropdowns_()
 {
     s_summon_spell_dd_open = false;
     s_summon_spell_dd_hover = -1;
+    s_summon_cond_dd_open = false;
+    s_summon_cond_dd_hover = -1;
     s_summon_act_dd_open = false;
     s_summon_act_dd_hover = -1;
 }
@@ -827,6 +830,13 @@ static const char* SummonSpellOptLabel_(int i)
     }
 }
 
+// 条件组合下拉选项文案（0=和，1=或）。
+static const char* SummonCondOptLabel_(int i)
+{
+    return i == H3AutoPolicy::SUMMON_COMBINE_OR
+        ? T("panel.summon_cond_or") : T("panel.summon_cond_and");
+}
+
 // 召唤物行动下拉选项文案（专用 4 动作集，见 GetAllowedSummonActions）。
 static const char* SummonActOptLabel_(int i)
 {
@@ -846,7 +856,7 @@ static int SummonActOptFromAction_(AutoActionKind action)
     return 0;
 }
 
-// ===== 部队卡片「剩≤」数量阈值录入（保活策略=按数量） =====
+// ===== 部队卡片「剩≤」数量阈值录入（保活通道=按数量） =====
 // 状态挂在各 CellControl 上；这里只做面板级的查找与收尾。
 static bool PanelAnyProtectCountEditing_()
 {
@@ -1011,7 +1021,6 @@ void ResetPanelDrafts()
     for (int p = 0; p < PROFILE_COUNT; ++p) {
         for (int s = 0; s < MAX_STACKS; ++s)
             s_p.draft_rules[p][s] = def;
-        s_p.draft_protect_strategy[p] = H3AutoPolicy::PS_NONE;
         s_p.draft_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         s_p.draft_summon[p] = summon_def;
     }
@@ -1049,7 +1058,6 @@ static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
     for (int p = 0; p < PROFILE_COUNT; ++p) {
         for (int s = 0; s < MAX_STACKS; ++s)
             s_p.draft_rules[p][s] = rec.rules[p][s];
-        s_p.draft_protect_strategy[p] = rec.strategy[p];
         s_p.draft_stop_turns[p] = rec.stop_turns[p];
         s_p.draft_summon[p] = rec.summon[p];
     }
@@ -1063,8 +1071,6 @@ static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
         s_p.cells[k].expanded = CEX_NONE;
         s_p.cells[k].dirty = true;
     }
-    s_protect_dd_open = false;
-    s_protect_dd_hover = -1;
     LoadSelectedProfileIntoCells_();
 }
 
@@ -1119,8 +1125,6 @@ static void SwitchPanelPage_(int page)
     if (s_mana_th_editing) CommitManaThEdit_();
     CommitSummonNumEdit_();        // 召唤页阈值录入跨页收尾
     CloseSummonDropdowns_();
-    s_protect_dd_open = false;
-    s_protect_dd_hover = -1;
     PanelCommitAllProtectCountEdits_();
     for (int k = 0; k < CELL_COUNT; ++k) {
         s_p.cells[k].expanded = CEX_NONE;
@@ -1143,8 +1147,6 @@ static void SelectProfile_(int profile)
     CommitSummonNumEdit_();        // 召唤阈值属于旧编号：切换前提交
     CloseSummonDropdowns_();
     s_p.selected_profile = profile;
-    s_protect_dd_open = false;
-    s_protect_dd_hover = -1;
     LoadSelectedProfileIntoCells_();
     DrawPanelToBuffer_();
 }
@@ -1169,8 +1171,6 @@ void OpenSettingsPanel_()
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
-    s_protect_dd_open = false;
-    s_protect_dd_hover = -1;
     CancelSummonNumEdit_();
     CloseSummonDropdowns_();
     s_p.active_page = PAGE_ARMY;   // 打开面板默认部队页
@@ -1195,8 +1195,6 @@ void OpenSettingsPanel_()
     if (s_p.selected_profile < 0 || s_p.selected_profile >= PROFILE_COUNT)
         s_p.selected_profile = 0;
     memcpy(s_p.draft_rules, g_profiles, sizeof(s_p.draft_rules));
-    memcpy(s_p.draft_protect_strategy, g_protect_strategy,
-        sizeof(s_p.draft_protect_strategy));
     memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
     memcpy(s_p.draft_summon, g_summon, sizeof(s_p.draft_summon));
     s_stop_turns_editing = false;
@@ -1291,8 +1289,8 @@ static void CommitAndCloseSettingsPanel_()
     if (!s_p.active) return;
 
     // 保存当前表格到当前编号草稿，再一次性提交全部 5 套（选中编号生效）。
-    // 保活勾选在 AutoStackRule 内随 draft_rules 一起提交；
-    // 保活策略/停止阈值是方案级，随 draft 数组提交。
+    // 保活方式在 AutoStackRule 内随 draft_rules 一起提交；
+    // 召唤启用/阈值与停止阈值是方案级，随 draft 数组提交。
     SaveCurrentCellsToDraft_();
     CommitSummonNumEdit_();        // 召唤阈值录入随勾号提交
     CloseSummonDropdowns_();
@@ -1300,7 +1298,7 @@ static void CommitAndCloseSettingsPanel_()
     // 选中项保持玩家当前选的那条。
     bool store_added = false;
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
-        s_p.draft_protect_strategy, s_p.draft_stop_turns, s_p.draft_summon,
+        s_p.draft_stop_turns, s_p.draft_summon,
         &store_added);
     // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
     RememberProfileSlot(s_p.selected_profile);
@@ -1344,8 +1342,6 @@ void CloseSettingsPanel()
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
-    s_protect_dd_open = false;
-    s_protect_dd_hover = -1;
     if (s_stop_turns_editing) CancelStopTurnsEdit_();
     if (s_mana_th_editing) CancelManaThEdit_();
     CancelSummonNumEdit_();
@@ -1498,22 +1494,6 @@ static bool UpdateDropdownHover_(int px, int py)
         s_p.hover_idx = new_hover_idx;
         changed = true;
     }
-    // 保活策略下拉（方案级）同卡片下拉：由本钩子即时更新悬停项。
-    int new_dd_hover = -1;
-    if (s_protect_dd_open) {
-        for (int i = 0; i < (int)H3AutoPolicy::PS_COUNT; ++i) {
-            int ix = 0, iy = 0, iw = 0, ih = 0;
-            GetProtectDdItemRect_(i, &ix, &iy, &iw, &ih);
-            if (PointInRect_(px, py, ix, iy, iw, ih)) {
-                new_dd_hover = i;
-                break;
-            }
-        }
-    }
-    if (new_dd_hover != s_protect_dd_hover) {
-        s_protect_dd_hover = new_dd_hover;
-        changed = true;
-    }
     // 本场存档下拉同款：钩子即时更新悬停行（时间降序下标）。
     if (s_battle_dd_open) {
         int new_battle_hover = -1;
@@ -1533,7 +1513,7 @@ static bool UpdateDropdownHover_(int px, int py)
         s_battle_dd_hover = -1;
         changed = true;
     }
-    // 召唤页两个下拉（法术/召唤物行动）同卡片下拉：钩子即时更新悬停项。
+    // 召唤页三个下拉（法术/条件组合/召唤物行动）同卡片下拉：钩子即时更新悬停项。
     if (s_summon_spell_dd_open) {
         int new_sum_hover = -1;
         for (int i = 0; i <= 4; ++i) {
@@ -1546,6 +1526,21 @@ static bool UpdateDropdownHover_(int px, int py)
         }
         if (new_sum_hover != s_summon_spell_dd_hover) {
             s_summon_spell_dd_hover = new_sum_hover;
+            changed = true;
+        }
+    }
+    if (s_summon_cond_dd_open) {
+        int new_cond_hover = -1;
+        for (int i = 0; i < 2; ++i) {
+            int ix = 0, iy = 0, iw = 0, ih = 0;
+            GetSummonCondDdItemRect_(i, &ix, &iy, &iw, &ih);
+            if (PointInRect_(px, py, ix, iy, iw, ih)) {
+                new_cond_hover = i;
+                break;
+            }
+        }
+        if (new_cond_hover != s_summon_cond_dd_hover) {
+            s_summon_cond_dd_hover = new_cond_hover;
             changed = true;
         }
     }
@@ -1687,13 +1682,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
     // 停止回合录入中：点框外提交；点框内（按下）把光标定位到最近字符边界。
     if (s_stop_turns_editing && (raw_command == 8 || raw_command == 16)) {
-        if (!PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
-                STOP_BOX_W, PROTECT_DD_H) && raw_command == 16) {
+        if (!PointInRect_(px, py, STOP_BOX_X, STOP_ROW_Y,
+                STOP_BOX_W, STOP_ROW_H) && raw_command == 16) {
             CommitStopTurnsEdit_();
             DrawPanelToBuffer_();
         } else if (raw_command == 8
-            && PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
-                STOP_BOX_W, PROTECT_DD_H)) {
+            && PointInRect_(px, py, STOP_BOX_X, STOP_ROW_Y,
+                STOP_BOX_W, STOP_ROW_H)) {
             H3Font* fnt = GetSmallFont();
             const int text_x = STOP_BOX_X + 8; // 与绘制端一致
             const int len = (int)strlen(s_stop_turns_text);
@@ -1723,13 +1718,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
     // 敌方魔力阈值录入中：与停止回合同款（点外提交、点内按光标定位）。
     if (s_mana_th_editing && (raw_command == 8 || raw_command == 16)) {
-        if (!PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
-                STOP_MANA_TH_BOX_W, PROTECT_DD_H) && raw_command == 16) {
+        if (!PointInRect_(px, py, STOP_MANA_TH_BOX_X, STOP_ROW_Y,
+                STOP_MANA_TH_BOX_W, STOP_ROW_H) && raw_command == 16) {
             CommitManaThEdit_();
             DrawPanelToBuffer_();
         } else if (raw_command == 8
-            && PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
-                STOP_MANA_TH_BOX_W, PROTECT_DD_H)) {
+            && PointInRect_(px, py, STOP_MANA_TH_BOX_X, STOP_ROW_Y,
+                STOP_MANA_TH_BOX_W, STOP_ROW_H)) {
             H3Font* fnt = GetSmallFont();
             const int text_x = STOP_MANA_TH_BOX_X + 8; // 与绘制端一致
             const int len = (int)strlen(s_mana_th_text);
@@ -1831,9 +1826,10 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         }
     }
 
-    // 召唤页两个下拉展开时：选项即选、点框保持/收起、点外收起
+    // 召唤页三个下拉展开时：选项即选、点框保持/收起、点外收起
     // （与保活下拉完全同款语义）。
-    if (s_summon_spell_dd_open || s_summon_act_dd_open) {
+    if (s_summon_spell_dd_open || s_summon_cond_dd_open
+        || s_summon_act_dd_open) {
         if (raw_command == 4)
             return;
         if (raw_command == 8 || raw_command == 16) {
@@ -1851,7 +1847,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         return;
                     }
                 }
-                if (PointInRect_(px, py, SUMMON_DD_X, SUMMON_ROW1_Y,
+                if (PointInRect_(px, py, SUMMON_DD_X, SUMMON_SPELL_Y,
                         SUMMON_DD_W, SUMMON_DD_H)) {
                     if (raw_command == 8) {
                         s_summon_spell_dd_open = false;
@@ -1862,6 +1858,37 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 }
                 s_summon_spell_dd_open = false;
                 s_summon_spell_dd_hover = -1;
+                DrawPanelToBuffer_();
+                return;
+            }
+            if (s_summon_cond_dd_open) {
+                for (int i = 0; i < 2; ++i) {
+                    int ix = 0, iy = 0, iw = 0, ih = 0;
+                    GetSummonCondDdItemRect_(i, &ix, &iy, &iw, &ih);
+                    if (PointInRect_(px, py, ix, iy, iw, ih)) {
+                        s_p.draft_summon[s_p.selected_profile].cond_combine
+                            = (i == H3AutoPolicy::SUMMON_COMBINE_OR)
+                            ? H3AutoPolicy::SUMMON_COMBINE_OR
+                            : H3AutoPolicy::SUMMON_COMBINE_AND;
+                        s_summon_cond_dd_open = false;
+                        s_summon_cond_dd_hover = -1;
+                        LogInfo("[Panel] 召唤条件组合=%d (方案%d)", i,
+                            s_p.selected_profile + 1);
+                        DrawPanelToBuffer_();
+                        return;
+                    }
+                }
+                if (PointInRect_(px, py, SUMMON_CB_DD_X, SUMMON_ROW2_Y,
+                        SUMMON_CB_DD_W, SUMMON_DD_H)) {
+                    if (raw_command == 8) {
+                        s_summon_cond_dd_open = false;
+                        s_summon_cond_dd_hover = -1;
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                s_summon_cond_dd_open = false;
+                s_summon_cond_dd_hover = -1;
                 DrawPanelToBuffer_();
                 return;
             }
@@ -1898,46 +1925,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 DrawPanelToBuffer_();
                 return;
             }
-        }
-        return;
-    }
-
-    // 保活策略下拉展开时：点击项即选中收起，点收起框本身保持展开，
-    // 点其他任意处收起（吞掉，不穿透到底层）。
-    // 悬停高亮不在此处理：由 WH_MOUSE 钩子的 UpdateDropdownHover_ 即时更新。
-    if (s_protect_dd_open) {
-        if (raw_command == 4)
-            return;
-        if (raw_command == 8 || raw_command == 16) {
-            for (int i = 0; i < (int)H3AutoPolicy::PS_COUNT; ++i) {
-                int ix = 0, iy = 0, iw = 0, ih = 0;
-                GetProtectDdItemRect_(i, &ix, &iy, &iw, &ih);
-                if (PointInRect_(px, py, ix, iy, iw, ih)) {
-                    PanelCommitAllProtectCountEdits_();
-                    s_p.draft_protect_strategy[s_p.selected_profile] =
-                        (uint8_t)i;
-                    s_protect_dd_open = false;
-                    s_protect_dd_hover = -1;
-                    LogInfo("[Panel] 保活策略=%d (方案%d)", i,
-                        s_p.selected_profile + 1);
-                    DrawPanelToBuffer_();
-                    return;
-                }
-            }
-            // 点在下拉框自身：松开（16）是“展开”这次点击的收尾，保持展开；
-            // 再次按下（8）则收起（与卡片下拉一致的切换语义）。
-            if (PointInRect_(px, py, PROTECT_DD_X, PROTECT_DD_Y,
-                    PROTECT_DD_W, PROTECT_DD_H)) {
-                if (raw_command == 8) {
-                    s_protect_dd_open = false;
-                    s_protect_dd_hover = -1;
-                    DrawPanelToBuffer_();
-                }
-                return;
-            }
-            s_protect_dd_open = false;
-            s_protect_dd_hover = -1;
-            DrawPanelToBuffer_();
         }
         return;
     }
@@ -2005,20 +1992,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 return;
             }
         }
-        // 保活策略下拉（收起态）：点击展开；先收起卡片下拉避免层级重叠。
-        if (PointInRect_(px, py, PROTECT_DD_X, PROTECT_DD_Y,
-                PROTECT_DD_W, PROTECT_DD_H)) {
-            for (int k = 0; k < CELL_COUNT; ++k) {
-                s_p.cells[k].expanded = CEX_NONE;
-                s_p.cells[k].dirty = true;
-            }
-            s_protect_dd_open = true;
-            s_protect_dd_hover = -1;
-            DrawPanelToBuffer_();
-            return;
-        }
-        if (PointInRect_(px, py, STOP_BOX_X, PROTECT_DD_Y,
-                STOP_BOX_W, PROTECT_DD_H)) {
+        if (PointInRect_(px, py, STOP_BOX_X, STOP_ROW_Y,
+                STOP_BOX_W, STOP_ROW_H)) {
             // 进入编辑：预填当前草稿值（值 0 预填空，避免「点击即变 0」），
             // 光标在末尾。已在编辑态时点框内不再重置。
             if (!s_stop_turns_editing) {
@@ -2037,8 +2012,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
         // 「敌方魔力≤[框] 时停」阈值框：与停止框同款进入编辑
         // （预填当前值、光标在末尾；已在编辑态点框内不重置）。
-        if (PointInRect_(px, py, STOP_MANA_TH_BOX_X, PROTECT_DD_Y,
-                STOP_MANA_TH_BOX_W, PROTECT_DD_H)) {
+        if (PointInRect_(px, py, STOP_MANA_TH_BOX_X, STOP_ROW_Y,
+                STOP_MANA_TH_BOX_W, STOP_ROW_H)) {
             if (!s_mana_th_editing) {
                 s_mana_th_editing = true;
                 const int cur =
@@ -2056,8 +2031,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
         // 「[✓] 敌方魔力≤N 时停」复选框（命中=框+「敌方魔力≤」文字；
         // 点阈值框是录入，不切勾选）。
-        if (PointInRect_(px, py, STOP_MANA_X, PROTECT_DD_Y,
-                STOP_MANA_HIT_W, PROTECT_DD_H)) {
+        if (PointInRect_(px, py, STOP_MANA_X, STOP_ROW_Y,
+                STOP_MANA_HIT_W, STOP_ROW_H)) {
             SummonProfileFields& sf =
                 s_p.draft_summon[s_p.selected_profile];
             sf.stop_enemy_mana = sf.stop_enemy_mana ? 0 : 1;
@@ -2068,11 +2043,24 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             return;
         }
 
-        // 召唤页（PAGE_SUMMON）内容区控件：设置行 + 行动卡。
+        // 召唤页（PAGE_SUMMON）内容区控件：设置行 + 行动行。
         if (s_p.active_page == PAGE_SUMMON) {
-            // 法术下拉（收起态）：点击展开；先收起另一处避免层级重叠。
-            if (PointInRect_(px, py, SUMMON_DD_X, SUMMON_ROW1_Y,
+            // 「启用自动召唤」复选框（与「停止:」同一行）：保活无人可救时才召唤。
+            if (PointInRect_(px, py, SUMMON_ENABLE_X, SUMMON_ENABLE_Y,
+                    SUMMON_ENABLE_HIT_W, SUMMON_ENABLE_H)) {
+                SummonProfileFields& sf =
+                    s_p.draft_summon[s_p.selected_profile];
+                sf.enabled = sf.enabled ? 0 : 1;
+                LogInfo("[Panel] 自动召唤启用=%d (方案%d)", sf.enabled,
+                    s_p.selected_profile + 1);
+                DrawPanelToBuffer_();
+                return;
+            }
+            // 法术下拉（收起态）：点击展开；先收起另外两处避免层级重叠。
+            if (PointInRect_(px, py, SUMMON_DD_X, SUMMON_SPELL_Y,
                     SUMMON_DD_W, SUMMON_DD_H)) {
+                s_summon_cond_dd_open = false;
+                s_summon_cond_dd_hover = -1;
                 s_summon_act_dd_open = false;
                 s_summon_act_dd_hover = -1;
                 s_summon_spell_dd_open = true;
@@ -2088,9 +2076,21 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 return;
             }
             // 血量阈值框：进入录入。
-            if (PointInRect_(px, py, SUMMON_HP_BOX_X, SUMMON_ROW1_Y,
+            if (PointInRect_(px, py, SUMMON_HP_BOX_X, SUMMON_ROW2_Y,
                     SUMMON_HP_BOX_W, SUMMON_DD_H)) {
                 BeginSummonNumEdit_(SUMMON_EDIT_HP);
+                DrawPanelToBuffer_();
+                return;
+            }
+            // 条件组合下拉（收起态）：点击展开。
+            if (PointInRect_(px, py, SUMMON_CB_DD_X, SUMMON_ROW2_Y,
+                    SUMMON_CB_DD_W, SUMMON_DD_H)) {
+                s_summon_spell_dd_open = false;
+                s_summon_spell_dd_hover = -1;
+                s_summon_act_dd_open = false;
+                s_summon_act_dd_hover = -1;
+                s_summon_cond_dd_open = true;
+                s_summon_cond_dd_hover = -1;
                 DrawPanelToBuffer_();
                 return;
             }
@@ -2099,6 +2099,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     SUMMON_ACT_DD_W, SUMMON_ACT_DD_H)) {
                 s_summon_spell_dd_open = false;
                 s_summon_spell_dd_hover = -1;
+                s_summon_cond_dd_open = false;
+                s_summon_cond_dd_hover = -1;
                 s_summon_act_dd_open = true;
                 s_summon_act_dd_hover = -1;
                 DrawPanelToBuffer_();
@@ -2286,8 +2288,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     s_p.cells[k].expanded = CEX_NONE;
                     s_p.cells[k].dirty = true;
                 }
-                s_protect_dd_open = false;
-                s_protect_dd_hover = -1;
                 CancelSummonNumEdit_();
                 CloseSummonDropdowns_();
                 s_help_modal_open = true;

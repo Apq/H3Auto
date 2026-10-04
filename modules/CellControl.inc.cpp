@@ -40,7 +40,7 @@ struct CellData
 // ========================================================================
 
 static const int CC_CELL_W    = 511; // 内容区 129..640(右缘660=帮助按钮右缘)
-// 卡片恢复旧版高度 110：表格上方不再放整行设置，首动保活行移入卡片底部。
+// 卡片恢复旧版高度 110：表格上方不再放整行设置，保活行移入卡片底部。
 static const int CC_CELL_H    = 110;
 
 // 图标贴左上角。卡片金边约 2px，再留 3px 空隙 → 内容起点约 5。
@@ -65,22 +65,23 @@ static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈206
 static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
 static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈358
 static const int CC_ROW_H    = 22;
-// 顶部循环施法行；行动/目标两行居中，底部加首动保活行，适配 110 高。
+// 顶部循环施法行；行动/目标两行居中，底部加保活行，适配 110 高。
 static const int CC_SPELL_Y  = 5;
 static const int CC_TOP_Y    = 30;  // 中行（行动/选择器/路径槽）
 static const int CC_BOT_Y    = 54;  // 下行（降级/阵营/路径槽）
-static const int CC_PROTECT_Y = 78; // 底部行：首动保活（§8.7）
+static const int CC_PROTECT_Y = 78; // 底部行：保活方式（§8.7）
 static const int CC_CHECKBOX_H = 14;
 
-// 首动保活行布局（从第二小列起，第三列留给施法/路径槽）：复选框在文字前面。
-static const int CC_PROTECT_CB_X     = CC_COL2_X;          // 复选框
-static const int CC_PROTECT_CB_BOX   = 10;
-static const int CC_PROTECT_LABEL_X  = CC_COL2_X + 14;     // 「加入保活队列」
-static const int CC_PROTECT_LABEL_W  = 118;
-// 按数量保活阈值：标签「剩≤」+ 数字框，仅策略=按数量时显示/可点。
-static const int CC_PROTECT_CNT_LBL_X = CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W + 10; // ≈348
+// 保活行布局：三选一，默认不保活。「保活:」标签 + 方式下拉
+// + 「剩≤」数字框（仅方式=按剩余数量时显示/可点）。
+static const int CC_PROTECT_DD_LBL_X  = CC_COL2_X;           // 「复活:」
+static const int CC_PROTECT_DD_LBL_W  = 34;
+static const int CC_PROTECT_DD_X      = CC_PROTECT_DD_LBL_X + CC_PROTECT_DD_LBL_W + 2; // ≈104
+static const int CC_PROTECT_DD_W      = 118;  // 放下「损失量大于恢复量」+ 箭头
+// 按数量保活阈值：标签「剩≤」+ 数字框，仅方式=按剩余数量时显示/可点。
+static const int CC_PROTECT_CNT_LBL_X = CC_PROTECT_DD_X + CC_PROTECT_DD_W + 8; // ≈230
 static const int CC_PROTECT_CNT_LBL_W = 34;
-static const int CC_PROTECT_CNT_BOX_X = CC_PROTECT_CNT_LBL_X + CC_PROTECT_CNT_LBL_W; // ≈382
+static const int CC_PROTECT_CNT_BOX_X = CC_PROTECT_CNT_LBL_X + CC_PROTECT_CNT_LBL_W; // ≈264
 static const int CC_PROTECT_CNT_BOX_W = 92;  // 容纳 10 位（2147483647）
 static const int CC_PROTECT_CNT_BOX_H = 16;
 static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
@@ -125,6 +126,7 @@ enum CellExpandKind {
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
     CEX_SPELL,    // 保留枚举；循环施法改为数字键录入，不再展开下拉
+    CEX_PROTECT,  // 保活方式（剩余数量 / 损失量大于恢复量）
 };
 
 // ========================================================================
@@ -140,6 +142,7 @@ struct CellControl
     int              hover_item;      // -1 = 无
     bool             action_pressed;
     bool             selector_pressed;
+    bool             protect_pressed;
     bool             dirty;
     bool             has_data;
     H3LoadedDef*     def_cache;
@@ -155,7 +158,7 @@ struct CellControl
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 
-    // 「剩≤」数量阈值录入态（保活策略=按数量）：文本/插入位/闪烁基准。
+    // 「剩≤」数量阈值录入态（保活通道=按数量）：文本/插入位/闪烁基准。
     bool             cnt_editing;
     char             cnt_text[12];
     int              cnt_caret;
@@ -513,6 +516,7 @@ static int CellControl_GetExpandListLeftX(CellControl* ctrl)
     case CEX_STAND:    return CC_COL3_X;
     case CEX_SELECTOR: return CC_COL3_X;
     case CEX_ATTACK:   return CC_COL3_X;
+    case CEX_PROTECT:  return CC_PROTECT_DD_X;
     default:           return CC_COL2_X;
     }
 }
@@ -523,6 +527,7 @@ static int CellControl_GetExpandListWidth(CellControl* ctrl)
     if (!ctrl) return CC_COL3_W;
     if (ctrl->expanded == CEX_SPELL) return CC_SPELL_SLOT_W;
     if (ctrl->expanded == CEX_ACTION) return CC_COL2_W;
+    if (ctrl->expanded == CEX_PROTECT) return CC_PROTECT_DD_W;
     return CC_COL3_W;
 }
 
@@ -536,6 +541,7 @@ static int CellControl_GetExpandListTopY(CellControl* ctrl)
     case CEX_SELECTOR: return CC_TOP_Y + CC_ROW_H;
     case CEX_STAND:    return CC_TOP_Y + CC_ROW_H;
     case CEX_ATTACK:   return CC_BOT_Y + CC_ROW_H;
+    case CEX_PROTECT:  return CC_PROTECT_Y + CC_ROW_H;
     case CEX_SPELL:    return CC_SPELL_Y + CC_ROW_H;
     default:           return CC_TOP_Y + CC_ROW_H;
     }
@@ -951,38 +957,34 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         }
     }
 
-    // ---- 底部行：加入保活队列（复选框在文字前面） ----
+    // ---- 底部行：保活（三选一，默认不保活）。「保活:」+ 方式下拉 + 「剩≤[N]」 ----
     {
-        const bool enabled = rule.protectEnable != 0;
+        const bool count_mode =
+            rule.protectMode == H3AutoPolicy::PM_COUNT_BELOW;
 
-        // 复选框（画法与「允许降级为防御」一致）
-        const int cb_x = CC_PROTECT_CB_X;
-        const int cb_y = CC_PROTECT_Y + (CC_ROW_H - CC_PROTECT_CB_BOX) / 2;
-        const int cb_box = CC_PROTECT_CB_BOX;
-        Fill(scr, cb_x, cb_y, cb_box, cb_box, 40, 28, 12);
-        scr->DrawFrame(cb_x, cb_y, cb_box, cb_box,
-            (BYTE)184, (BYTE)139, (BYTE)62);
-        if (enabled) {
-            Fill(scr, cb_x + 2, cb_y + 4, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 3, cb_y + 5, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 4, cb_y + 6, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 5, cb_y + 5, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 6, cb_y + 4, 2, 2, 235, 205, 116);
-            Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
-        }
+        CellControl_DrawText(scr, fntS, T("cell.protect_mode_lbl"),
+            CC_PROTECT_DD_LBL_X, CC_PROTECT_Y, CC_PROTECT_DD_LBL_W, CC_ROW_H,
+            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
 
-        CellControl_DrawText(scr, fntS, T("cell.protect_join"),
-            CC_PROTECT_LABEL_X, CC_PROTECT_Y, CC_PROTECT_LABEL_W, CC_ROW_H,
-            (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
-            eTextAlignment::MIDDLE_LEFT);
+        // 方式下拉收起态（与行动下拉同款按钮）
+        const char* mode_label =
+            rule.protectMode == H3AutoPolicy::PM_NONE ? T("cell.protect_mode_none")
+            : count_mode ? T("cell.protect_mode_count")
+            : T("cell.protect_mode_loss");
+        CellControl_DrawButtonBg(scr, CC_PROTECT_DD_X, CC_PROTECT_Y,
+            CC_PROTECT_DD_W, CC_ROW_H, ctrl->protect_pressed, false);
+        CellControl_DrawText(scr, fntS, mode_label,
+            CC_PROTECT_DD_X + 4, CC_PROTECT_Y, CC_PROTECT_DD_W - 20, CC_ROW_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        CellControl_DrawArrow(scr, CC_PROTECT_DD_X + CC_PROTECT_DD_W - 14,
+            CC_PROTECT_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_PROTECT);
 
-        // 「剩≤[N]」：恒显示（生效需策略=按数量）；录入态与「停止」框同款。
-        {
+        // 「剩≤[N]」：仅按剩余数量方式显示；录入态与「停止」框同款。
+        if (count_mode) {
             CellControl_DrawText(scr, fntS, T("cell.protect_count_lbl"),
                 CC_PROTECT_CNT_LBL_X, CC_PROTECT_Y, CC_PROTECT_CNT_LBL_W,
                 CC_ROW_H,
-                (INT32)(enabled ? eTextColor::REGULAR : eTextColor::GRAY),
-                eTextAlignment::MIDDLE_LEFT);
+                (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
             const int bx = CC_PROTECT_CNT_BOX_X;
             const int by = CC_PROTECT_Y + (CC_ROW_H - CC_PROTECT_CNT_BOX_H) / 2;
             const int bw = CC_PROTECT_CNT_BOX_W;
@@ -1278,6 +1280,34 @@ static void CellControl_DrawSpellDropdownTo(CellControl* ctrl, H3LoadedPcx16* sc
     }
 }
 
+// 展开保活方式列表（三选一：不保活 / 按剩余数量 / 损失量大于恢复量）
+static void CellControl_DrawProtectDropdownTo(CellControl* ctrl,
+    H3LoadedPcx16* scr, int cell_panel_x, int cell_panel_y, int hover_idx)
+{
+    if (!ctrl || ctrl->expanded != CEX_PROTECT || !scr) return;
+    H3Font* fntS = GetSmallFont();
+    if (!fntS) return;
+
+    // 显示顺序：不保活（默认）在最上，其后两种判定方式。
+    static const int kOrder[3] = {
+        (int)H3AutoPolicy::PM_NONE,
+        (int)H3AutoPolicy::PM_COUNT_BELOW,
+        (int)H3AutoPolicy::PM_LOSS_GT_RESTORE,
+    };
+    const int cur = ctrl->data.rule.protectMode;
+    for (int i = 0; i < 3; ++i) {
+        const char* label =
+            kOrder[i] == (int)H3AutoPolicy::PM_NONE ? T("cell.protect_mode_none")
+            : kOrder[i] == (int)H3AutoPolicy::PM_COUNT_BELOW
+                ? T("cell.protect_mode_count")
+                : T("cell.protect_mode_loss");
+        CellControl_DrawDropdownItem(scr, fntS, label, i,
+            cell_panel_x, cell_panel_y,
+            kOrder[i] == cur, i == hover_idx, false,
+            CC_PROTECT_Y + CC_ROW_H, CC_PROTECT_DD_X, CC_PROTECT_DD_W);
+    }
+}
+
 // 统一绘制当前展开列表（面板层第二趟调用）
 static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
     int cell_panel_x, int cell_panel_y, int hover_idx)
@@ -1298,6 +1328,9 @@ static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
         break;
     case CEX_ATTACK:
         CellControl_DrawHexDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx, CC_COL3_X, CC_BOT_Y, true);
+        break;
+    case CEX_PROTECT:
+        CellControl_DrawProtectDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
         break;
     default:
         break;
@@ -1328,6 +1361,8 @@ static int CellControl_GetExpandedItemCount(CellControl* ctrl)
     }
     case CEX_SPELL:
         return 10;  // 魔法槽位 1-9,0
+    case CEX_PROTECT:
+        return (int)H3AutoPolicy::PM_COUNT;
     default:
         return 0;
     }
@@ -1345,13 +1380,24 @@ enum CellHitArea
     CELL_HIT_SELECTOR,
     CELL_HIT_CHECKBOX,
     CELL_HIT_DROP,       // 当前展开列表
-    CELL_HIT_PROTECT_CHECKBOX, // 加入保活队列复选框
-    CELL_HIT_PROTECT_COUNT,     // 「剩≤」数量阈值数字框（策略=按数量）
+    CELL_HIT_PROTECT_MODE,       // 保活方式下拉框（剩余数量/损失量）
+    CELL_HIT_PROTECT_COUNT,     // 「剩≤」数量阈值数字框（方式=按剩余数量）
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
     CELL_HIT_SPELL_BASE      = 300,
 };
+
+// 保活方式的单行提示。收起时用当前选中项，展开时用悬停项。
+static const char* CellControl_ProtectTip_(int mode)
+{
+    const char* key = mode == (int)H3AutoPolicy::PM_NONE
+        ? "tips.protect_opt_none"
+        : mode == (int)H3AutoPolicy::PM_COUNT_BELOW
+            ? "tips.protect_opt_count"
+            : "tips.protect_opt_loss";
+    return T(key);
+}
 
 // 命中区 → 状态栏提示文案（方案 A tips 的表格内细分）。
 // 返回静态字符串；未命中返回 nullptr。
@@ -1384,7 +1430,8 @@ static void CellControl_CancelCountEdit_(CellControl* ctrl)
     ctrl->cnt_caret = 0;
 }
 
-static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctrl)
+static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctrl,
+    int hover_idx = -1)
 {
     switch (hit) {
     case CELL_HIT_ACTION: {
@@ -1409,11 +1456,21 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
     }
     case CELL_HIT_CHECKBOX:
         return T("tips.cell_fallback");
-    case CELL_HIT_PROTECT_CHECKBOX:
-        return T("tips.cell_protect");
+    case CELL_HIT_PROTECT_MODE:
+        return CellControl_ProtectTip_(
+            ctrl ? (int)ctrl->data.rule.protectMode : 0);
     case CELL_HIT_PROTECT_COUNT:
         return T("tips.cell_protect_count");
     case CELL_HIT_DROP:
+        if (ctrl && ctrl->expanded == CEX_PROTECT
+            && hover_idx >= 0 && hover_idx < 3) {
+            static const int kOrder[3] = {
+                (int)H3AutoPolicy::PM_NONE,
+                (int)H3AutoPolicy::PM_COUNT_BELOW,
+                (int)H3AutoPolicy::PM_LOSS_GT_RESTORE,
+            };
+            return CellControl_ProtectTip_(kOrder[hover_idx]);
+        }
         return T("tips.cell_drop");
     default:
         break;
@@ -1529,15 +1586,18 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         }
     }
 
-    // 底部保活行：复选框与文字恒可点（勾选=加入保活队列）。
-    if (local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H) {
-        if (local_x >= CC_PROTECT_CB_X
-            && local_x < CC_PROTECT_LABEL_X + CC_PROTECT_LABEL_W)
-            return CELL_HIT_PROTECT_CHECKBOX;
-        if (local_x >= CC_PROTECT_CNT_LBL_X
-            && local_x < CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W)
-            return CELL_HIT_PROTECT_COUNT;
-    }
+    // 底部保活行：方式下拉收起态可点开；「剩≤」数字框仅按剩余数量方式可点。
+    if (ctrl->expanded != CEX_PROTECT
+        && local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H
+        && local_x >= CC_PROTECT_DD_X
+        && local_x < CC_PROTECT_DD_X + CC_PROTECT_DD_W)
+        return CELL_HIT_PROTECT_MODE;
+    if (ctrl->data.rule.protectMode
+            == (uint8_t)H3AutoPolicy::PM_COUNT_BELOW
+        && local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H
+        && local_x >= CC_PROTECT_CNT_LBL_X
+        && local_x < CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W)
+        return CELL_HIT_PROTECT_COUNT;
 
     if (local_x >= CC_ICON_X && local_x < CC_ICON_X + CC_ICON_W
         && local_y >= CC_ICON_Y && local_y < CC_ICON_Y + CC_ICON_H + CC_LABEL_H)
@@ -1627,10 +1687,11 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
-        if (hit == CELL_HIT_PROTECT_CHECKBOX) {
-            ctrl->data.rule.protectEnable =
-                ctrl->data.rule.protectEnable ? 0 : 1;
-            ctrl->expanded = CEX_NONE;
+        if (hit == CELL_HIT_PROTECT_MODE) {
+            ctrl->expanded =
+                (ctrl->expanded == CEX_PROTECT) ? CEX_NONE : CEX_PROTECT;
+            ctrl->protect_pressed = true;
+            ctrl->hover_item = -1;
             ctrl->dirty = true;
             return true;
         }
@@ -1758,6 +1819,16 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                         ctrl->data.rule.target.kind, allowed);
                     if (idx < n)
                         ctrl->data.rule.target.selector = allowed[idx];
+                } else if (ctrl->expanded == CEX_PROTECT) {
+                    // 与展开列表同一显示顺序：不保活 / 剩余数量≤ / 损失量>恢复量。
+                    static const int kPick[3] = {
+                        (int)H3AutoPolicy::PM_NONE,
+                        (int)H3AutoPolicy::PM_COUNT_BELOW,
+                        (int)H3AutoPolicy::PM_LOSS_GT_RESTORE,
+                    };
+                    if (idx < 3)
+                        ctrl->data.rule.protectMode =
+                            (uint8_t)kPick[idx];
                 } else if (ctrl->expanded == CEX_STAND || ctrl->expanded == CEX_ATTACK) {
                     int hexes[165];
                     const int n = CellControl_BuildMeleeHexList(ctrl, hexes);
@@ -1783,12 +1854,14 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->dd_scroll = 0;
                 ctrl->action_pressed = false;
                 ctrl->selector_pressed = false;
+                ctrl->protect_pressed = false;
                 ctrl->dirty = true;
                 return true;
             }
         }
         ctrl->action_pressed = false;
         ctrl->selector_pressed = false;
+        ctrl->protect_pressed = false;
         ctrl->dirty = true;
     }
 

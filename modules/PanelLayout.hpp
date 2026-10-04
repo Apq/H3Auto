@@ -92,14 +92,11 @@ static const int TAB_HLINE_Y  = TAB_SEP_Y0;  // 上线：接竖线上端
 static const int TAB_HLINE2_Y = TAB_SEP_Y1;  // 下线：接竖线下端（确定/取消上方）
 static const int STATUS_SEP_Y  = BTN_Y + BTN_H + 8; // 状态栏分隔线（原图抹除，代码绘制；原版486+20，文字509紧贴线下）
 
-// 保活策略行（全局常显）：上横线与表格之间的新行（原方案页专属，方案页已移除）。
-static const int PROTECT_DD_Y        = 85;   // 与Tab标签上缘对齐（原83再下移2）
-static const int PROTECT_DD_H        = 18;
-static const int PROTECT_DD_LABEL_X  = GRID_FRAME_X;
-static const int PROTECT_DD_LABEL_W  = 76;   // 「保活策略:」
-static const int PROTECT_DD_X        = GRID_FRAME_X + 80;
-static const int PROTECT_DD_W        = 150;
-static const int PROTECT_DD_ITEM_H   = 18;
+// 自动停止行（全局常显）：上横线与表格之间的新行（原方案页专属，方案页已移除）。
+// 保活与召唤同一条施法通道（保活优先、召唤兜底），不再有方案级「保活」下拉；
+// 召唤是否启用在召唤页的复选框（SUMMON_ENABLE_*）。
+static const int STOP_ROW_Y        = 85;   // 与Tab标签上缘对齐（原83再下移2）
+static const int STOP_ROW_H        = 18;
 
 // 保活行最右侧：自动停止回合数。点击后用数字键录入（可编辑文本框：
 // 预填当前值、光标可左右移动、退格删除；见 s_stop_turns_* 状态）。
@@ -129,54 +126,75 @@ static const int STOP_LABEL_X = STOP_BOX_X - 4 - STOP_LABEL_W;
 static const int STOP_GROUP_PAD_X = 5;
 static const int STOP_GROUP_PAD_Y = 4;
 static const int STOP_GROUP_X = STOP_LABEL_X - STOP_GROUP_PAD_X;
-static const int STOP_GROUP_Y = PROTECT_DD_Y - STOP_GROUP_PAD_Y;
+static const int STOP_GROUP_Y = STOP_ROW_Y - STOP_GROUP_PAD_Y;
 static const int STOP_GROUP_W = STOP_MANA_TAIL_X + STOP_MANA_TAIL_W
     - STOP_GROUP_X;
-static const int STOP_GROUP_H = PROTECT_DD_H + STOP_GROUP_PAD_Y * 2;
+static const int STOP_GROUP_H = STOP_ROW_H + STOP_GROUP_PAD_Y * 2;
 
-// ---- 召唤页（PAGE_SUMMON）：设置行 + 说明行 + 召唤物行动卡 ----
-static const int SUMMON_ROW1_Y  = 124;   // 设置行（法术/队数/血量）
-static const int SUMMON_DD_H    = 18;    // 行内控件高（与保活行一致）
-// 法术选择下拉：自动 + 气水火土（顺序同 kSummonSpellIds）。
+// ---- 召唤页（PAGE_SUMMON）：启用行 + 设置行 + 说明行 + 召唤物行动卡 ----
+// 启用复选框（第一行）：勾选后复活无人可救时自动召唤兜底。
+static const int SUMMON_ENABLE_Y  = STOP_ROW_Y;   // 与「停止:」同一行（高度对齐）
+static const int SUMMON_ENABLE_H  = STOP_ROW_H;
+static const int SUMMON_ENABLE_X  = GRID_FRAME_X;
+static const int SUMMON_ENABLE_CHECK_W = 12;
+static const int SUMMON_ENABLE_TEXT_W  = 110;  // 「启用自动召唤」
+static const int SUMMON_ENABLE_HIT_W =
+    SUMMON_ENABLE_CHECK_W + 4 + SUMMON_ENABLE_TEXT_W;
+static const int SUMMON_NOTE_Y = 108;   // 说明行（紧跟启用行）
+static const int SUMMON_NOTE_H = 18;
+static const int SUMMON_SPELL_Y = 132;   // 魔法行
+static const int SUMMON_ROW1_Y  = 160;   // 条件框第一行（队数）
+static const int SUMMON_ROW2_Y  = 182;   // 条件框第二行（和/或 + 血量）
+static const int SUMMON_DD_H    = 18;    // 行内控件高（与停止行一致）
+// 魔法选择下拉：自动 + 气水火土（顺序同 kSummonSpellIds）。
 static const int SUMMON_DD_LABEL_X  = GRID_FRAME_X;
-static const int SUMMON_DD_LABEL_W  = 40;   // 「法术:」
+static const int SUMMON_DD_LABEL_W  = 40;   // 「魔法:」
 static const int SUMMON_DD_X        = GRID_FRAME_X + 44;
 static const int SUMMON_DD_W        = 118;
 static const int SUMMON_DD_ITEM_H   = 18;
-// 队数阈值框（0..21，默认 2）。
-static const int SUMMON_CNT_LABEL_X = GRID_FRAME_X + 184;
-static const int SUMMON_CNT_LABEL_W = 44;   // 「队数 ≤」
-static const int SUMMON_CNT_BOX_X   = GRID_FRAME_X + 232;
+// 两个召唤条件的 1px 金框。框左缘与上下两个下拉对齐，框左写「条件:」：
+//   行一（左端留空）  队数 < [2]
+//   行二  [和▾]       血量 ≤ [750]
+static const int SUMMON_COND_PAD    = 5;
+static const int SUMMON_COND_LABEL_X = GRID_FRAME_X;
+static const int SUMMON_COND_LABEL_W = 48;                 // 「条件:」
+static const int SUMMON_CB_DD_X     = SUMMON_DD_X + SUMMON_COND_PAD;
+static const int SUMMON_CB_DD_W     = 44;
+static const int SUMMON_CB_DD_ITEM_H = 18;
+static const int SUMMON_COND_X      = SUMMON_CB_DD_X + SUMMON_CB_DD_W + 8;
+static const int SUMMON_CNT_LABEL_X = SUMMON_COND_X;       // 「队数 <」
+static const int SUMMON_CNT_LABEL_W = 48;
+static const int SUMMON_CNT_BOX_X   = SUMMON_CNT_LABEL_X + SUMMON_CNT_LABEL_W + 4;
 static const int SUMMON_CNT_BOX_W   = 44;
 static const int SUMMON_CNT_MAX_DIGITS = 2;
 // 血量阈值框（≥0，默认 750；口径同自动停止的己方血量合计）。
-static const int SUMMON_HP_LABEL_X  = GRID_FRAME_X + 300;
-static const int SUMMON_HP_LABEL_W  = 56;   // 「血量 ≤」
-static const int SUMMON_HP_BOX_X    = GRID_FRAME_X + 360;
+static const int SUMMON_HP_LABEL_X  = SUMMON_COND_X;       // 「血量 ≤」
+static const int SUMMON_HP_LABEL_W  = 48;
+static const int SUMMON_HP_BOX_X    = SUMMON_HP_LABEL_X + SUMMON_HP_LABEL_W + 4;
 static const int SUMMON_HP_BOX_W    = 64;
 static const int SUMMON_HP_MAX_DIGITS = 10;
-// 说明行（灰白小字，一行内说完时机与口径）。
-static const int SUMMON_NOTE_Y = 152;
-static const int SUMMON_NOTE_H = 18;
-// 召唤物行动卡：与部队卡同高，风格统一；内部一行行动下拉 + 降级勾选。
-static const int SUMMON_CARD_X  = GRID_FRAME_X;
-static const int SUMMON_CARD_Y  = 180;
-static const int SUMMON_CARD_W  = GRID_FRAME_W;
-static const int SUMMON_CARD_H  = 110;
-static const int SUMMON_ACT_LABEL_X = GRID_FRAME_X + 16;
-static const int SUMMON_ACT_LABEL_W = 36;   // 「行动」
-static const int SUMMON_ACT_DD_X    = GRID_FRAME_X + 58;
-static const int SUMMON_ACT_DD_Y    = SUMMON_CARD_Y + 8;
+static const int SUMMON_COND_GROUP_X = SUMMON_DD_X;
+static const int SUMMON_COND_GROUP_Y = SUMMON_ROW1_Y - SUMMON_COND_PAD;
+static const int SUMMON_COND_GROUP_W =
+    SUMMON_HP_BOX_X + SUMMON_HP_BOX_W + SUMMON_COND_PAD - SUMMON_COND_GROUP_X;
+static const int SUMMON_COND_GROUP_H =
+    SUMMON_ROW2_Y + SUMMON_DD_H + SUMMON_COND_PAD - SUMMON_COND_GROUP_Y;
+// 召唤物行动行（普通行，不做成卡片）：行动下拉 + 降级勾选，与设置行同款。
+static const int SUMMON_ACT_ROW_Y = SUMMON_COND_GROUP_Y + SUMMON_COND_GROUP_H + 8;
+static const int SUMMON_ACT_LABEL_X = GRID_FRAME_X;
+static const int SUMMON_ACT_LABEL_W = 40;   // 「行动:」
+static const int SUMMON_ACT_DD_X    = GRID_FRAME_X + 44;
+static const int SUMMON_ACT_DD_Y    = SUMMON_ACT_ROW_Y;
 static const int SUMMON_ACT_DD_W    = 130;
-static const int SUMMON_ACT_DD_H    = 22;
-static const int SUMMON_ACT_DD_ITEM_H = 20;
+static const int SUMMON_ACT_DD_H    = 18;
+static const int SUMMON_ACT_DD_ITEM_H = 18;
 // 「允许降级为防御」复选框：框在文字前；仅行动=随机移动时显示并生效。
 static const int SUMMON_FB_CHECK_W = 12;
 static const int SUMMON_FB_X  = SUMMON_ACT_DD_X + SUMMON_ACT_DD_W + 18;
-static const int SUMMON_FB_Y  = SUMMON_CARD_Y + 13;   // 与 22 高下拉中线对齐
+static const int SUMMON_FB_Y  = SUMMON_ACT_ROW_Y + 3;   // 与 18 高下拉中线对齐
 static const int SUMMON_FB_TEXT_W = 130;
 
-// 保活策略项文案已外置（UiTexts panel.protect_opt0..3）。
+// 召唤页说明/启用文案已外置（UiTexts panel.summon_enable 等）。
 
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
