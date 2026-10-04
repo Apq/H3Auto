@@ -5,7 +5,8 @@ static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogE
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
-    const SummonProfileFields summon[5], bool* out_store_added);
+    const SummonProfileFields summon[5],
+    const StatusProfileFields status[5], bool* out_store_added);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
@@ -13,6 +14,7 @@ extern int  g_active_profile;
 extern int  g_last_profile;
 extern uint16_t g_stop_turns[5];
 extern SummonProfileFields g_summon[5];
+extern StatusProfileFields g_status[5];
 extern bool IsPanelActive();
 extern void CloseSettingsPanel();
 
@@ -1309,6 +1311,9 @@ static void TryAutoStop_(_BattleMgr_* mgr)
 // 保活与召唤是同一条施法通道（§3.1.1/§2.3）：保活优先——每次行动
 // （还有施法次数时）先按各队 ProtectMode 判复活；无人可救且召唤已启用
 // （g_summon[p].enabled）再走召唤兜底。一回合只施一次法，两边天然互斥。
+static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
+    H3CombatManager* cm, H3Hero* hero, int spell_power);
+
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
     if (g_phase != BP_COMBAT_CLOSED) return false;
@@ -1323,6 +1328,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
     H3CombatManager* cm = H3CombatManager::Get();
     if (!cm) return false;
+    // 魔法通道只在玩家方有英雄时启用。无英雄不能施法，保活、补状态和召唤都不判。
     H3Hero* hero = reinterpret_cast<H3Hero*>(mgr->hero[side]);
     if (!hero) return false;
     const int spell_power = cm->heroSpellPower[side];
@@ -1419,6 +1425,8 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         LogDebug("[Protect] no qualified target turn=%d cands=%d summon=%d",
             turn, cand_count, g_summon[g_active_profile].enabled ? 1 : 0);
         // 复活无人可救 → 召唤兜底（启用时才判；法力/已学/时机自查）。
+        if (TryMaintainStatus_(mgr, side, cm, hero, spell_power))
+            return true;
         if (!g_summon[g_active_profile].enabled) return false;
         return SummonChannel_(mgr, side, cm, hero, spell_power);
     }
@@ -1457,6 +1465,84 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     return true;
 }
 
+
+static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
+    H3CombatManager* cm, H3Hero* hero, int spell_power)
+{
+    if (!mgr || !cm || !hero || side < 0 || side > 1) return false;
+    const int enemy_side = side ^ 1;
+    auto can_receive = [](_BattleStack_* st, int spell) -> bool {
+        if (!st || spell <= 0) return false;
+        BOOL8 ok = 0;
+        __try {
+            ok = FASTCALL_2(BOOL8, 0x4477A0, spell, st);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return ok != 0;
+    };
+    const StatusProfileFields& status = g_status[g_active_profile];
+    int durations[H3AutoPolicy::kStatusSlotCapacity] = {};
+    int best_slot = -1;
+    int best_index = -1;
+    int best_duration = 99;
+    for (int slot = 0; slot < 21; ++slot) {
+        _BattleStack_* st = &mgr->stack[side][slot];
+        if (!st || st->count_current <= 0) continue;
+        for (int i = 0; i < status.slot_count; ++i) {
+            const int spell = status.slots[i];
+            // 减速打敌方，不拿己方部队的持续时间参与增益选择。
+            durations[i] = (spell > 0 && spell < 81
+                    && spell != H3AutoPolicy::kSlowSpellId
+                    && can_receive(st, spell))
+                ? st->active_spell_duration[spell] : -1;
+        }
+        const int index = H3AutoPolicy::ChooseBuffToRefresh(
+            durations, status.slot_count);
+        if (index >= 0 && durations[index] < best_duration) {
+            best_duration = durations[index];
+            best_index = index;
+            best_slot = slot;
+        }
+    }
+    int spell_id = best_index >= 0 ? status.slots[best_index] : -1;
+    (void)best_slot;
+    if (spell_id < 0) {
+        bool want_slow = false;
+        for (int i = 0; i < status.slot_count; ++i)
+            want_slow = want_slow || status.slots[i] == H3AutoPolicy::kSlowSpellId;
+        int expertise = 0;
+        __try {
+            expertise = hero->GetSpellExpertise(H3AutoPolicy::kSlowSpellId,
+                cm->specialTerrain);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        int enemy_durations[21] = {};
+        int enemy_hexes[21] = {};
+        for (int slot = 0; slot < 21; ++slot) {
+            _BattleStack_* st = &mgr->stack[enemy_side][slot];
+            enemy_durations[slot] = (want_slow && st && st->count_current > 0
+                    && can_receive(st, H3AutoPolicy::kSlowSpellId))
+                ? st->active_spell_duration[H3AutoPolicy::kSlowSpellId] : -1;
+            enemy_hexes[slot] = 0;
+        }
+        const H3AutoPolicy::StatusMaintainChoice slow =
+            H3AutoPolicy::ChooseSlowTarget(
+                expertise >= 3, enemy_durations, enemy_hexes, 21);
+        spell_id = slow.spell_id;
+        if (expertise < 3) return false;
+    }
+    // 保持状态列表里的法术都是全体魔法，不指定目标格。
+    if (spell_id < 0) return false;
+    int expertise = 0;
+    __try {
+        expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (expertise <= 0) return false;
+    __try {
+        cm->CastSpell(spell_id, -1, 1, -1, expertise, spell_power);
+    } __except (1) {
+        return false;
+    }
+    return true;
+}
 
 static int GetHeroCasted_(_BattleMgr_* mgr, int side)
 {
@@ -1541,7 +1627,8 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 // 共享规则在此再过一次 NormalizeSummonRule（草稿来源不可信原则）。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
-    const SummonProfileFields summon[5], bool* out_store_added)
+    const SummonProfileFields summon[5],
+    const StatusProfileFields status[5], bool* out_store_added)
 {
     if (out_store_added) *out_store_added = false;
     if (active_profile < 0 || active_profile >= 5)
@@ -1555,7 +1642,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         SummonProfileFields fields = summon
             ? summon[p] : H3AutoPolicy::MakeDefaultSummonFields();
         fields.enabled = fields.enabled ? 1 : 0;
-        if (fields.count_th < 0) fields.count_th = 0;
+        if (fields.count_th < 2) fields.count_th = 2; // 最小即默认 2
         if (fields.count_th > 21) fields.count_th = 21;
         if (fields.hp_th < 0) fields.hp_th = 0;
         if (fields.spell_pick < 0
@@ -1570,6 +1657,13 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (fields.stop_mana_th > 32767) fields.stop_mana_th = 32767;
         H3AutoPolicy::NormalizeSummonRule(&fields.summon_rule);
         g_summon[p] = fields;
+        StatusProfileFields st = status
+            ? status[p] : H3AutoPolicy::MakeDefaultStatusFields();
+        if (st.slot_count < 0) st.slot_count = 0;
+        if (st.slot_count > H3AutoPolicy::kStatusSlotCapacity)
+            st.slot_count = H3AutoPolicy::kStatusSlotCapacity;
+        st.slow = st.slow ? 1 : 0;
+        g_status[p] = st;
     }
     g_active_profile = active_profile;
 
@@ -1611,7 +1705,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         bool skipped = false;
         if (AppendBattleStoreRecord(g_battle_fp,
                 (const AutoStackRule(*)[21])g_profiles,
-                g_stop_turns, g_summon, g_active_profile, &skipped)) {
+                g_stop_turns, g_summon, g_status, g_active_profile, &skipped)) {
             LogInfo("[BattleStore] %s（active=%d）",
                 skipped ? "内容未变，不新增存档" : "已存档", g_active_profile + 1);
             if (!skipped && out_store_added) *out_store_added = true;

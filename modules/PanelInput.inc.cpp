@@ -67,7 +67,7 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 CancelSummonNumEdit_();
                 DrawPanelToBuffer_();
             } else if (s_summon_spell_dd_open || s_summon_cond_dd_open
-                || s_summon_act_dd_open) {
+                || s_summon_act_dd_open || s_status_dd_open >= 0) {
                 CloseSummonDropdowns_();
                 DrawPanelToBuffer_();
             } else if (s_stop_turns_editing) {
@@ -102,7 +102,7 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && s_spell_pick_cell < 0 && !s_help_modal_open
             && !s_summon_spell_dd_open && !s_summon_cond_dd_open
-            && !s_summon_act_dd_open) {
+            && !s_summon_act_dd_open && s_status_dd_open < 0) {
             SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
@@ -371,7 +371,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         // 会导致悬停高亮函数根本不被调用（绘制侧的高亮分支是好的，只是
         // hover 值永远停在 -1）。
         bool any_expanded = s_summon_spell_dd_open || s_summon_cond_dd_open
-            || s_summon_act_dd_open || s_battle_dd_open;
+            || s_summon_act_dd_open || s_battle_dd_open || s_status_dd_open >= 0;
         for (int i = 0; i < CELL_COUNT; ++i) {
             if (s_p.cells[i].expanded != CEX_NONE) {
                 any_expanded = true;

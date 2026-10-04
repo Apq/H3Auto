@@ -70,11 +70,14 @@ static const int BATTLE_DD_MAX_ITEMS = 30;
 enum {
     PAGE_ARMY    = 0,   // 部队：21 槽卡片表
     PAGE_SUMMON  = 1,   // 召唤：召唤通道参数（法术/阈值）+ 召唤物共享行动规则
-    PAGE_COUNT   = 2,
+    PAGE_STATUS  = 2,   // 保持状态：友方增益列表 + 敌方减速
+    PAGE_COUNT   = 3,
 };
-// Tab 显示：部队页 + 召唤页（原方案页已并入保活行/召唤页）。
-static const int TAB_VISIBLE_COUNT = 2;
-static const int kTabOrder[TAB_VISIBLE_COUNT] = { PAGE_ARMY, PAGE_SUMMON };
+// Tab 显示：部队、召唤、保持状态。
+static const int TAB_VISIBLE_COUNT = 3;
+static const int kTabOrder[TAB_VISIBLE_COUNT] = {
+    PAGE_ARMY, PAGE_SUMMON, PAGE_STATUS,
+};
 static const int TAB_X       = 17;   // Tab 条左缘
 static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
@@ -193,6 +196,19 @@ static const int SUMMON_FB_CHECK_W = 12;
 static const int SUMMON_FB_X  = SUMMON_ACT_DD_X + SUMMON_ACT_DD_W + 18;
 static const int SUMMON_FB_Y  = SUMMON_ACT_ROW_Y + 3;   // 与 18 高下拉中线对齐
 static const int SUMMON_FB_TEXT_W = 130;
+
+// 保持状态页：每行 4 个下拉。「+」先占第一个空位，点一下后移。
+static const int STATUS_NOTE_Y = 108;
+static const int STATUS_ROW0_Y = 136;
+static const int STATUS_COLS = 4;
+static const int STATUS_GAP = 6;
+static const int STATUS_DD_W =
+    (GRID_FRAME_W - (STATUS_COLS - 1) * STATUS_GAP) / STATUS_COLS;
+static const int STATUS_DD_H = 18;
+static const int STATUS_ROW_H = STATUS_DD_H + 6;
+static const int STATUS_ADD_W = STATUS_DD_W;
+static const int STATUS_ADD_H = STATUS_DD_H;
+static const int STATUS_ITEM_H = 18;
 
 // 召唤页说明/启用文案已外置（UiTexts panel.summon_enable 等）。
 

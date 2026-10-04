@@ -49,6 +49,14 @@ uint16_t g_stop_turns[5] = { H3AutoPolicy::DEFAULT_STOP_TURNS,
 // 阈值/法术选择/召唤物共享规则在此；stop_enemy_mana+stop_mana_th 是自动停止
 // 第二条件（勾选后敌方英雄魔力 ≤ 阈值（默认 6，0..32767）时整场切回手动，
 // 与 g_stop_turns OR 组合）。
+StatusProfileFields g_status[5] = {
+    H3AutoPolicy::MakeDefaultStatusFields(),
+    H3AutoPolicy::MakeDefaultStatusFields(),
+    H3AutoPolicy::MakeDefaultStatusFields(),
+    H3AutoPolicy::MakeDefaultStatusFields(),
+    H3AutoPolicy::MakeDefaultStatusFields(),
+};
+
 SummonProfileFields g_summon[5] = {
     H3AutoPolicy::MakeDefaultSummonFields(),
     H3AutoPolicy::MakeDefaultSummonFields(),
@@ -67,11 +75,13 @@ void ClearConfirmedProfiles()
 {
     const AutoStackRule def = MakeDefaultRule_();
     const SummonProfileFields summon_def = H3AutoPolicy::MakeDefaultSummonFields();
+    const StatusProfileFields status_def = H3AutoPolicy::MakeDefaultStatusFields();
     for (int p = 0; p < 5; ++p) {
         for (int s = 0; s < 21; ++s)
             g_profiles[p][s] = def;
         g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         g_summon[p] = summon_def;
+        g_status[p] = status_def;
     }
     g_active_profile = 0;
     for (int s = 0; s < 21; ++s)
@@ -548,8 +558,35 @@ static BattleJson RuleToJson_(const AutoStackRule& rule)
     return obj;
 }
 
+static bool ParseStatusJson_(const BattleJson& obj, StatusProfileFields* status)
+{
+    if (!status) return false;
+    *status = MakeDefaultStatusFields();
+    if (!obj.is_object()) return true;
+    status->slow = JsonInt_(obj, "slow", 0) != 0;
+    if (!obj.contains("buffs") || !obj["buffs"].is_array()) return true;
+    int count = 0;
+    for (const BattleJson& item : obj["buffs"]) {
+        if (!item.is_number_integer() || count >= kStatusSlotCapacity) break;
+        const int spell = item.get<int>();
+        if (spell <= 0 || spell >= 81) continue;
+        status->slots[count++] = spell;
+    }
+    status->slot_count = count;
+    return true;
+}
+
+static BattleJson StatusToJson_(const StatusProfileFields& status)
+{
+    BattleJson buffs = BattleJson::array();
+    for (int i = 0; i < status.slot_count && i < kStatusSlotCapacity; ++i)
+        if (status.slots[i] > 0) buffs.push_back(status.slots[i]);
+    return {{"buffs", buffs}, {"slow", status.slow ? 1 : 0}};
+}
+
 static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
-    uint16_t* stop_turns, SummonProfileFields* summon)
+    uint16_t* stop_turns, SummonProfileFields* summon,
+    StatusProfileFields* status)
 {
     if (!obj.is_object() || !rules || !stop_turns || !summon) return false;
     const int turns = JsonInt_(obj, "stopTurns", -1);
@@ -565,7 +602,7 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
     const int combine = JsonInt_(s, "combine", -1);
     const int stop_mana = JsonInt_(s, "stopEnemyMana", -1);
     const int mana = JsonInt_(s, "mana", -1);
-    if (enabled < 0 || enabled > 1 || count < 0 || count > 21 || hp < 0
+    if (enabled < 0 || enabled > 1 || count < 2 || count > 21 || hp < 0
         || spell < 0 || spell > SUMMON_ELEMENT_COUNT
         || (combine != SUMMON_COMBINE_AND && combine != SUMMON_COMBINE_OR)
         || stop_mana < 0 || stop_mana > 1 || mana < 0 || mana > 32767)
@@ -580,6 +617,9 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
     if (!s.contains("rule") || !ParseRuleJson_(s["rule"], &summon->summon_rule))
         return false;
     NormalizeSummonRule(&summon->summon_rule);
+    if (status && obj.contains("status")
+        && !ParseStatusJson_(obj["status"], status))
+        return false;
     for (int i = 0; i < 21; ++i) rules[i] = MakeDefaultRule();
     if (!obj.contains("army") || !obj["army"].is_array()) return false;
     for (const BattleJson& unit : obj["army"]) {
@@ -593,7 +633,8 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
 }
 
 static BattleJson ProfileToJson_(const AutoStackRule rules[21],
-    uint16_t stop_turns, const SummonProfileFields& summon)
+    uint16_t stop_turns, const SummonProfileFields& summon,
+    const StatusProfileFields& status)
 {
     BattleJson army = BattleJson::array();
     for (int slot = 0; slot < 21; ++slot) {
@@ -621,6 +662,7 @@ static BattleJson ProfileToJson_(const AutoStackRule rules[21],
             {"rule", RuleToJson_(summon.summon_rule)},
         }},
         {"army", army},
+        {"status", StatusToJson_(status)},
     };
 }
 
@@ -638,7 +680,7 @@ static bool ParseRecordJson_(const BattleJson& obj, BattleStoreRecord* rec)
         || obj["profiles"].size() != 5) return false;
     for (int i = 0; i < 5; ++i) {
         if (!ParseProfileJson_(obj["profiles"][i], rec->rules[i],
-                &rec->stop_turns[i], &rec->summon[i]))
+                &rec->stop_turns[i], &rec->summon[i], &rec->status[i]))
             return false;
     }
     return true;
@@ -679,7 +721,8 @@ static bool SaveBattleStoreRaw_(unsigned long long fp,
         BattleJson profiles = BattleJson::array();
         for (int p = 0; p < 5; ++p)
             profiles.push_back(ProfileToJson_(records[i].rules[p],
-                records[i].stop_turns[p], records[i].summon[p]));
+                records[i].stop_turns[p], records[i].summon[p],
+                records[i].status[p]));
         entries.push_back({
             {"time", records[i].time},
             {"active", records[i].active + 1},
@@ -723,7 +766,7 @@ bool LoadBattleStore(unsigned long long fp, BattleStoreRecord* records,
 bool AppendBattleStoreRecord(unsigned long long fp,
     const AutoStackRule rules[5][21],
     const uint16_t stop_turns[5], const SummonProfileFields summon[5],
-    int active, bool* skipped_same)
+    const StatusProfileFields status[5], int active, bool* skipped_same)
 {
     if (skipped_same) *skipped_same = false;
     if (!fp) return false;
@@ -739,6 +782,7 @@ bool AppendBattleStoreRecord(unsigned long long fp,
         memcpy(rec->rules, rules, sizeof(rec->rules));
         memcpy(rec->stop_turns, stop_turns, sizeof(rec->stop_turns));
         memcpy(rec->summon, summon, sizeof(rec->summon));
+        memcpy(rec->status, status, sizeof(rec->status));
         if (n > 0
             && H3AutoPolicy::BattleStoreRecordContentEquals(all[n - 1], *rec)) {
             if (skipped_same) *skipped_same = true;

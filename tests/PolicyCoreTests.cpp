@@ -799,6 +799,23 @@ void TestProfileStoreRoundtrip()
     Check(!AutoStopShouldYield(10, 1000, 1000, 5), "no damage does not stop");
     Check(!AutoStopShouldYield(10, 1000, 1100, 5), "enemy hp gain does not stop");
     Check(ProjectEnemyTurnsLeft(10, 1000, 100, 9) == 1, "remaining turns round up");
+
+    const int durations[] = {3, 1, -1, 0};
+    Check(ChooseBuffToRefresh(durations, 4) == 3,
+        "buff refresh picks the shortest remaining duration");
+    Check(ChooseBuffToRefresh(durations, 2) == 1,
+        "buff at one turn still refreshes");
+    const int fresh[] = {2, 4};
+    Check(ChooseBuffToRefresh(fresh, 2) == -1,
+        "buff above one turn is not refreshed");
+    const int enemy_durations[] = {4, 1, 0};
+    const int enemy_hexes[] = {10, 20, 30};
+    const StatusMaintainChoice slow =
+        ChooseSlowTarget(true, enemy_durations, enemy_hexes, 3);
+    Check(slow.spell_id == 54 && slow.target_hex == 30 && slow.mass == 1,
+        "slow uses the enemy with the fewest turns left");
+    Check(ChooseSlowTarget(false, enemy_durations, enemy_hexes, 3).spell_id == -1,
+        "slow without expert mass does nothing");
 }
 
 void TestSummonChannel()

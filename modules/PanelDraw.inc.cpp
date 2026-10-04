@@ -681,6 +681,7 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
     static const char* const kTabKeys[TAB_VISIBLE_COUNT] = {
         "panel.tab_army",
         "panel.tab_summon",
+        "panel.tab_status",
     };
     H3Font* small_font = GetSmallFont();
     for (int i = 0; i < TAB_VISIBLE_COUNT; ++i) {
@@ -1014,6 +1015,83 @@ static void DrawSummonPage_(H3LoadedPcx16* scr)
     }
 }
 
+static const char* StatusSpellName_(int spell_id, char* out, int out_size)
+{
+    if (!out || out_size <= 0) return "";
+    out[0] = 0;
+    if (spell_id <= 0 || spell_id >= 81) {
+        _snprintf(out, out_size, "%s", T("panel.status_empty"));
+        return out;
+    }
+    const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
+    if (!table) {
+        _snprintf(out, out_size, "%s", T("panel.status_empty"));
+        return out;
+    }
+    const char* name = *reinterpret_cast<const char* const*>(
+        table + spell_id * 0x88 + 0x10);
+    if (!name || !name[0]) {
+        _snprintf(out, out_size, "%s", T("panel.status_empty"));
+        return out;
+    }
+    // 游戏法术表名称是系统 ANSI/GBK，面板 DrawTxt 接受 UTF-8，不能直接透传。
+    wchar_t wide[128] = {};
+    const int wide_len = MultiByteToWideChar(936, 0, name, -1,
+        wide, _countof(wide));
+    if (wide_len > 0 && WideCharToMultiByte(CP_UTF8, 0, wide, -1,
+            out, out_size, nullptr, nullptr) > 0)
+        return out;
+    _snprintf(out, out_size, "%s", T("panel.status_empty"));
+    return out;
+}
+
+static void StatusSlotRect_(int index, int* x, int* y)
+{
+    const int col = index % STATUS_COLS;
+    const int row = index / STATUS_COLS;
+    if (x) *x = GRID_FRAME_X + col * (STATUS_DD_W + STATUS_GAP);
+    if (y) *y = STATUS_ROW0_Y + row * STATUS_ROW_H;
+}
+
+static const char* StatusSpellLabel_(int spell_id, char* buf, int cap)
+{
+    char name[256] = {};
+    StatusSpellName_(spell_id, name, sizeof(name));
+    if (spell_id == H3AutoPolicy::kSlowSpellId)
+        _snprintf(buf, cap, "%s（敌方）", name);
+    else
+        _snprintf(buf, cap, "%s", name);
+    if (cap > 0) buf[cap - 1] = 0;
+    return buf;
+}
+
+static void DrawStatusPage_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    H3Font* small_font = GetSmallFont();
+    DrawTxt(scr, small_font, T("panel.status_note"),
+        GRID_FRAME_X, STATUS_NOTE_Y, GRID_FRAME_W, 18,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    const StatusProfileFields& status =
+        s_p.draft_status[s_p.selected_profile];
+    for (int i = 0; i < status.slot_count; ++i) {
+        int x = 0, y = 0;
+        StatusSlotRect_(i, &x, &y);
+        char label[96] = {};
+        DrawSummonCombo_(scr, small_font, x, y, STATUS_DD_W, STATUS_DD_H,
+            StatusSpellLabel_(status.slots[i], label, sizeof(label)),
+            s_status_dd_open == i);
+    }
+    if (status.slot_count < H3AutoPolicy::kStatusSlotCapacity) {
+        int x = 0, y = 0;
+        StatusSlotRect_(status.slot_count, &x, &y);
+        CellControl_DrawButtonBg(scr, x, y, STATUS_ADD_W, STATUS_ADD_H,
+            s_p.status_add_armed, false);
+        CellControl_DrawPlusButton(scr, x + (STATUS_ADD_W - 16) / 2,
+            y + (STATUS_ADD_H - 16) / 2, 16, s_p.status_add_armed);
+    }
+}
+
 // 展开的下拉列表（每项底色+边框，与保活/卡片下拉同主题）。
 static void DrawSummonDropdownLists_(H3LoadedPcx16* scr)
 {
@@ -1166,6 +1244,28 @@ static void DrawPanelToBuffer_()
     } else if (s_p.active_page == PAGE_SUMMON) {
         // 召唤页：设置行 + 说明行 + 召唤物行动卡（无滚动条）。
         DrawSummonPage_(scr);
+    } else if (s_p.active_page == PAGE_STATUS) {
+        DrawStatusPage_(scr);
+        if (s_status_dd_open >= 0) {
+            int x = 0, y = 0;
+            StatusSlotRect_(s_status_dd_open, &x, &y);
+            for (int i = 0; i < s_status_dd_count; ++i) {
+                const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
+                BYTE bg_r = 68, bg_g = 42, bg_b = 18;
+                BYTE fr = 166, fg = 112, fb = 40;
+                if (i == s_status_dd_hover) {
+                    bg_r = 184; bg_g = 136; bg_b = 48;
+                    fr = 246; fg = 214; fb = 116;
+                }
+                Fill(scr, x, iy, STATUS_DD_W, STATUS_ITEM_H, bg_r, bg_g, bg_b);
+                scr->DrawFrame(x, iy, STATUS_DD_W, STATUS_ITEM_H, fr, fg, fb);
+                char label[96] = {};
+                DrawTxt(scr, GetSmallFont(),
+                    StatusSpellLabel_(s_status_dd_ids[i], label, sizeof(label)),
+                    x + 6, iy, STATUS_DD_W - 12, STATUS_ITEM_H,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            }
+        }
     }
 
     DrawPanelButtons_(scr);

@@ -137,6 +137,84 @@ inline AutoStackRule MakeDefaultRule()
     return r;
 }
 
+// 原版友方范围增益。下拉还要同时满足：英雄已学会，且法术表带
+// friendlyMass(0x800) 或 expertMassVersion(0x40)。没有范围版的不列。
+static constexpr int kBuffSpellCount = 16;
+static constexpr int kBuffSpellIds[kBuffSpellCount] = {
+    27, 28, 30, 31, 32, 33, 41, 43, 44, 46, 48, 49, 51, 53, 55, 58,
+};
+static constexpr int kSpellFlagFriendlyMass = 0x800;
+static constexpr int kSpellFlagExpertMass = 0x40;
+
+inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
+{
+    if (spell_id <= 0) return false;
+    const bool listed = [&]() {
+        for (int id : kBuffSpellIds) if (id == spell_id) return true;
+        return false;
+    }();
+    if (!listed) return false;
+    return (spell_flags & kSpellFlagFriendlyMass) != 0
+        || (spell_flags & kSpellFlagExpertMass) != 0;
+}
+static constexpr int kSlowSpellId = 54;
+static constexpr int kStatusRefreshTurns = 1;
+static constexpr int kStatusSlotCapacity = 8;
+
+// 保持状态是方案级设置，不挂在单支部队上。
+// slots 存已选法术 id；0 表示空槽。slow 单独开关，只在专家群体时生效。
+struct StatusProfileFields {
+    int slots[kStatusSlotCapacity];
+    int slot_count;
+    int slow;
+};
+
+inline StatusProfileFields MakeDefaultStatusFields()
+{
+    StatusProfileFields fields = {};
+    return fields;
+}
+
+struct StatusMaintainChoice {
+    int spell_id;   // -1 = 本回合不补
+    int target_hex; // 群体减速时是剩余回合最短的那队
+    int mass;       // 1 = 专家群体，目标格只作施法锚点
+};
+
+// durations[i] 是 spell_ids[i] 在该队上的剩余回合。
+// 只补 ≤ kStatusRefreshTurns 的；全是 -1 表示未勾选。
+inline int ChooseBuffToRefresh(const int* durations, int count)
+{
+    if (!durations || count <= 0) return -1;
+    int best = -1;
+    for (int i = 0; i < count; ++i) {
+        if (durations[i] < 0 || durations[i] > kStatusRefreshTurns) continue;
+        if (best < 0 || durations[i] < durations[best]) best = i;
+    }
+    return best;
+}
+
+// 敌方减速：己方必须是专家群体。enemy_durations 覆盖全部存活敌方，
+// 以剩余回合最少的那队为准；-1 表示该队不存在。
+inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
+    const int* enemy_durations, const int* enemy_hexes, int enemy_count)
+{
+    StatusMaintainChoice choice = {-1, -1, 0};
+    if (!expert_mass || !enemy_durations || !enemy_hexes || enemy_count <= 0)
+        return choice;
+    int best = -1;
+    for (int i = 0; i < enemy_count; ++i) {
+        if (enemy_durations[i] < 0) continue;
+        if (enemy_durations[i] > kStatusRefreshTurns) continue;
+        if (best < 0 || enemy_durations[i] < enemy_durations[best]) best = i;
+    }
+    if (best < 0) return choice;
+    choice.spell_id = kSlowSpellId;
+    choice.target_hex = enemy_hexes[best];
+    choice.mass = 1;
+    return choice;
+}
+
 inline bool IsWarMachineType(int creature_type)
 {
     return creature_type == CREATURE_CATAPULT
@@ -863,7 +941,7 @@ static constexpr int DEFAULT_STOP_TURNS = 10;
 // 保活优先，无人可救且 enabled 时才走召唤。
 struct SummonProfileFields {
     int enabled;          // 是否启用自动召唤（0/1，默认 0）：复活无人可救时的兜底
-    int count_th;         // 队数阈值，默认 2，0..21（存活队数严格小于此值才触发；0=队数条件永不触发）
+    int count_th;         // 队数阈值，默认 2，2..21（存活队数严格小于此值才触发）
     int hp_th;            // 血量阈值，默认 750，≥0（口径同自动停止）
     int spell_pick;       // 法术选择：0=自动；1..SUMMON_ELEMENT_COUNT=固定元素
     int cond_combine;     // 队数/血量两条件组合：0=和（默认）；1=或
@@ -898,6 +976,7 @@ struct BattleStoreRecord {
     AutoStackRule rules[5][21];
     uint16_t stop_turns[5];
     SummonProfileFields summon[5];
+    StatusProfileFields status[5];
 };
 
 // 两条记录内容是否完全相同（忽略时间戳）：「确定」时与文件里最后一
@@ -917,6 +996,8 @@ inline bool BattleStoreRecordContentEquals(const BattleStoreRecord& a,
     for (int p = 0; p < 5; ++p) {
         if (a.stop_turns[p] != b.stop_turns[p]) return false;
         if (!bytes_equal(&a.summon[p], &b.summon[p], sizeof(SummonProfileFields)))
+            return false;
+        if (!bytes_equal(&a.status[p], &b.status[p], sizeof(StatusProfileFields)))
             return false;
         if (!bytes_equal(a.rules[p], b.rules[p], sizeof(a.rules[p])))
             return false;
@@ -1244,7 +1325,7 @@ inline bool DecodeProfileStoreText(const char* text,
     decoded_summon.cond_combine = ints[n++];
     decoded_summon.stop_enemy_mana = ints[n++];
     decoded_summon.stop_mana_th = ints[n++];
-    if (decoded_summon.count_th < 0
+    if (decoded_summon.count_th < 2
         || decoded_summon.count_th > PROFILE_STORE_SLOTS) {
         delete[] ints; return false;
     }
@@ -1459,3 +1540,8 @@ using H3AutoPolicy::SUMMON_ELEMENT_COUNT;
 using H3AutoPolicy::SUMMON_COMBINE_AND;
 using H3AutoPolicy::SUMMON_COMBINE_OR;
 using H3AutoPolicy::MakeDefaultRule;
+using H3AutoPolicy::StatusProfileFields;
+using H3AutoPolicy::MakeDefaultStatusFields;
+using H3AutoPolicy::kStatusSlotCapacity;
+using H3AutoPolicy::kBuffSpellIds;
+using H3AutoPolicy::IsMassBuffSpell;

@@ -35,6 +35,8 @@ static struct Panel {
     AutoStackRule draft_rules[PROFILE_COUNT][MAX_STACKS]; // 5 套草稿（每编号一份，切走不丢）
     uint16_t draft_stop_turns[PROFILE_COUNT];       // 自动停止回合草稿，0=关闭，0..999
     SummonProfileFields draft_summon[PROFILE_COUNT]; // 召唤通道草稿（启用/阈值/法术/召唤物规则/敌方法力停）
+    StatusProfileFields draft_status[PROFILE_COUNT]; // 保持状态草稿
+    bool status_add_armed; // 保持状态「＋」已按下，松开才追加
     int selected_profile;                           // 当前编号 0..4（存档文件编号 = 界面方案 1-5）
     int pressed_profile;
     int count;                 // 可配置部队总数（可大于可见行）
@@ -705,6 +707,10 @@ static bool s_summon_cond_dd_open = false;
 static int  s_summon_cond_dd_hover = -1;
 static bool s_summon_act_dd_open = false;
 static int  s_summon_act_dd_hover = -1;
+static int  s_status_dd_open = -1;
+static int  s_status_dd_hover = -1;
+static int  s_status_dd_ids[81] = {};
+static int  s_status_dd_count = 0;
 // 队数/血量阈值数字录入：与停止回合同款（预填当前值、光标可移动）。
 enum SummonNumEditWhich { SUMMON_EDIT_NONE = 0, SUMMON_EDIT_COUNT, SUMMON_EDIT_HP };
 static int  s_summon_edit_which = SUMMON_EDIT_NONE;
@@ -739,7 +745,7 @@ static int SummonNumBoxMaxDigits_(int which)
         ? SUMMON_HP_MAX_DIGITS : SUMMON_CNT_MAX_DIGITS;
 }
 
-// 提交（框外点击/回车/切页）：空文本=0；越界钳制（队数 0..21；血量≥0）。
+// 提交（框外点击/回车/切页）：空文本=0；越界钳制（队数 2..21；血量≥0）。
 static void CommitSummonNumEdit_()
 {
     if (s_summon_edit_which == SUMMON_EDIT_NONE) return;
@@ -749,6 +755,7 @@ static void CommitSummonNumEdit_()
     SummonProfileFields& sf =
         s_p.draft_summon[s_p.selected_profile];
     if (s_summon_edit_which == SUMMON_EDIT_COUNT) {
+        if (value < 2) value = 2; // 最小即默认 2
         if (value > 21) value = 21;
         sf.count_th = (int)value;
     } else {
@@ -795,6 +802,47 @@ static void CloseSummonDropdowns_()
     s_summon_cond_dd_hover = -1;
     s_summon_act_dd_open = false;
     s_summon_act_dd_hover = -1;
+    s_status_dd_open = -1;
+    s_status_dd_hover = -1;
+}
+
+// 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速；
+// skip_slot 以外的槽位已用的法术排除（避免重复）。结果进 s_status_dd_ids。
+static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
+{
+    s_status_dd_count = 0;
+    H3Hero* hero = nullptr;
+    H3CombatManager* cm = H3CombatManager::Get();
+    if (cm && o_BattleMgr) {
+        const int side = ResolveHumanSide_(o_BattleMgr);
+        if (side >= 0 && side <= 1)
+            hero = reinterpret_cast<H3Hero*>(o_BattleMgr->hero[side]);
+    }
+    const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
+    if (!hero || !table || !cm) return 0;
+    int candidates[H3AutoPolicy::kBuffSpellCount + 1] = {};
+    int candidate_count = 0;
+    for (int spell : H3AutoPolicy::kBuffSpellIds)
+        candidates[candidate_count++] = spell;
+    candidates[candidate_count++] = H3AutoPolicy::kSlowSpellId;
+    for (int n = 0; n < candidate_count; ++n) {
+        const int spell = candidates[n];
+        bool used = false;
+        for (int i = 0; i < status.slot_count; ++i)
+            if (i != skip_slot)
+                used = used || status.slots[i] == spell;
+        if (used) continue;
+        const unsigned flags = *reinterpret_cast<const unsigned*>(
+            table + spell * 0x88 + 0x0C);
+        const bool slow = spell == H3AutoPolicy::kSlowSpellId;
+        if (!slow && !H3AutoPolicy::IsMassBuffSpell(spell, flags))
+            continue;
+        const int expertise = hero->GetSpellExpertise(
+            spell, cm->specialTerrain);
+        if (expertise <= 0 || (slow && expertise < 3)) continue;
+        s_status_dd_ids[s_status_dd_count++] = spell;
+    }
+    return s_status_dd_count;
 }
 
 // 复选框「框在文字前」：复用卡片降级勾选样式（10px 方框 + 勾）。
@@ -1023,6 +1071,7 @@ void ResetPanelDrafts()
             s_p.draft_rules[p][s] = def;
         s_p.draft_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         s_p.draft_summon[p] = summon_def;
+        s_p.draft_status[p] = H3AutoPolicy::MakeDefaultStatusFields();
     }
     LogInfo("[Panel] 草稿已随战斗结果清空（5 套方案+召唤参数）");
 }
@@ -1060,6 +1109,7 @@ static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
             s_p.draft_rules[p][s] = rec.rules[p][s];
         s_p.draft_stop_turns[p] = rec.stop_turns[p];
         s_p.draft_summon[p] = rec.summon[p];
+        s_p.draft_status[p] = rec.status[p];
     }
     s_p.selected_profile = rec.active;
     s_stop_turns_editing = false;
@@ -1197,6 +1247,7 @@ void OpenSettingsPanel_()
     memcpy(s_p.draft_rules, g_profiles, sizeof(s_p.draft_rules));
     memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
     memcpy(s_p.draft_summon, g_summon, sizeof(s_p.draft_summon));
+    memcpy(s_p.draft_status, g_status, sizeof(s_p.draft_status));
     s_stop_turns_editing = false;
     CancelManaThEdit_();
     for (int i = 0; i < CELL_COUNT; ++i)
@@ -1298,7 +1349,7 @@ static void CommitAndCloseSettingsPanel_()
     // 选中项保持玩家当前选的那条。
     bool store_added = false;
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
-        s_p.draft_stop_turns, s_p.draft_summon,
+        s_p.draft_stop_turns, s_p.draft_summon, s_p.draft_status,
         &store_added);
     // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
     RememberProfileSlot(s_p.selected_profile);
@@ -1558,6 +1609,21 @@ static bool UpdateDropdownHover_(int px, int py)
         }
         if (new_act_hover != s_summon_act_dd_hover) {
             s_summon_act_dd_hover = new_act_hover;
+            changed = true;
+        }
+    }
+    if (s_status_dd_open >= 0) {
+        int x = 0, y = 0, hover = -1;
+        StatusSlotRect_(s_status_dd_open, &x, &y);
+        for (int i = 0; i < s_status_dd_count; ++i) {
+            const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
+            if (PointInRect_(px, py, x, iy, STATUS_DD_W, STATUS_ITEM_H)) {
+                hover = i;
+                break;
+            }
+        }
+        if (hover != s_status_dd_hover) {
+            s_status_dd_hover = hover;
             changed = true;
         }
     }
@@ -1944,6 +2010,27 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     // （召唤页没有卡片，右键直接吞掉。）
     if (raw_command == 64
         || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP)) {
+        // 保持状态页：右键已有下拉框删除该项，后面的项和「+」前移。
+        if (s_p.active_page == PAGE_STATUS) {
+            StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
+            for (int i = 0; i < status.slot_count; ++i) {
+                int x = 0, y = 0;
+                StatusSlotRect_(i, &x, &y);
+                if (!PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H))
+                    continue;
+                for (int n = i; n + 1 < status.slot_count; ++n)
+                    status.slots[n] = status.slots[n + 1];
+                status.slots[--status.slot_count] = 0;
+                s_status_dd_open = -1;
+                s_status_dd_hover = -1;
+                LogInfo("[Panel] 保持状态移除第%d项 (方案%d)",
+                    i + 1, s_p.selected_profile + 1);
+                DrawPanelToBuffer_();
+                return;
+            }
+            return;
+        }
         if (s_p.active_page != PAGE_ARMY) return;
         const int first_item = s_p.scroll_row * COLS;
         for (int i = 0; i < CELL_COUNT; ++i) {
@@ -1978,6 +2065,43 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         }
         // 下拉展开时，鼠标移动立即刷新悬停高亮（无延迟）。
         UpdateDropdownHover_(px, py);
+        return;
+    }
+
+    // 保持状态下拉展开时：选项即选、点框保持/收起、点外收起
+    // （与召唤页下拉完全同款语义）。
+    if (s_p.active_page == PAGE_STATUS && s_status_dd_open >= 0) {
+        if (raw_command == 4)
+            return;
+        if (raw_command == 8 || raw_command == 16) {
+            StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
+            int x = 0, y = 0;
+            StatusSlotRect_(s_status_dd_open, &x, &y);
+            for (int i = 0; i < s_status_dd_count; ++i) {
+                const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
+                if (!PointInRect_(px, py, x, iy, STATUS_DD_W, STATUS_ITEM_H))
+                    continue;
+                if (s_status_dd_open < status.slot_count)
+                    status.slots[s_status_dd_open] = s_status_dd_ids[i];
+                s_status_dd_open = -1;
+                s_status_dd_hover = -1;
+                DrawPanelToBuffer_();
+                return;
+            }
+            if (PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H)) {
+                if (raw_command == 8) {
+                    s_status_dd_open = -1;
+                    s_status_dd_hover = -1;
+                    DrawPanelToBuffer_();
+                }
+                return;
+            }
+            s_status_dd_open = -1;
+            s_status_dd_hover = -1;
+            DrawPanelToBuffer_();
+            return;
+        }
         return;
     }
 
@@ -2041,6 +2165,53 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 s_p.selected_profile + 1);
             DrawPanelToBuffer_();
             return;
+        }
+
+        // 保持状态页：点已有槽位展开下拉换法术；点「＋」追加一个槽并展开。
+        if (s_p.active_page == PAGE_STATUS) {
+            StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
+            bool handled = false;
+            for (int i = 0; i < status.slot_count && !handled; ++i) {
+                int x = 0, y = 0;
+                StatusSlotRect_(i, &x, &y);
+                if (!PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H))
+                    continue;
+                handled = true;
+                if (BuildStatusCandidates_(status, i) > 0) {
+                    s_status_dd_open = i;
+                    s_status_dd_hover = -1;
+                } else {
+                    SetStatusText_(T("panel.status_empty"), 3000);
+                }
+            }
+            if (!handled) {
+                int add_x = 0, add_y = 0;
+                StatusSlotRect_(status.slot_count, &add_x, &add_y);
+                if (status.slot_count < H3AutoPolicy::kStatusSlotCapacity
+                    && PointInRect_(px, py, add_x, add_y,
+                        STATUS_ADD_W, STATUS_ADD_H)) {
+                    handled = true;
+                    s_p.status_add_armed = true;
+                    if (BuildStatusCandidates_(status, -1) > 0) {
+                        const int picked = s_status_dd_ids[0];
+                        status.slots[status.slot_count++] = picked;
+                        s_status_dd_open = status.slot_count - 1;
+                        s_status_dd_hover = -1;
+                        LogInfo("[Panel] 保持状态追加 spell=%d (方案%d)",
+                            picked, s_p.selected_profile + 1);
+                    } else {
+                        SetStatusText_(T("panel.status_empty"), 3000);
+                    }
+                    s_p.status_add_armed = false;
+                }
+            }
+            if (handled) {
+                DrawPanelToBuffer_();
+                return;
+            }
+            // 内容区空白点击不穿透；方案行/确定取消(y=468+)在区外照常处理。
+            if (py >= GRID_FRAME_Y && py < TAB_HLINE2_Y) return;
         }
 
         // 召唤页（PAGE_SUMMON）内容区控件：设置行 + 行动行。

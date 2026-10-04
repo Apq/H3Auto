@@ -13,6 +13,7 @@ static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
+static void StatusSlotRect_(int index, int* x, int* y);
 static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetSummonCondDdItemRect_(int item, int* out_x, int* out_y,
