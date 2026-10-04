@@ -370,8 +370,12 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
     if (code == HC_ACTION && s_p.active && !s_panel_modal_suspended
         && wParam == WM_MOUSEMOVE)
     {
-        // 有下拉展开时才需要即时刷新高亮（卡片下拉或保活策略下拉）
-        bool any_expanded = s_protect_dd_open;
+        // 有下拉展开时才需要即时刷新高亮。召唤页的法术/行动下拉漏在这里
+        // 会导致悬停高亮函数根本不被调用（绘制侧的高亮分支是好的，只是
+        // hover 值永远停在 -1）。
+        bool any_expanded = s_protect_dd_open
+            || s_summon_spell_dd_open || s_summon_act_dd_open
+            || s_battle_dd_open;
         for (int i = 0; i < CELL_COUNT; ++i) {
             if (s_p.cells[i].expanded != CEX_NONE) {
                 any_expanded = true;
@@ -506,6 +510,13 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     const bool mouse_command = raw_command == 4 || raw_command == 8
         || raw_command == 16
         || raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL);
+    // 到达性诊断：面板激活时每次点击类消息留一条 debug。若用户点击后日志
+    // 里没有这条，说明消息根本没到屏障 item（上游命中/派发问题），而非
+    // 面板命中测试问题。
+    if (panel_was_active && mouse_command) {
+        LogDebug("[Panel] blocker hit raw=%d pos=(%d,%d)", raw_command,
+            static_cast<int>(msg.position.x), static_cast<int>(msg.position.y));
+    }
     if (panel_was_active && mouse_command && !IsGameMouseInputActive_()) {
         // Losing focus can leave a stale in-game cursor coordinate in the
         // translated packet. Never let an outside click complete a button or drag.
@@ -694,14 +705,23 @@ static bool InstallBattleInputBlocker_()
         return false;
     }
 
-    if (s_input_blocker.item && s_input_blocker.battle_ui == battle_ui) {
-        *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.local_vtable;
-        s_input_blocker.item->ShowActivate();
-        LogInfo("[Panel] 已重新激活 BattleUI 输入屏障 item=%p。", s_input_blocker.item);
-        return true;
+    // 不再复用旧 item“重激活”：实战日志证明停用(HideDeactivate)→重激活
+    // (ShowActivate)后鼠标消息不再到达屏障（0.3.2026.930 一次会话中 8 个
+    // 重激活会话零点击响应、3 个全新安装会话全部正常，键盘钩子不受影响），
+    // 推测 Hide/Show 未恢复 ItemAtPosition 命中所依赖的完整状态、或战斗
+    // 进行中游戏动态添加的 item 把旧位置的屏障压到了下层。改为每次全新
+    // Create + AddItem 到链尾（恒为最上层）。旧 item 还原 vtable 并隐藏后
+    // 不再命中不拦截，留待 BattleUI 析构时由游戏统一回收。
+    if (s_input_blocker.item) {
+        if (s_input_blocker.battle_ui == battle_ui) {
+            *reinterpret_cast<void***>(s_input_blocker.item) =
+                s_input_blocker.original_vtable;
+            s_input_blocker.item->HideDeactivate();
+            LogInfo("[Panel] 旧输入屏障已隐藏 item=%p，改用全新安装。",
+                s_input_blocker.item);
+        }
+        s_input_blocker = {};
     }
-
-    s_input_blocker = {};
     H3DlgTransparentItem* item = H3DlgTransparentItem::Create(
         0, 0, H3GameWidth::Get(), H3GameHeight::Get(), 0x7FFE);
     if (!item) {

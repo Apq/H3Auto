@@ -41,13 +41,114 @@ void TestPanelAdmission()
     Check(IsConfigurablePanelStack(CREATURE_FIRST_AID_TENT, 10, false, false),
         "first aid tent is always configurable");
     Check(!IsConfigurablePanelStack(CREATURE_BALLISTA, 0, true, false),
-        "dead stack is not configurable");
+        "empty slot (never fielded) is not configurable");
+    Check(IsConfigurablePanelStack(CREATURE_BALLISTA, 20, true, false),
+        "fallen own stack stays listed for config (revive keeps rule)");
+    Check(!IsConfigurablePanelStack(10, 0, false, false),
+        "empty non-machine slot is not configurable");
     Check(!IsConfigurablePanelStack(kSummonCreatureIds[0], 10, false, true),
         "summoned elemental is not configurable");
     Check(!IsConfigurablePanelStack(10, 10, false, true),
         "clone stack is not configurable");
     Check(IsConfigurablePanelStack(kSummonCreatureIds[0], 10, false, false),
         "brought-in elemental army stack stays configurable");
+}
+
+void TestBattleFingerprint()
+{
+    BattleFingerprintInput a = {};
+    a.hero_id[0] = 7;   a.hero_id[1] = -1;               // 攻方英雄 / 守方野怪
+    a.side_types[0][0] = 1;  a.side_counts[0][0] = 20;   // 攻方枪兵 20
+    a.side_types[0][1] = 13; a.side_counts[0][1] = 5;    // 攻方弓手 5
+    a.side_types[1][0] = 66; a.side_counts[1][0] = 40;   // 守方巨兽 40
+    a.terrain = 3; a.siege_kind = 0;
+    a.map_x = 42; a.map_y = 17; a.map_z = 1;             // 地下
+
+    const unsigned long long fp = ComputeBattleFingerprint(a);
+    Check(fp != 0, "fingerprint nonzero");
+
+    // 槽位重排 / 乱序：同内容同指纹。
+    BattleFingerprintInput b = a;
+    b.side_types[0][0] = 13; b.side_counts[0][0] = 5;
+    b.side_types[0][1] = 1;  b.side_counts[0][1] = 20;
+    Check(ComputeBattleFingerprint(b) == fp, "slot order irrelevant");
+
+    // 数量差 1：不同战斗。
+    BattleFingerprintInput c = a;
+    c.side_counts[1][0] = 41;
+    Check(ComputeBattleFingerprint(c) != fp, "one fewer monster differs");
+
+    // 地上层同坐标：不同战斗（z 区分地上/地下）。
+    BattleFingerprintInput d = a;
+    d.map_z = 0;
+    Check(ComputeBattleFingerprint(d) != fp, "surface vs underground differs");
+
+    // 触发点挪 1 格：不同战斗。
+    BattleFingerprintInput e = a;
+    e.map_x = 43;
+    Check(ComputeBattleFingerprint(e) != fp, "adjacent trigger tile differs");
+
+    // 攻守互换：不同战斗。
+    BattleFingerprintInput f = a;
+    for (int i = 0; i < 21; ++i) {
+        const int t = f.side_types[0][i]; f.side_types[0][i] = f.side_types[1][i];
+        f.side_types[1][i] = t;
+        const int n = f.side_counts[0][i]; f.side_counts[0][i] = f.side_counts[1][i];
+        f.side_counts[1][i] = n;
+    }
+    const int h = f.hero_id[0]; f.hero_id[0] = f.hero_id[1]; f.hero_id[1] = h;
+    Check(ComputeBattleFingerprint(f) != fp, "attacker/defender swap differs");
+
+    // 空槽不参与：补 type=0 槽同指纹。
+    BattleFingerprintInput g = a;
+    g.side_types[0][20] = 99;  // type>0 但 count=0 → 仍不算
+    Check(ComputeBattleFingerprint(g) == fp, "count-zero slot ignored");
+}
+
+void TestBattleStoreRecord()
+{
+    // 基准记录：方案 2 激活，方案 1 的 0 号槽有非默认动作。
+    BattleStoreRecord r1 = {};
+    strcpy(r1.time, "20261004-164530");
+    r1.active = 1;
+    r1.rules[0][0].action = AA_DEFEND;
+    r1.rules[3][20].action = AA_RANGED_ATTACK;
+    r1.strategy[1] = 2;
+    r1.stop_turns[4] = 7;
+    r1.summon[2].count_th = 3;
+    r1.summon[2].hp_th = 800;
+
+    // 完全相同（时间戳相同）→ 内容相同。
+    BattleStoreRecord r2 = r1;
+    Check(BattleStoreRecordContentEquals(r1, r2), "identical records equal");
+
+    // 仅时间戳不同 → 内容仍相同（去重依据）。
+    strcpy(r2.time, "20261004-180001");
+    Check(BattleStoreRecordContentEquals(r1, r2),
+        "timestamp ignored in compare");
+
+    // 每类字段单独改动都算内容变化。
+    BattleStoreRecord r3 = r1; r3.active = 3;
+    Check(!BattleStoreRecordContentEquals(r1, r3), "active change differs");
+    BattleStoreRecord r4 = r1; r4.rules[3][20].action = AA_DEFEND;
+    Check(!BattleStoreRecordContentEquals(r1, r4), "one rule change differs");
+    BattleStoreRecord r5 = r1; r5.strategy[1] = 0;
+    Check(!BattleStoreRecordContentEquals(r1, r5), "strategy change differs");
+    BattleStoreRecord r6 = r1; r6.stop_turns[4] = 8;
+    Check(!BattleStoreRecordContentEquals(r1, r6), "stop turns change differs");
+    BattleStoreRecord r7 = r1; r7.summon[2].hp_th = 801;
+    Check(!BattleStoreRecordContentEquals(r1, r7), "summon field change differs");
+
+    // 时间戳格式校验。
+    Check(BattleStoreStampValid("20261004-164530"), "valid stamp");
+    Check(!BattleStoreStampValid("20261004-246530"), "hour 24 invalid");
+    Check(!BattleStoreStampValid("20261004-164660"), "second 60 invalid");
+    Check(!BattleStoreStampValid("20261304-164530"), "month 13 invalid");
+    Check(!BattleStoreStampValid("20261004 164530"), "dash required");
+    Check(!BattleStoreStampValid("20261004-1645"), "too short");
+    Check(!BattleStoreStampValid("20261004-1645300"), "too long");
+    Check(!BattleStoreStampValid(""), "empty invalid");
+    Check(!BattleStoreStampValid(nullptr), "null invalid");
 }
 
 void TestWarMachineActions()
@@ -696,15 +797,17 @@ void TestProfileStoreRoundtrip()
 
 void TestSummonChannel()
 {
-    // 时机判定：队数与血量双阈值 + 施法/已学/法力守卫。
+    // 时机判定：队数与血量任一阈值 + 施法/已学/法力守卫（或关系）。
     Check(SummonShouldCast(2, 2, 750, 750, 30, 15, false, true),
         "both thresholds met casts");
-    Check(!SummonShouldCast(3, 2, 750, 750, 30, 15, false, true),
-        "stack count above threshold does not cast");
-    Check(!SummonShouldCast(2, 2, 751, 750, 30, 15, false, true),
-        "hp total above threshold does not cast");
-    Check(SummonShouldCast(0, 0, 0, 0, 30, 15, false, true),
-        "zero thresholds cast only when force is empty");
+    Check(SummonShouldCast(2, 2, 4000, 750, 30, 15, false, true),
+        "stack count alone below threshold casts");
+    Check(SummonShouldCast(5, 2, 750, 750, 30, 15, false, true),
+        "hp total alone below threshold casts");
+    Check(!SummonShouldCast(3, 2, 751, 750, 30, 15, false, true),
+        "neither threshold met does not cast");
+    Check(SummonShouldCast(0, 0, 5000, 0, 30, 15, false, true),
+        "zero count threshold casts when no stacks remain");
     Check(!SummonShouldCast(2, 2, 750, 750, 30, 15, true, true),
         "already casted this turn blocks");
     Check(!SummonShouldCast(2, 2, 750, 750, 14, 15, false, true),
@@ -893,6 +996,8 @@ void TestSummonRuleNormalization()
 int main()
 {
     TestPanelAdmission();
+    TestBattleFingerprint();
+    TestBattleStoreRecord();
     TestWarMachineActions();
     TestSelectorsAreIndependent();
     TestInvalidActionNormalization();

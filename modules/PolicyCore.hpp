@@ -210,6 +210,83 @@ inline bool StableStackIdentityEquals(const StableStackIdentity& a,
         && a.occurrence == b.occurrence;
 }
 
+// ======================================================================
+// 战斗内容指纹（§12：同一场战斗的稳定标识）
+//
+// 目标：重打 / 战斗中读档 S&L / 关游戏再开，同一场战斗得到同一个值；
+// 不同战斗（不同敌情或不同触发点）得到不同值。喂入的必须全部是
+// 「开局态」数据（重打与 S&L 后均回到同一快照）：
+//   - 双方各 ≤21 槽 (type, numberAtStart)，按 (type,count) 升序排序后
+//     喂入——与内部槽位顺序、镜像无关；侧序号参与，攻守互换算不同战斗。
+//   - 双方英雄 id（无英雄 = -1；不含技能/法术/军队——军队已在槽表内）。
+//   - 战场地形、攻城类型。
+//   - 冒险地图触发点坐标 (x,y,z)：z 区分地上/地下；取**被攻击方**位置
+//     （守方英雄格 / 与攻方英雄相邻的野怪或城镇格 / 兜底攻方英雄格），
+//     不用攻击发起格——同一目标从不同方向攻击应视为同一场。
+// 哈希 = FNV-1a 64 逐字段滚动。碰撞（同指纹不同战斗）的后果只是把上次
+// 方案带进本场（同敌情方案通常仍适用），可由下一次「确定」覆盖自愈。
+struct BattleFingerprintInput {
+    int side_types[2][21];    // 21 槽生物类型（空槽 0）
+    int side_counts[2][21];   // 21 槽开局数量
+    int hero_id[2];           // -1 = 无英雄
+    int terrain;              // 战场地形
+    int siege_kind;           // 0 = 野战
+    int map_x, map_y, map_z;  // 冒险地图触发点（z: 0 地上 / 1 地下）
+};
+
+inline unsigned long long Fnv1a64_Mix_(unsigned long long h, int v)
+{
+    const unsigned long long prime = 1099511628211ULL;
+    const unsigned int u = static_cast<unsigned int>(v);
+    for (int i = 0; i < 4; ++i) {
+        h ^= (u >> (i * 8)) & 0xFF;
+        h *= prime;
+    }
+    return h;
+}
+
+inline unsigned long long ComputeBattleFingerprint(
+    const BattleFingerprintInput& in)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    for (int side = 0; side < 2; ++side) {
+        h = Fnv1a64_Mix_(h, 0x53494445 + side); // 侧标签：攻守互换 ≠ 同场
+        h = Fnv1a64_Mix_(h, in.hero_id[side]);
+        // 槽 (type,count) 排序后喂入：槽位顺序无关。
+        int idx[21];
+        int n = 0;
+        for (int i = 0; i < 21; ++i) {
+            if (in.side_types[side][i] > 0 && in.side_counts[side][i] > 0)
+                idx[n++] = i;
+        }
+        for (int i = 1; i < n; ++i) { // 插入排序（n ≤ 21）
+            const int cur = idx[i];
+            int j = i - 1;
+            while (j >= 0
+                && (in.side_types[side][idx[j]] > in.side_types[side][cur]
+                    || (in.side_types[side][idx[j]] == in.side_types[side][cur]
+                        && in.side_counts[side][idx[j]]
+                            > in.side_counts[side][cur]))) {
+                idx[j + 1] = idx[j];
+                --j;
+            }
+            idx[j + 1] = cur;
+        }
+        h = Fnv1a64_Mix_(h, n);
+        for (int i = 0; i < n; ++i) {
+            h = Fnv1a64_Mix_(h, in.side_types[side][idx[i]]);
+            h = Fnv1a64_Mix_(h, in.side_counts[side][idx[i]]);
+        }
+    }
+    h = Fnv1a64_Mix_(h, in.terrain);
+    h = Fnv1a64_Mix_(h, in.siege_kind);
+    h = Fnv1a64_Mix_(h, in.map_x);
+    h = Fnv1a64_Mix_(h, in.map_y);
+    h = Fnv1a64_Mix_(h, in.map_z);
+    return h;
+}
+
+
 // For each current battle slot, return the previous slot holding its rule.
 // Unmatched slots remain -1 and receive defaults in the integration layer.
 // 召唤物/克隆没有跨重打身份：不参与重排，重打后回到默认规则。
@@ -232,14 +309,16 @@ inline void BuildStableStackSlotRemap(const StableStackIdentity* previous,
     }
 }
 
-// 面板准入纯规则：数量大于 0；弹药车永不进入；投石车必须有弹道术；
-// 召唤物/克隆物（稳定身份 STACK_ID_SUMMON，由集成层按与
-// MakeStableStackIdentity 同口径判定）不进部队页——其行动只由召唤页的
-// 共享规则控制，配置出口唯一（§2.6）。
-inline bool IsConfigurablePanelStack(int creature_type, int number_alive,
+// 面板准入纯规则（含阵亡）：count_initial>0 即该槽本场存在过部队——阵亡
+// （当前数量 0）的己方非召唤部队仍列入面板，规则可见可改、复活后继续生效
+// （方案生效范围=面板所见部队）；未存在过的空槽不列。弹药车永不进入；
+// 投石车必须有弹道术；召唤物/克隆物（稳定身份 STACK_ID_SUMMON，由集成层
+// 按与 MakeStableStackIdentity 同口径判定）不进部队页——其行动只由召唤页
+// 的共享规则控制，配置出口唯一（§2.6）。
+inline bool IsConfigurablePanelStack(int creature_type, int count_initial,
     bool has_ballistics, bool is_summon_clone)
 {
-    if (number_alive <= 0) return false;
+    if (count_initial <= 0) return false;
     if (is_summon_clone) return false;
     if (creature_type == CREATURE_AMMO_CART) return false;
     if (creature_type == CREATURE_CATAPULT) return has_ballistics;
@@ -448,7 +527,7 @@ enum ProtectStrategy : uint8_t {
     PS_COUNT_BELOW,       // 按数量：剩余数量 ≤ 该队阈值才救（阈值随规则存储，默认 2；0=只救全灭）
     PS_FIRST_ACTION,      // 回合内首动：队列中有损失的部队即救
     PS_LOSS_GT_RESTORE,   // 损失量大于恢复量：已损 HP 超过一次可恢复量才救
-    PS_SUMMON_LOW_FORCE,  // 兵力不足时召唤：存活队数 ≤ 阈值 且 血量合计 ≤ 阈值 → 召唤通道
+    PS_SUMMON_LOW_FORCE,  // 兵力不足时召唤：存活队数 ≤ 阈值 或 血量合计 ≤ 阈值 → 召唤通道
     PS_COUNT
 };
 
@@ -539,16 +618,16 @@ inline bool ShouldStopOnEnemyMana(int stop_flag, bool has_enemy_hero,
     return enemy_mana <= threshold;
 }
 
-// 召唤时机：己方存活队数（含召唤物、不含战争机器）≤ 阈值 且
-// 剩余血量合计（同口径）≤ 阈值；本回合未施法、已学、法力够。
+// 召唤时机：己方存活队数（含召唤物、不含战争机器）≤ 阈值，或
+// 剩余血量合计（同口径）≤ 阈值，满足任一即召；本回合未施法、已学、法力够。
+// 两个阈值是「或」关系：只剩很少队、或血量掉得很低，都该补一队。
 inline bool SummonShouldCast(int stack_count, int count_th, int hp_total,
     int hp_th, int mana, int mana_cost, bool hero_casted, bool learned)
 {
     if (hero_casted) return false;
     if (!learned) return false;
     if (mana_cost > 0 && mana < mana_cost) return false;
-    if (stack_count > count_th) return false;
-    return hp_total <= hp_th;
+    return stack_count <= count_th || hp_total <= hp_th;
 }
 
 inline bool IsSummonedElemental(int creature_id)
@@ -803,6 +882,69 @@ inline SummonProfileFields MakeDefaultSummonFields()
     fields.summon_rule.action = AA_DEFEND; // 召唤物默认防御（可改手动/散开/随机）
     return fields;
 }
+
+// ======================================================================
+// 战斗存档记录（§17 智能存读档）：一场战斗一条 = 时间戳 + 激活方案 +
+// 5 套完整方案。存档文件 <指纹>.json 按时间序保存 ≤30 条（集成层
+// ConfigLog 负责 JSON 编解码与落盘；结构与内容比较是纯函数，在此可测）。
+// ======================================================================
+struct BattleStoreRecord {
+    char time[20];                  // "yyyymmdd-hhmmss"
+    int  active;                    // 0..4
+    AutoStackRule rules[5][21];
+    uint8_t strategy[5];
+    uint16_t stop_turns[5];
+    SummonProfileFields summon[5];
+};
+
+// 两条记录内容是否完全相同（忽略时间戳）：「确定」时与文件里最后一
+// 条比对，相同则不新增存档。
+inline bool BattleStoreRecordContentEquals(const BattleStoreRecord& a,
+    const BattleStoreRecord& b)
+{
+    // 字节级手写比较（本文件不依赖 <cstring>）。
+    auto bytes_equal = [](const void* p, const void* q, int n) -> bool {
+        const unsigned char* x = static_cast<const unsigned char*>(p);
+        const unsigned char* y = static_cast<const unsigned char*>(q);
+        for (int i = 0; i < n; ++i)
+            if (x[i] != y[i]) return false;
+        return true;
+    };
+    if (a.active != b.active) return false;
+    for (int p = 0; p < 5; ++p) {
+        if (a.strategy[p] != b.strategy[p]) return false;
+        if (a.stop_turns[p] != b.stop_turns[p]) return false;
+        if (!bytes_equal(&a.summon[p], &b.summon[p], sizeof(SummonProfileFields)))
+            return false;
+        if (!bytes_equal(a.rules[p], b.rules[p], sizeof(a.rules[p])))
+            return false;
+    }
+    return true;
+}
+
+// 时间戳格式校验：15 字符 yyyymmdd-hhmmss，除第 8 位为 '-' 外全数字，
+// 且月份 01..12、日 01..31、时分秒 ≤ 59 的粗校验。
+inline bool BattleStoreStampValid(const char* s)
+{
+    if (!s) return false;
+    for (int i = 0; i < 15; ++i) {
+        if (!s[i]) return false;
+        if (i == 8) {
+            if (s[i] != '-') return false;
+        } else if (s[i] < '0' || s[i] > '9') {
+            return false;
+        }
+    }
+    if (s[15] != 0) return false;
+    const int mon  = (s[4] - '0') * 10 + (s[5] - '0');
+    const int day  = (s[6] - '0') * 10 + (s[7] - '0');
+    const int hour = (s[9] - '0') * 10 + (s[10] - '0');
+    const int min  = (s[11] - '0') * 10 + (s[12] - '0');
+    const int sec  = (s[13] - '0') * 10 + (s[14] - '0');
+    return mon >= 1 && mon <= 12 && day >= 1 && day <= 31 && hour <= 23
+        && min <= 59 && sec <= 59;
+}
+
 
 // 读档四轮关联（存档部队 → 当前部队槽）：
 //   轮 1：槽位 + 生物类型 + 初始数量（三项全等，零误配）
@@ -1275,6 +1417,9 @@ using H3AutoPolicy::AutoTargetRule;
 using H3AutoPolicy::AutoStackRule;
 using H3AutoPolicy::SummonProfileFields;
 using H3AutoPolicy::MakeDefaultSummonFields;
+using H3AutoPolicy::BattleStoreRecord;
+using H3AutoPolicy::BattleStoreRecordContentEquals;
+using H3AutoPolicy::BattleStoreStampValid;
 using H3AutoPolicy::AA_MANUAL;
 using H3AutoPolicy::AA_DEFEND;
 using H3AutoPolicy::AA_WAIT;

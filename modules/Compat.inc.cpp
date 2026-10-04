@@ -96,12 +96,23 @@ typedef char _BattleStack_size_check[(sizeof(_BattleStack_) == 0x548) ? 1 : -1];
 // H3Artifact 原版是 8 字节：{INT32 id; INT32 mod}
 struct _Artifact_ { int id; int mod; };
 
+#pragma pack(push, 1)
 struct _Hero_ {
-    char _pad0[0x18];
+    // 官方 H3Hero 布局：[0]x [2]y [4]z（INT16，z: 0 地上 / 1 地下）；
+    // [35]/[39]/[3D] 计划移动目的地 dest_x/y/z（INT32）——发起攻击时
+    // dest=被攻击对象格（战斗指纹触发点推导用，§12）。
+    short x;
+    short y;
+    short z;
+    char _pad6[0x18 - 0x06];
     short spell_points;
     int   id;
     int   id_wtf;
-    char _pad22[0x55 - 0x22];
+    char _pad22[0x35 - 0x22];
+    int   dest_x;
+    int   dest_y;
+    int   dest_z;
+    char _pad41[0x55 - 0x41];
     short level;
     char _pad57[0xC9 - 0x57];
     unsigned char second_skill[28];
@@ -117,7 +128,9 @@ struct _Hero_ {
     bool DoesWearArtifact(int art_id) { return THISCALL_2(bool, 0x4E2C90, this, art_id); }
     int GetSpell_Specialisation_Bonuses(int spell_id, int skill_level, int damage) { return THISCALL_4(int, 0x4E6260, this, spell_id, skill_level, damage); }
 };
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct _BattleMgr_ {
     char _pad0[0x3C];
     // 动作提交字段（官方 H3CombatManager 布局）：原版回合调度
@@ -126,14 +139,21 @@ struct _BattleMgr_ {
     int  action_parameter;     // 0x40
     int  action_target;        // 0x44 目标格子(position)
     int  action_parameter2;    // 0x48
-    char _pad4C[0x53C0 - 0x4C];
-    int  spec_terr_type;
+    char _pad4C[0x5394 - 0x4C];
+    int  land_type;            // 0x5394 官方 landType（战斗地形，指纹分量）
+    char _pad5398[0x53A4 - 0x5398];
+    int  siege_kind;           // 0x53A4 官方 siegeKind（0=野战，指纹分量）
+    char _pad53A8[0x53C0 - 0x53A8];
+    int  spec_terr_type;       // 0x53C0
     char _pad53C4[0x53CC - 0x53C4];
     _Hero_* hero[2];           // [0]=下方玩家, [1]=上方敌方
     char _pad53D4[0x54B4 - 0x53D4];
     int  hero_casted[2];
     int  stacks_count[2];
     char _pad54C4[0x54CC - 0x54C4];
+    // 注：heroOwner[2]（官方 0x54A8，两侧英雄归属的玩家色 0..7/-1）落在上面
+    // 这个 pad 里（0x54A8..0x54B0）。不在此显式声明——0x54B4 起的 hero_casted
+    // 已按绝对偏移锚定，插字段会整体错位。读取走 H3CombatManager::heroOwner。
     _BattleStack_ stack[2][21];
     char _pad1329C[0x132A0 - 0x1329C];
     int  turns_since_last_enchanter_cast[2];
@@ -151,6 +171,7 @@ struct _BattleMgr_ {
     int  finished;
     void* dlg;                 // 战斗对话框指针
 };
+#pragma pack(pop)
 
 // 全局对象指针
 #define o_BattleMgr (*reinterpret_cast<_BattleMgr_**>(0x699420))

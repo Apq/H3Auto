@@ -60,6 +60,9 @@ SummonProfileFields g_summon[5] = {
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
 // g_last_profile 不清：下次进面板仍选中最后存/读档编号。
+// 面板草稿（SettingsDlg 的 ResetPanelDrafts，前向声明如下）同步清空：
+// 生效方案与草稿不一致会让下一场「确定」复活上一场部队的旧规则。
+void ResetPanelDrafts();
 void ClearConfirmedProfiles()
 {
     const AutoStackRule def = MakeDefaultRule_();
@@ -74,6 +77,7 @@ void ClearConfirmedProfiles()
     g_active_profile = 0;
     for (int s = 0; s < 21; ++s)
         g_active_rules[s] = def;
+    ResetPanelDrafts();
 }
 
 static struct Config {
@@ -117,14 +121,6 @@ static int IniReadIntUtf8Layered(const char* section, const char* key,
     char buf[32] = {};
     IniReadUtf8Layered(section, key, "", buf, (int)sizeof(buf));
     return buf[0] ? atoi(buf) : fallback;
-}
-
-// 拼出编号 N（1..5）的存档文件全路径：H3Auto.profilesN.ini。
-void ProfileSlotPath(int slot, char* buf, int buf_size)
-{
-    if (slot < 0 || slot >= 5) slot = 0;
-    _snprintf(buf, buf_size - 1, "%s%d.ini", g_profiles_prefix, slot + 1);
-    if (buf_size > 0) buf[buf_size - 1] = 0;
 }
 
 // 勾号生效时记忆槽位：更新内存值并写 H3Auto.user.ini [General] LastProfile（玩家层）。
@@ -373,92 +369,350 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
     return default_vk;
 }
 
-// 方案存档：DLL 同目录，每个编号一个独立文件（H3Auto.profiles1.ini .. profiles5.ini，
-// 文本一行，格式见 PolicyCore H3AP6）。
-// 保存/加载的是面板草稿，不改变当前生效方案，也不暂停自动执行。
-// g_profiles_prefix 在 Entry 的 DllMain 里初始化。
+// ======================================================================
+// 战斗存档库（§17 智能存读档）：DLL 同目录，每场战斗（指纹）一个文件
+// <16位十六进制指纹>.json，同场多次「确定」各存一条，按时间升序排列，
+// 只保留最近 kBattlesKeep_ 条（旧的丢弃）。JSON 结构：
+//   {"version":1,"battle":"<hex16>","entries":[
+//     {"time":"yyyymmdd-hhmmss","active":1..5,
+//      "p":["H3AP7 …","H3AP7 …","H3AP7 …","H3AP7 …","H3AP7 …"]}, … ]}
+// 每方案的规则文本复用 EncodeProfileStoreText/DecodeProfileStoreText
+// （输出仅 H3AP7+数字+空格，JSON 字符串无需转义）。army 表喂 0：
+// 同指纹战斗即同部队，无需四轮关联，表仅存档格式占位。
+// 跨文件再按 mtime LRU 保留最近 kBattlesKeep_ 场。
+// ======================================================================
+static const int kBattlesKeep_ = 30;
 
-// 成功返回 true。文件不存在或内容损坏返回 false（草稿保持原样）。
-// SEH 保护只能包纯 C 代码，所以编解码与写文件单独成函数。
-static bool SaveProfileStoreRaw_(const int army_types[21],
-    const int army_counts[21], const AutoStackRule rules[21],
-    uint8_t strategy, uint16_t stop_turns,
-    const SummonProfileFields& summon, int slot)
+static void BattleStorePath_(unsigned long long fp, char* out, int cap)
 {
-    char* text = new char[32 * 1024];
-    const int n = H3AutoPolicy::EncodeProfileStoreText(army_types,
-        army_counts, strategy, rules, stop_turns, summon, text, 32 * 1024);
+    // 目录缓冲堆分配：kPathCap_ = 4MB，放栈上必炸游戏线程（~1MB）。
+    char* dir = new(std::nothrow) char[kPathCap_]();
+    if (!dir) { if (cap > 0) out[0] = 0; return; }
+    strncpy(dir, g_profiles_prefix, kPathCap_ - 1);
+    char* slash = strrchr(dir, '\\');
+    if (slash) *(slash + 1) = 0; else dir[0] = 0;
+    _snprintf(out, cap, "%s%016llX.json", dir, fp);
+    if (cap > 0) out[cap - 1] = 0;
+    delete[] dir;
+}
+
+static void NowStamp_(char* out, int cap)
+{
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    _snprintf(out, cap, "%04d%02d%02d-%02d%02d%02d",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    if (cap > 0) out[cap - 1] = 0;
+}
+
+// 读文件全文（UTF-8/ASCII）；失败返回 nullptr。
+static char* ReadTextFileAlloc_(const char* path)
+{
+    FILE* fpf = nullptr;
+    wchar_t* wpath = Utf8ToWideAlloc_(path);
+    if (!wpath) return nullptr;
+    if (_wfopen_s(&fpf, wpath, L"rb") != 0 || !fpf) { delete[] wpath; return nullptr; }
+    delete[] wpath;
+    fseek(fpf, 0, SEEK_END);
+    const long size = ftell(fpf);
+    fseek(fpf, 0, SEEK_SET);
+    if (size <= 0 || size > 8 * 1024 * 1024) { fclose(fpf); return nullptr; }
+    char* text = new char[size + 1];
+    const size_t n = fread(text, 1, static_cast<size_t>(size), fpf);
+    fclose(fpf);
+    text[n] = 0;
+    return text;
+}
+
+static bool WriteTextFile_(const char* path, const char* text, int len)
+{
+    FILE* fpf = nullptr;
+    wchar_t* wpath = Utf8ToWideAlloc_(path);
+    if (!wpath) return false;
     bool ok = false;
-    if (n > 0) {
+    if (_wfopen_s(&fpf, wpath, L"wb") == 0 && fpf) {
+        ok = fwrite(text, 1, static_cast<size_t>(len), fpf)
+            == static_cast<size_t>(len);
+        fclose(fpf);
+    }
+    delete[] wpath;
+    return ok;
+}
+
+// 在 text 中找 '"键"' 后的第一个 ':' 之后的值起点；找不到返回 nullptr。
+static const char* JsonFindValue_(const char* text, const char* key)
+{
+    char pat[32];
+    _snprintf(pat, sizeof(pat), "\"%s\"", key);
+    pat[sizeof(pat) - 1] = 0;
+    const char* p = strstr(text, pat);
+    if (!p) return nullptr;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return nullptr;
+    return p + 1;
+}
+
+// 从 '"…"' 值起点提取字符串内容（不含引号）到 out；成功 true。
+static bool JsonReadString_(const char* v, char* out, int cap)
+{
+    if (!v || *v != '"') return false;
+    ++v;
+    int n = 0;
+    while (v[n] && v[n] != '"') {
+        if (n + 1 >= cap) return false;
+        out[n] = v[n];
+        ++n;
+    }
+    if (v[n] != '"') return false;
+    out[n] = 0;
+    return true;
+}
+
+// 解析一条 entry 对象文本（obj 指向 '{'）。文本内不含嵌套花括号。
+static bool ParseRecordText_(const char* obj, BattleStoreRecord* rec)
+{
+    const char* v = JsonFindValue_(obj, "time");
+    if (!v || !JsonReadString_(v, rec->time, sizeof(rec->time))) return false;
+    v = JsonFindValue_(obj, "active");
+    if (!v) return false;
+    rec->active = atoi(v) - 1;
+    if (rec->active < 0 || rec->active > 4) return false;
+    const char* pv = JsonFindValue_(obj, "p");
+    if (!pv || *pv != '[') return false;
+    ++pv;
+    // 32KB 单方案文本缓冲：堆分配防游戏线程栈溢出（读档同款惯例）。
+    char* one = new(std::nothrow) char[32 * 1024];
+    if (!one) return false;
+    bool ok = true;
+    for (int p = 0; p < 5 && ok; ++p) {
+        if (!JsonReadString_(pv, one, 32 * 1024)) { ok = false; break; }
+        int zero_types[21] = {};
+        int zero_counts[21] = {};
+        uint8_t st = 0; uint16_t turns = 0;
+        SummonProfileFields sf = {};
+        if (!H3AutoPolicy::DecodeProfileStoreText(one, zero_types,
+                zero_counts, &st, rec->rules[p], &turns, &sf)) {
+            ok = false;
+            break;
+        }
+        rec->strategy[p] = st;
+        rec->stop_turns[p] = turns;
+        rec->summon[p] = sf;
+        // 跳到下一个字符串值：pv 此时指向当前串的「开引号」（JsonReadString_
+        // 不动 pv）——闭引号 = strchr(pv+1)，下一个字符串的开引号 = 再 +1
+        // 越过闭引号后的分隔符（',' 或 '[' 直连的第一串由 ++pv 前移到位）。
+        pv = strchr(pv + 1, '"');          // 闭引号
+        if (!pv) { ok = false; break; }
+        pv = strchr(pv + 1, '"');          // 下一个字符串的开引号
+        if (!pv) {
+            if (p < 4) { ok = false; break; } // 还有方案没读：格式坏
+            break;                          // 第 5 串已读完：正常收尾
+        }
+    }
+    delete[] one;
+    return ok;
+}
+
+// 读整库（升序=旧→新）。返回条数；文件不存在=0；损坏=-1。
+static int LoadBattleStoreRaw_(unsigned long long fp,
+    BattleStoreRecord* records, int cap)
+{
+    char* path = new(std::nothrow) char[kPathCap_];
+    if (!path) return -1;
+    BattleStorePath_(fp, path, kPathCap_);
+    char* text = ReadTextFileAlloc_(path);
+    delete[] path;
+    if (!text) return 0;
+    // 单条 entry 文本 ≈5×32KB：堆缓冲防游戏线程栈溢出。
+    char* obj = new(std::nothrow) char[5 * 32 * 1024 + 1];
+    int count = 0;
+    if (!obj) { delete[] text; return -1; }
+    const char* p = strstr(text, "\"entries\"");
+    if (p) {
+        p = strchr(p, '[');
+        while (p && count < cap) {
+            p = strchr(p, '{');
+            if (!p) break;
+            const char* end = strchr(p, '}');
+            if (!end) break;
+            const size_t len = (size_t)(end - p + 1);
+            if (len >= (size_t)(5 * 32 * 1024 + 1)) break;
+            memcpy(obj, p, len);
+            obj[len] = 0;
+            if (!ParseRecordText_(obj, &records[count])) { count = -1; break; }
+            ++count;
+            p = end + 1;
+        }
+    }
+    delete[] obj;
+    delete[] text;
+    return count;
+}
+
+// 整库序列化写回（升序）。
+static bool SaveBattleStoreRaw_(unsigned long long fp,
+    const BattleStoreRecord* records, int count)
+{
+    const size_t buf_cap = (size_t)count * (5 * 32 * 1024 + 128) + 256;
+    char* text = new char[buf_cap];
+    int off = _snprintf(text, 256,
+        "{\"version\":1,\"battle\":\"%016llX\",\"entries\":[", fp);
+    bool ok = off > 0;
+    const int zero_types[21] = {};
+    const int zero_counts[21] = {};
+    for (int i = 0; ok && i < count; ++i) {
+        const BattleStoreRecord& r = records[i];
+        off += _snprintf(text + off, 160,
+            "%s\n {\"time\":\"%s\",\"active\":%d,\"p\":[",
+            i ? "," : "", r.time, r.active + 1);
+        for (int p = 0; ok && p < 5; ++p) {
+            if (p) text[off++] = ',';
+            text[off++] = '"';
+            const int n = H3AutoPolicy::EncodeProfileStoreText(zero_types,
+                zero_counts, r.strategy[p], r.rules[p], r.stop_turns[p],
+                r.summon[p], text + off, 32 * 1024);
+            if (n <= 0) { ok = false; break; }
+            off += n;
+            text[off++] = '"';
+        }
+        if (ok) off += _snprintf(text + off, 16, "]}");
+    }
+    if (ok) {
+        off += _snprintf(text + off, 16, "]}\n");
         char* path = new(std::nothrow) char[kPathCap_];
         if (!path) { delete[] text; return false; }
-        ProfileSlotPath(slot, path, kPathCap_);
-        FILE* fp = nullptr;
-        wchar_t* wpath = Utf8ToWideAlloc_(path);
+        BattleStorePath_(fp, path, kPathCap_);
+        ok = WriteTextFile_(path, text, off);
         delete[] path;
-        if (wpath && _wfopen_s(&fp, wpath, L"wb") == 0 && fp) {
-            ok = fwrite(text, 1, n, fp) == static_cast<size_t>(n);
-            fclose(fp);
-        }
-        delete[] wpath;
     }
     delete[] text;
     return ok;
 }
 
-static bool SaveProfileStore_(const int army_types[21],
-    const int army_counts[21], const AutoStackRule rules[21],
-    uint8_t strategy, uint16_t stop_turns,
-    const SummonProfileFields& summon, int slot)
+// 打开面板用：读整库（升序）。成功返回 true（*out_count=条数，0=无档）。
+bool LoadBattleStore(unsigned long long fp, BattleStoreRecord* records,
+    int cap, int* out_count)
 {
+    if (!fp || !records || !out_count) return false;
     bool ok = false;
     DWORD code = 0;
-    void* fault = nullptr;
     __try {
-        ok = SaveProfileStoreRaw_(army_types, army_counts, rules,
-            strategy, stop_turns, summon, slot);
-    } __except (code = GetExceptionCode(),
-                fault = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress,
-                EXCEPTION_EXECUTE_HANDLER) {
-        LogDebug("[Panel] 保存方案时发生异常 code=0x%08X at=%p", code, fault);
+        const int n = LoadBattleStoreRaw_(fp, records, cap);
+        if (n >= 0) { *out_count = n; ok = true; }
+    } __except (code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        LogDebug("[BattleStore] 读战斗存档异常 code=0x%08X", code);
+        ok = false;
+    }
+    if (!ok) *out_count = 0;
+    return ok;
+}
+
+// 「确定」时追加一条：时间戳取当前；与最后一条内容相同则不新增
+// （*skipped_same=true）；超 kBattlesKeep_ 条裁最老。返回是否落盘成功。
+bool AppendBattleStoreRecord(unsigned long long fp,
+    const AutoStackRule rules[5][21], const uint8_t strategy[5],
+    const uint16_t stop_turns[5], const SummonProfileFields summon[5],
+    int active, bool* skipped_same)
+{
+    if (skipped_same) *skipped_same = false;
+    if (!fp) return false;
+    bool ok = false;
+    DWORD code = 0;
+    __try {
+        BattleStoreRecord* all = new BattleStoreRecord[kBattlesKeep_ + 1];
+        BattleStoreRecord* rec = new BattleStoreRecord();
+        int n = LoadBattleStoreRaw_(fp, all, kBattlesKeep_);
+        if (n < 0) n = 0; // 旧档损坏：从头开始重建
+        NowStamp_(rec->time, sizeof(rec->time));
+        rec->active = active >= 0 && active <= 4 ? active : 0;
+        memcpy(rec->rules, rules, sizeof(rec->rules));
+        memcpy(rec->strategy, strategy, sizeof(rec->strategy));
+        memcpy(rec->stop_turns, stop_turns, sizeof(rec->stop_turns));
+        memcpy(rec->summon, summon, sizeof(rec->summon));
+        if (n > 0
+            && H3AutoPolicy::BattleStoreRecordContentEquals(all[n - 1], *rec)) {
+            if (skipped_same) *skipped_same = true;
+            ok = true; // 内容没变：不新增记录
+        } else {
+            if (n >= kBattlesKeep_) { // 满：丢最老
+                memmove(all, all + 1, sizeof(BattleStoreRecord) * (n - 1));
+                n = kBattlesKeep_ - 1;
+            }
+            all[n++] = *rec;
+            ok = SaveBattleStoreRaw_(fp, all, n);
+        }
+        delete[] all;
+        delete rec;
+    } __except (code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        LogDebug("[BattleStore] 追加战斗存档异常 code=0x%08X", code);
         ok = false;
     }
     return ok;
 }
 
-// 读档：读选中编号的独立文件（槽号 0..4，越界取 0）。
-static bool LoadProfileStore_(int army_types[21], int army_counts[21],
-    AutoStackRule out_rules[21], uint8_t* strategy, uint16_t* stop_turns,
-    SummonProfileFields* summon, int slot)
+// 跨文件 LRU：列目录 <16位hex>.json，按 mtime 降序保留前 keep 个。
+static void PruneBattleStore_LRU_(int keep)
 {
-    char* path = new(std::nothrow) char[kPathCap_];
-    if (!path) return false;
-    ProfileSlotPath(slot, path, kPathCap_);
-    FILE* fp = nullptr;
-    wchar_t* wpath = Utf8ToWideAlloc_(path);
-    delete[] path;
-    if (!wpath) return false;
-    if (_wfopen_s(&fp, wpath, L"rb") != 0 || !fp) { delete[] wpath; return false; }
-    delete[] wpath;
-    char* text = new char[32 * 1024];
-    const size_t n = fread(text, 1, 32 * 1024 - 1, fp);
-    const int truncated = fgetc(fp) != EOF;
-    fclose(fp);
-    bool ok = false;
-    bool legacy_v6 = false;
-    if (n > 0 && !truncated) {
-        text[n] = 0;
-        // 兼容留痕：H3AP6 无敌方魔力阈值整数，读入时缺省 6（PolicyCore 侧）。
-        legacy_v6 = n >= 5 && text[0] == 'H' && text[1] == '3' && text[2] == 'A'
-            && text[3] == 'P' && text[4] == '6';
-        ok = H3AutoPolicy::DecodeProfileStoreText(text, army_types,
-            army_counts, strategy, out_rules, stop_turns, summon);
-        if (ok && legacy_v6)
-            LogInfo("[Profile] 读档兼容旧格式 H3AP6：敌方魔力阈值缺省 6（slot=%d）",
-                slot + 1);
+    // dir/pattern 都是 4MB 级缓冲：堆分配（游戏线程栈 ~1MB）。
+    char* dir = new(std::nothrow) char[kPathCap_]();
+    char* pattern = new(std::nothrow) char[kPathCap_]();
+    if (!dir || !pattern) { delete[] dir; delete[] pattern; return; }
+    strncpy(dir, g_profiles_prefix, kPathCap_ - 1);
+    char* slash = strrchr(dir, '\\');
+    if (slash) *(slash + 1) = 0; else dir[0] = 0;
+    _snprintf(pattern, kPathCap_, "%s*.json", dir);
+    pattern[kPathCap_ - 1] = 0;
+    WIN32_FIND_DATAA fd = {};
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) { delete[] dir; delete[] pattern; return; }
+    struct Entry { FILETIME t; char name[MAX_PATH]; };
+    Entry* items = new Entry[128];
+    int count = 0;
+    do {
+        // 只认 16 位十六进制文件名（战斗标识），目录里其它 json 不动。
+        const char* nm = fd.cFileName;
+        const size_t nl = strlen(nm);
+        bool hex16 = nl == 21 && nm[16] == '.' && nm[17] == 'j'
+            && nm[18] == 's' && nm[19] == 'o' && nm[20] == 'n';
+        for (int i = 0; hex16 && i < 16; ++i) {
+            const char c = nm[i];
+            const bool okc = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+            if (!okc) { hex16 = false; break; }
+        }
+        if (!hex16 || count >= 128) continue;
+        items[count].t = fd.ftLastWriteTime;
+        strncpy(items[count].name, nm, MAX_PATH - 1);
+        items[count].name[MAX_PATH - 1] = 0;
+        ++count;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    // 冒泡足够（≤128）：新的在前，删第 keep+1 起的。
+    for (int i = 1; i < count; ++i) {
+        Entry cur = items[i];
+        int j = i - 1;
+        while (j >= 0 && (CompareFileTime(&items[j].t, &cur.t) < 0)) {
+            items[j + 1] = items[j];
+            --j;
+        }
+        items[j + 1] = cur;
     }
-    delete[] text;
-    return ok;
+    for (int i = keep; i < count; ++i) {
+        char* full = new(std::nothrow) char[kPathCap_]();
+        if (!full) continue;
+        _snprintf(full, kPathCap_, "%s%s", dir, items[i].name);
+        full[kPathCap_ - 1] = 0;
+        if (DeleteFileA(full))
+            LogInfo("[BattleStore] LRU 淘汰 %s", items[i].name);
+        delete[] full;
+    }
+    delete[] items;
+    delete[] dir;
+    delete[] pattern;
+}
+
+void PruneBattleStore()
+{
+    PruneBattleStore_LRU_(kBattlesKeep_);
 }
 
 static void ReadConfig()

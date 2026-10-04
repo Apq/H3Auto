@@ -163,13 +163,27 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
     if (!path || !path[0] || !section || !key) return false;
     long sz = 0;
     char* old = IniReadFileToBuffer_(path, &sz);
-    // 输出缓冲：原内容 + 新行余量
-    const long cap = (old ? sz : 0) + 256 + (long)strlen(key)
-        + (long)(value ? strlen(value) : 0) + (long)strlen(section) + 16;
+    // 输出缓冲按需扩容。旧实现按「原大小 + 固定余量」一次算死容量，而写回时
+    // 开头要补 3 字节 BOM、LF 要换成 CRLF，输出经常比输入长；append 用
+    // out_len + n < cap 判断，超了就静默丢弃——文件里只要有注释或空行，
+    // 新键那一行就会被截掉，界面却照报「已保存」。日志级别因此永远写不进
+    // user.ini，下次启动又读回默认 info。
+    long cap = (old ? sz : 0) + 1024;
     char* out = new char[cap];
     long out_len = 0;
     auto append = [&](const char* s, long n) {
-        if (n > 0 && out_len + n < cap) { memcpy(out + out_len, s, n); out_len += n; }
+        if (n <= 0) return;
+        if (out_len + n + 1 > cap) {
+            long ncap = cap * 2;
+            while (ncap < out_len + n + 1) ncap *= 2;
+            char* bigger = new char[ncap];
+            memcpy(bigger, out, (size_t)out_len);
+            delete[] out;
+            out = bigger;
+            cap = ncap;
+        }
+        memcpy(out + out_len, s, (size_t)n);
+        out_len += n;
     };
     append("\xEF\xBB\xBF", 3);
 

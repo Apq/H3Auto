@@ -5,7 +5,7 @@ static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogE
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
-    const SummonProfileFields summon[5]);
+    const SummonProfileFields summon[5], bool* out_store_added);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
@@ -23,6 +23,8 @@ extern void CloseSettingsPanel();
 
 // 定义在本文件后部：SetControlMode_ 边动作需要，先声明（C2065 预防）。
 static void RefreshControlStatusHint_();
+// 当前轮到行动的部队（按 current_mon_side/index，不用 active_stack）。
+static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr);
 
 // ===== 控制权子状态（重构步骤 §1.2；仅战斗中·面板关内有效）=====
 enum ControlMode {
@@ -428,8 +430,13 @@ static LRESULT CALLBACK CombatHotkeyKbHook_(int code, WPARAM wParam, LPARAM lPar
     if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)
         && !IsPanelActive())
     {
-        if ((int)wParam == cfg.toggle_manual_vk)
+        if ((int)wParam == cfg.toggle_manual_vk) {
             g_auto_state.kb_toggle_seen = true;
+            // 边沿日志：定位「打一回合就停」是不是第二次 F9 按下造成的。
+            // 只在按下边沿记（bit30/bit31 已过滤自动重复与抬起），每次物理
+            // 按键最多一行。
+            LogDebug("[Control] 捕获启停热键按下 vk=0x%X", (int)wParam);
+        }
         else if ((int)wParam == cfg.one_shot_manual_vk)
             g_auto_state.kb_oneshot_seen = true;
         else if ((int)wParam == cfg.open_settings_vk)
@@ -634,6 +641,9 @@ static void PollControlHotkeys_(_BattleMgr_* mgr)
 
     if (g_auto_state.kb_toggle_seen) {
         g_auto_state.kb_toggle_seen = false;
+        LogDebug("[Control] 消费启停热键：%s -> %s",
+            ControlModeName_(g_control),
+            ControlModeName_(g_control == CM_MANUAL ? CM_AUTO : CM_MANUAL));
         ToggleBattleManual_();
     }
 
@@ -776,6 +786,84 @@ void EnsureStackTrackingBound()
     BindStackTrackingFromBattle_();
     LogInfo("[Life] retry rebound attempt=%d side=%d with stable identity remap",
         g_battle_attempt_id, side);
+}
+
+// ======================================================================
+// 战斗内容指纹（§17）。指纹定义见 PolicyCore ComputeBattleFingerprint：
+// 重打 / S&L / 重启后同一场战斗同值。存储与按档恢复见 ConfigLog
+// 战斗存档库与 SettingsDlg 存档下拉框；这里只负责「何时算」。
+// ======================================================================
+static unsigned long long g_battle_fp = 0;
+static bool g_battle_fp_valid = false;
+
+// 战斗触发点（被攻击方冒险坐标，z 区分地上/地下）推导：
+// 1) 守方英雄格（守方有英雄时直接可用，攻守英雄对撞/守城皆准）；
+// 2) 人类英雄的**计划目的地** dest 与其当前位置相邻（切比雪夫 ≤1 同层）
+//    → dest=被攻击对象格：主动打野怪/攻城/访问触发战斗都成立，且同一
+//    目标从不同方向攻击 dest 相同（不用攻击发起格——方向无关才是稳定键）；
+// 3) 兜底人类英雄格：被野怪/敌英雄主动撞击时 dest 是残留的旧目的地
+//    （不与英雄相邻），战斗触发点=英雄自身格。
+// 重打 / S&L / 重启后三种路径都回到同一格 → 指纹稳定。
+// （官方 H3CombatManager::mapitem @0x53BC 存战斗发生格对象，但其
+// GetCoordinates 是 H3API.dll 导入，本项目裸结构取不到坐标，弃用。）
+static void ResolveBattleMapCoord_(_BattleMgr_* mgr, int side,
+    int* out_x, int* out_y, int* out_z)
+{
+    *out_x = *out_y = *out_z = 0;
+    if (!mgr) return;
+    if (mgr->hero[1]) {
+        *out_x = mgr->hero[1]->x;
+        *out_y = mgr->hero[1]->y;
+        *out_z = mgr->hero[1]->z;
+        return;
+    }
+    _Hero_* human = (side == 0 || side == 1) ? mgr->hero[side] : nullptr;
+    if (!human) return;
+    const int dx = human->dest_x - human->x;
+    const int dy = human->dest_y - human->y;
+    const int dz = human->dest_z - human->z;
+    if (dz == 0 && dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1
+        && (dx != 0 || dy != 0)) {
+        *out_x = human->dest_x;
+        *out_y = human->dest_y;
+        *out_z = human->dest_z;
+        return;
+    }
+    *out_x = human->x;
+    *out_y = human->y;
+    *out_z = human->z;
+}
+
+// 新战斗 UI 出现（BE_BATTLE_UI_APPEARED）：算指纹 + 空态时查库自动恢复。
+// 重打走 BE_RESULT_RETRY 边不进这里——指纹与内存方案都不动。
+void OnBattleAppearedFingerprint_()
+{
+    _BattleMgr_* mgr = o_BattleMgr;
+    H3AutoPolicy::BattleFingerprintInput in = {};
+    if (mgr) {
+        for (int s = 0; s < 2; ++s) {
+            in.hero_id[s] = mgr->hero[s] ? mgr->hero[s]->id : -1;
+            for (int i = 0; i < 21; ++i) {
+                in.side_types[s][i] = mgr->stack[s][i].creature_id;
+                in.side_counts[s][i] = mgr->stack[s][i].count_at_start;
+            }
+        }
+        in.terrain = mgr->land_type;
+        in.siege_kind = mgr->siege_kind;
+        ResolveBattleMapCoord_(mgr, ResolveHumanSide_(mgr),
+            &in.map_x, &in.map_y, &in.map_z);
+    }
+    g_battle_fp = H3AutoPolicy::ComputeBattleFingerprint(in);
+    g_battle_fp_valid = mgr != nullptr;
+    LogInfo("[Battle] 指纹=0x%016llX 触发点=(%d,%d,%d) 地形=%d 攻城=%d 英雄=(%d,%d)",
+        g_battle_fp, in.map_x, in.map_y, in.map_z, in.terrain, in.siege_kind,
+        in.hero_id[0], in.hero_id[1]);
+}
+
+// 当前战斗指纹（SettingsDlg 存档下拉框用）；未算得返回 0。
+unsigned long long GetBattleFingerprint()
+{
+    return g_battle_fp_valid ? g_battle_fp : 0;
 }
 
 static void ClearSpellWait_()
@@ -1150,7 +1238,9 @@ static void TryAutoStop_(_BattleMgr_* mgr)
                 has_book ? 1 : 0, enemy_mana, mana_th);
             if (H3AutoPolicy::ShouldStopOnEnemyMana(1, true, has_book,
                     enemy_mana, mana_th)) {
-                g_control = CM_MANUAL; // 与停止回合数同款：切回手动
+                // 走 SetControlMode_ 而非裸赋值：裸赋值不打日志，
+                // 「自动打一回合就停」时无法从日志定位是谁切的模式。
+                SetControlMode_(CM_MANUAL);
                 ClearOneShotManual_();
                 LogInfo("[AutoStop] enemy mana low: 敌方魔力 %d ≤ %d，切回手动",
                     enemy_mana, mana_th);
@@ -1184,7 +1274,8 @@ static void TryAutoStop_(_BattleMgr_* mgr)
     LogDebug("[AutoStop] judge elapsed=%d base=%d cur=%d left=%d",
         elapsed, g_enemy_hp_value[0], hp, left);
     if (left >= 0 && left <= threshold) {
-        g_control = CM_MANUAL; // 自动停止：等同 F9 交回玩家
+        // 走 SetControlMode_ 而非裸赋值（同上：模式切换必须留日志）。
+        SetControlMode_(CM_MANUAL);
         ClearOneShotManual_();
         LogInfo("[Auto] 自动停止：最近 %d 回合敌方血量 %d→%d，预计还需 %d（阈值 %d）",
             elapsed, g_enemy_hp_value[0], hp, left, threshold);
@@ -1419,8 +1510,9 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 // 共享规则在此再过一次 NormalizeSummonRule（草稿来源不可信原则）。
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint8_t protect_strategy[5], const uint16_t stop_turns[5],
-    const SummonProfileFields summon[5])
+    const SummonProfileFields summon[5], bool* out_store_added)
 {
+    if (out_store_added) *out_store_added = false;
     if (active_profile < 0 || active_profile >= 5)
         active_profile = 0;
     memcpy(g_profiles, rules, sizeof(g_profiles));
@@ -1478,6 +1570,21 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     }
     // 提交后立即绑定本场部队身份；后续执行依赖跟踪校验。
     BindStackTrackingFromBattle_();
+    // 智能存档（§17）：每次「确定」把 5 套方案追加进本场战斗存档库
+    //（<指纹>.json）；与最后一条内容相同则不新增；每场保留最近 30 条。
+    if (g_battle_fp_valid) {
+        bool skipped = false;
+        if (AppendBattleStoreRecord(g_battle_fp,
+                (const AutoStackRule(*)[21])g_profiles, g_protect_strategy,
+                g_stop_turns, g_summon, g_active_profile, &skipped)) {
+            LogInfo("[BattleStore] %s（active=%d）",
+                skipped ? "内容未变，不新增存档" : "已存档", g_active_profile + 1);
+            if (!skipped && out_store_added) *out_store_added = true;
+            PruneBattleStore();
+        } else {
+            LogDebug("[BattleStore] 存档失败（文件写入失败）");
+        }
+    }
 }
 
 // 控制权三态：
@@ -1985,10 +2092,19 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (mgr->auto_combat) return false;
     if (IsHiddenBattle(mgr)) return false;
     if (IsTacticsPhase_(mgr)) return false;
-    if (mgr->action != 0) return false;
+    if (mgr->action != 0) {
+        LogDebug("[Auto] 提交跳过：已有动作 action=%d", mgr->action);
+        return false;
+    }
     UpdateStackTracking_();
-    _BattleStack_* self = mgr->active_stack;
-    if (!self || self->count_current <= 0) return false;
+    // 用当前轮到的部队而不是 active_stack：后者在自动模式下不被游戏刷新
+    // （见 CurrentTurnStack_ 注释），只剩一队时会一直指向空/上一支。
+    _BattleStack_* self = CurrentTurnStack_(mgr);
+    if (!self) {
+        LogDebug("[Auto] 提交跳过：无当前部队 turn=%d/%d",
+            mgr->current_mon_side, mgr->current_mon_index);
+        return false;
+    }
 
     // 活动单位变化：旧单位的管线残留整体清掉（等待/完成/已处理）。
     if (g_pipeline_stack && g_pipeline_stack != self) {
@@ -2002,8 +2118,14 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (g_auto_state.action_wake_stack
         && g_auto_state.action_wake_stack != self)
         g_auto_state.action_wake_stack = nullptr;
-    if (g_pipeline_stage == PS_HANDLED && g_pipeline_stack == self)
+    if (g_pipeline_stage == PS_HANDLED && g_pipeline_stack == self) {
+        static void* s_skip_logged = nullptr;
+        if (s_skip_logged != self) {
+            s_skip_logged = self;
+            LogDebug("[Auto] 提交跳过：本部队已处理 slot=%d", self->army_slot_ix);
+        }
         return false; // 本单位已处理完
+    }
 
     // 必须是跟踪表中仍存活、身份匹配的人类侧部队。
     if (!ActiveStackMatchesTrack_(self)) {
@@ -2027,7 +2149,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     const int spell_key = PeekSpellKey_(rule, runtime);
     const bool want_spell = spell_key >= 0;
     const bool want_action = rule.action != AA_MANUAL;
-    // 分发快照（debug）：定位“该动不动/走错分支”类问题。
+    // 分发快照：定位“该动不动/走错分支”类问题（排查期 info，确认后降 debug）。
     LogDebug("[Auto] dispatch slot=%d cid=0x%X action=%d selector=%d fallback=%d spells=%d cursor=%d key=%d stage=%d",
         idx, self->creature_id, (int)rule.action, (int)rule.target.selector,
         rule.allowDefendFallback ? 1 : 0, rule.spellSlotCount,
@@ -2132,6 +2254,29 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     return ok;
 }
 
+// 当前轮到行动的部队。游戏自己判定「该不该把控制权交给玩家」
+// （FUN_004744d0）用的就是 current_mon_side/current_mon_index
+// （0x132B8/0x132BC），active_stack（0x132C8）要等 FUN_004773f0 才从它
+// 复制过去，而那个复制只在「判定为交给玩家」之后发生。自动模式下游戏
+// 不走那条路，active_stack 会停在空或上一支部队——只剩一队时表现为
+// 打完一回合就再也不动。所以接管与提交一律以这两个下标为准。
+static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr)
+{
+    if (!mgr) return nullptr;
+    // active_stack 是游戏正在高亮、等待输入的那支（FUN_004773f0 在「交给
+    // 玩家」时设置）。它有效时最可信，优先用它。
+    if (mgr->active_stack && mgr->active_stack->count_current > 0)
+        return mgr->active_stack;
+    // 自动模式下游戏不走「交给玩家」，active_stack 会空着或停在上一支。
+    // 退回 current_mon_side/index——这是游戏自己判定轮到谁时用的下标。
+    const int side = mgr->current_mon_side;
+    const int idx = mgr->current_mon_index;
+    if (side < 0 || side > 1 || idx < 0 || idx >= 21) return nullptr;
+    _BattleStack_* s = &mgr->stack[side][idx];
+    if (s->count_current <= 0) return nullptr;
+    return s;
+}
+
 // DecideTakeover：仅在“原版本会把控制权交给玩家”时被询问（HH 里 orig==0）。
 // 普通部队：有配置则本插件提交动作；手动则留给玩家。
 // 战争机器：才有“交回 AI / 保持原版 / 按配置执行”的特殊分支。
@@ -2149,8 +2294,8 @@ int DecideTakeover(_BattleMgr_* mgr)
     if (ShouldYieldToPlayer_(mgr))
         return CD_KEEP_ORIGINAL;
 
-    _BattleStack_* stack = mgr->active_stack;
-    if (!stack || stack->count_current <= 0) return CD_KEEP_ORIGINAL;
+    _BattleStack_* stack = CurrentTurnStack_(mgr);
+    if (!stack) return CD_KEEP_ORIGINAL;
 
     // 非本场已绑定的人类侧存活单位：不介入（控制权本就不该由我们改写）。
     if (!ActiveStackMatchesTrack_(stack)) {
@@ -2239,8 +2384,21 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
         const int decision = DecideTakeover(mgr);
         if (decision != CD_EXECUTE_H3AUTO)
             return false;
-        return TrySubmitConfiguredAction_(mgr, allow_unit_action);
+        // info 留痕：判定为「插件执行」后，确认消息入口确实被调用、
+        // 以及提交结果。排查「decision=2 之后再无动作」用，确认后可降级。
+        const bool submitted = TrySubmitConfiguredAction_(mgr, allow_unit_action);
+        // 每帧都进，按结果去重，只在状态变化时记一行。
+        static int s_entry_sig = -1;
+        const int sig = (allow_unit_action ? 1 : 0) | (submitted ? 2 : 0)
+            | (mgr->action << 8);
+        if (s_entry_sig != sig) {
+            s_entry_sig = sig;
+            LogDebug("[Auto] 执行入口 allow=%d submitted=%d action=%d",
+                allow_unit_action ? 1 : 0, submitted ? 1 : 0, mgr->action);
+        }
+        return submitted;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogInfo("[Auto] 执行入口异常 code=0x%08X", GetExceptionCode());
         return false;
     }
 }
@@ -2271,6 +2429,31 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         TryAutoStop_(This);
+        // 管线复位不依赖 active_stack：自动模式下游戏不走「交给玩家」，
+        // active_stack 会一直空着（日志 active=-1/-1），放在它的判空里
+        // 复位就永远不发生——场上只剩一支部队时，打完一回合管线停在
+        // PS_HANDLED，之后每帧都「本部队已处理」直接跳过。
+        // 回合号前进 = 新回合，无条件复位。
+        if (This && g_pipeline_stage == PS_HANDLED && g_pipeline_action_landed
+            && This->action == 0) {
+            const int turn_now = GetCurrentBattleTurn_(This);
+            if (turn_now >= 0 && g_pipeline_landed_turn >= 0
+                && turn_now != g_pipeline_landed_turn) {
+                LogDebug("[Auto] 新回合复位管线 turn %d->%d",
+                    g_pipeline_landed_turn, turn_now);
+                g_pipeline_stage = PS_IDLE;
+                g_pipeline_action_landed = false;
+                g_pipeline_morale_extra = false;
+            } else {
+                // 每帧都会进这里，按回合去重，否则日志每秒上千行。
+                static int s_hold_logged_turn = -2;
+                if (s_hold_logged_turn != turn_now) {
+                    s_hold_logged_turn = turn_now;
+                    LogDebug("[Auto] 管线保持已处理 turn_now=%d landed_turn=%d action=%d",
+                        turn_now, g_pipeline_landed_turn, This->action);
+                }
+            }
+        }
         if (This && This->active_stack) {
             // 活动单位变化：旧单位管线残留整体清（等待/完成/已处理）。
             if (g_pipeline_stack && g_pipeline_stack != This->active_stack) {
@@ -2311,15 +2494,19 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
 
         const int decision = DecideTakeover(This);
         // 判定快照（debug）：decision 2=插件执行 1=交AI 0=保持原版。
+        // turn=当前轮到的部队（current_mon_side/index），active=active_stack。
+        // 两者不一致就是「只剩一队不动」的特征：游戏不刷新 active_stack。
         {
-            _BattleStack_* ds = This->active_stack;
+            _BattleStack_* ds = CurrentTurnStack_(This);
+            _BattleStack_* as = This->active_stack;
             const int dslot = ds ? ds->army_slot_ix : -1;
-            LogDebug("[Takeover] decision=%d slot=%d cid=0x%X cnt=%d rule_action=%d control=%d phase=%d",
-                decision, dslot, ds ? ds->creature_id : -1,
-                ds ? ds->count_current : -1,
+            LogDebug("[Takeover] decision=%d turn=%d/%d cid=0x%X cnt=%d active=%d/%d rule_action=%d control=%d",
+                decision, This->current_mon_side, This->current_mon_index,
+                ds ? ds->creature_id : -1, ds ? ds->count_current : -1,
+                as ? as->def_group_ix : -1, as ? as->army_slot_ix : -1,
                 (dslot >= 0 && dslot < 21)
                     ? (int)g_active_rules[dslot].action : -1,
-                (int)g_control, (int)g_phase);
+                (int)g_control);
         }
         if (decision == CD_HAND_TO_AI)
             return 1;           // 仅战争机器特殊：交回 AI

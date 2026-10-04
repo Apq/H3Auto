@@ -108,6 +108,14 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
         return;
     }
 
+    if (ev == BE_BATTLE_UI_APPEARED) {
+        // 新战斗开始（重打走 BE_RESULT_RETRY 边，不进这里）：算内容指纹并
+        // 尝试自动恢复方案（§12）。快速战斗（PEACE→RESULT）没有战斗 UI，
+        // 不算指纹也不恢复。
+        OnBattleAppearedFingerprint_();
+        return;
+    }
+
     if (ev == BE_RESULT_SHOWN) {
         // 面板开时战斗推进到结算（如敌方清场）：静默关面板，草稿丢弃。
         if (IsPanelActive()) {

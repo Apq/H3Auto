@@ -289,6 +289,19 @@ static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h)
     if (out_h) *out_h = HELP_PACK_BTN_H;
 }
 
+// 开源地址行（纯文本样式，点击复制）：打包日志按钮下方、关闭按钮上方。
+static void GetHelpLinkRect_(int* out_x, int* out_y, int* out_w, int* out_h)
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    GetHelpModalRect_(&x, &y, &w, &h);
+    int ry = 0;
+    GetHelpLogLevelRowY_(&ry);
+    if (out_x) *out_x = x + 18;
+    if (out_y) *out_y = ry + HELP_DD_H + 10 + HELP_PACK_BTN_H + 4;
+    if (out_w) *out_w = w - 36;
+    if (out_h) *out_h = 18;
+}
+
 static void DrawHelpButton_(H3LoadedPcx16* destination)
 {
     if (!destination) return;
@@ -303,21 +316,83 @@ static void DrawHelpButton_(H3LoadedPcx16* destination)
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
 }
 
-// pressed_button：4=读档，5=存档。
-static void DrawStoreButton_(H3LoadedPcx16* destination, int x, int pressed_id,
-    const char* label)
+// 本场存档下拉按钮（原「读档」「存档」合并区）：与保活/召唤下拉同款
+// 下拉样式（底色 74,52,24 / 展开 104,70,28，金框 210,170,72，右侧像素
+// 三角箭头收起▼/展开▲，文字金色左对齐）。标签 = 选中档时间 /
+// 「本场存档」/「无存档」。pressed_button：4。
+static void DrawBattleDropdownButton_(H3LoadedPcx16* destination)
 {
     if (!destination) return;
-    const bool pressed = s_p.pressed_button == pressed_id;
-    Fill(destination, x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
-        pressed ? 90 : 62, pressed ? 58 : 40, pressed ? 28 : 18);
-    destination->DrawFrame(x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
-        (BYTE)232, (BYTE)196, (BYTE)96);
-    destination->DrawFrame(x + 1, HELP_BTN_Y + 1, STORE_BTN_W - 2,
-        HELP_BTN_SIZE - 2, (BYTE)112, (BYTE)82, (BYTE)36);
+    const bool pressed = s_p.pressed_button == 4;
+    Fill(destination, BATTLE_DD_X, BATTLE_DD_Y, BATTLE_DD_W, BATTLE_DD_H,
+        (s_battle_dd_open || pressed) ? 104 : 74,
+        (s_battle_dd_open || pressed) ? 70 : 52,
+        (s_battle_dd_open || pressed) ? 28 : 24);
+    destination->DrawFrame(BATTLE_DD_X, BATTLE_DD_Y, BATTLE_DD_W, BATTLE_DD_H,
+        (BYTE)210, (BYTE)170, (BYTE)72);
+    char label[48] = {};
+    if (s_battle_record_count <= 0) {
+        strncpy(label, T("panel.battle_dd_none"), sizeof(label) - 1);
+    } else {
+        const BattleStoreRecord* sel = BattleRecordAt_(s_battle_dd_sel);
+        // 与列表行同格式「时间 P方案号」，收起时也看得到是哪套方案。
+        if (sel)
+            _snprintf(label, sizeof(label), "%s  P%d", sel->time, sel->active + 1);
+        else
+            strncpy(label, T("panel.battle_dd"), sizeof(label) - 1);
+    }
+    label[sizeof(label) - 1] = 0;
     DrawTxt(destination, GetSmallFont(), label,
-        x, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE,
-        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+        BATTLE_DD_X + 6, BATTLE_DD_Y, BATTLE_DD_W - 20, BATTLE_DD_H,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    // 金色像素三角箭头（收起▼/展开▲），与卡片/保活下拉一致。
+    CellControl_DrawArrow(destination, BATTLE_DD_X + BATTLE_DD_W - 14,
+        BATTLE_DD_Y + BATTLE_DD_H / 2 - 2, !s_battle_dd_open);
+}
+
+// 本场存档下拉列表浮层：与保活/卡片下拉同款逐项底色+边框（暖色主题：
+// 悬停 184,136,48 / 选中 136,88,24 / 普通 68,42,18），时间降序（0=最新），
+// 选中项金色文字 + 底色高亮，行「时间 P方案N」。展开时按钮底色同高亮。
+static void DrawBattleDropdownList_(H3LoadedPcx16* scr)
+{
+    if (!scr || !s_battle_dd_open || s_battle_record_count <= 0) return;
+    const int list_h = s_battle_record_count * BATTLE_DD_ITEM_H;
+    // 列表底：与保活列表同款深底 + 双层金框。
+    Fill(scr, BATTLE_DD_LIST_X, BATTLE_DD_LIST_Y, BATTLE_DD_LIST_W, list_h,
+        48, 32, 18);
+    scr->DrawFrame(BATTLE_DD_LIST_X, BATTLE_DD_LIST_Y, BATTLE_DD_LIST_W,
+        list_h, (BYTE)232, (BYTE)196, (BYTE)96);
+    scr->DrawFrame(BATTLE_DD_LIST_X + 1, BATTLE_DD_LIST_Y + 1,
+        BATTLE_DD_LIST_W - 2, list_h - 2, (BYTE)112, (BYTE)82, (BYTE)36);
+    char line[40];
+    for (int i = 0; i < s_battle_record_count; ++i) {
+        const BattleStoreRecord* rec = BattleRecordAt_(i);
+        if (!rec) continue;
+        const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
+        // 每项独立底色+边框（同卡片/保活下拉暖色主题）。
+        BYTE bg_r, bg_g, bg_b, fr, fg, fb;
+        if (i == s_battle_dd_hover) {
+            bg_r = 184; bg_g = 136; bg_b = 48;
+            fr = 246; fg = 214; fb = 116;
+        } else if (i == s_battle_dd_sel) {
+            bg_r = 136; bg_g = 88; bg_b = 24;
+            fr = 232; fg = 184; fb = 76;
+        } else {
+            bg_r = 68; bg_g = 42; bg_b = 18;
+            fr = 166; fg = 112; fb = 40;
+        }
+        Fill(scr, BATTLE_DD_LIST_X + 2, iy + 1, BATTLE_DD_LIST_W - 4,
+            BATTLE_DD_ITEM_H - 2, bg_r, bg_g, bg_b);
+        scr->DrawFrame(BATTLE_DD_LIST_X + 2, iy + 1, BATTLE_DD_LIST_W - 4,
+            BATTLE_DD_ITEM_H - 2, fr, fg, fb);
+        _snprintf(line, sizeof(line), "%s  P%d", rec->time, rec->active + 1);
+        line[sizeof(line) - 1] = 0;
+        DrawTxt(scr, GetSmallFont(), line,
+            BATTLE_DD_LIST_X + 6, iy, BATTLE_DD_LIST_W - 12, BATTLE_DD_ITEM_H,
+            i == s_battle_dd_sel ? (INT32)eTextColor::GOLD
+                                 : (INT32)eTextColor::YELLOW,
+            eTextAlignment::MIDDLE_LEFT);
+    }
 }
 
 static void DrawHelpModal_(H3LoadedPcx16* scr)
@@ -403,6 +478,18 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
             bx, by, bw, bh, (INT32)eTextColor::WHITE,
             eTextAlignment::MIDDLE_CENTER);
     }
+    // 行 C：开源地址（纯文本样式，不做按钮框；点击复制到剪贴板）。
+    // 游戏只有 bigfont/smalfont 两档字体，用 smalfont + 紧凑行高 + 灰色
+    // 富文本呈现「小一号」的低调观感。复制成功后 1.2 秒内整行变绿。
+    {
+        int lx = 0, ly = 0, lw = 0, lh = 0;
+        GetHelpLinkRect_(&lx, &ly, &lw, &lh);
+        const DWORD dt = s_help_link_flash_tick
+            ? GetTickCount() - s_help_link_flash_tick : 0xFFFFFFFF;
+        DrawRichTxt(scr, small_font,
+            T(dt < 1200 ? "help.link_flash" : "help.link"),
+            lx, ly, lw, lh, (INT32)eTextColor::GRAY);
+    }
     // 展开的级别列表（最后绘制，盖在按钮上层）。
     if (s_help_log_dd_open) {
         static const char* const kKeys[] = {
@@ -449,8 +536,7 @@ static const char* PanelTipAt_(int px, int py)
     if (s_p.active_page != PAGE_ARMY) {
         struct P { int x, y, w, h; const char* k; };
         static const P kPageTips[] = {
-            { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, "tips.btn_load" },
-            { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, "tips.btn_save" },
+            { BATTLE_DD_X, BATTLE_DD_Y, BATTLE_DD_W, BATTLE_DD_H, "tips.btn_battle_dd" },
             { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H, "tips.btn_profile" },
             { PROTECT_DD_LABEL_X - 4, PROTECT_DD_Y - 4,
               STOP_LABEL_X - PROTECT_DD_LABEL_X, 30, "protect" },
@@ -542,14 +628,13 @@ static const char* PanelTipAt_(int px, int py)
     }
     struct TipRect { int x, y, w, h; const char* text; };
     static const TipRect kTips[] = {
-        { LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
-        { SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE, nullptr },
+        { BATTLE_DD_X, BATTLE_DD_Y, BATTLE_DD_W, BATTLE_DD_H, nullptr },
         { PROFILE_BTN_X, PROFILE_BTN_Y, PROFILE_BTNS_W, PROFILE_BTN_H, nullptr },
         { OK_X, BTN_Y, BTN_W, BTN_H, nullptr },
         { CANCEL_X, BTN_Y, BTN_W, BTN_H, nullptr },
     };
     static const char* const kTipKeys[] = {
-        "tips.btn_load", "tips.btn_save", "tips.btn_profile",
+        "tips.btn_battle_dd", "tips.btn_profile",
         "tips.btn_ok", "tips.btn_cancel",
     };
     for (int i = 0; i < (int)(sizeof(kTips) / sizeof(kTips[0])); ++i) {
@@ -659,6 +744,11 @@ static void DrawProtectStrategyRow_(H3LoadedPcx16* scr)
     const char* text = (current >= 0 && current < (int)H3AutoPolicy::PS_COUNT)
         ? ProtectStrategyLabel_(current) : "?";
     H3Font* small_font = GetSmallFont();
+
+    // 停止条件组金框（1px）：先画外框再画控件，提示「停止 N 回合」与
+    // 「敌方魔力≤阈值时停」是一起生效的一组（先画框会被控件底色盖掉）。
+    scr->DrawFrame(STOP_GROUP_X, STOP_GROUP_Y, STOP_GROUP_W, STOP_GROUP_H,
+        (BYTE)210, (BYTE)170, (BYTE)72);
 
     DrawTxt(scr, small_font, T("panel.protect_label"),
         PROTECT_DD_LABEL_X, PROTECT_DD_Y, PROTECT_DD_LABEL_W, PROTECT_DD_H,
@@ -1050,8 +1140,7 @@ static void DrawPanelToBuffer_()
         px + 20, py + 14, PANEL_W - 40, 36,
         COL_TITLE_TEXT, eTextAlignment::MIDDLE_CENTER);
     DrawHelpButton_(scr);
-    DrawStoreButton_(scr, LOAD_BTN_X, 4, T("panel.load"));
-    DrawStoreButton_(scr, SAVE_BTN_X, 5, T("panel.save"));
+    DrawBattleDropdownButton_(scr);
     DrawProfileButtons_(scr);
     DrawTabBar_(scr);
 
@@ -1145,6 +1234,7 @@ static void DrawPanelToBuffer_()
     // 保活策略展开列表（盖住表格上缘，画在最后）。
     DrawProtectDropdownList_(scr);
     DrawSummonDropdownLists_(scr);
+    DrawBattleDropdownList_(scr);
 
     // 模态层最后绘制，盖住整张设置面板。
     if (s_spell_pick_cell >= 0)

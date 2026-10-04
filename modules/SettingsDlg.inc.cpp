@@ -67,6 +67,7 @@ static void DrawPanelToBuffer_();
 // 循环施法录入状态需在键盘钩子前声明。
 static bool s_help_modal_open = false;
 static bool s_help_log_dd_open = false;
+static DWORD s_help_link_flash_tick = 0; // 复制开源地址成功时刻，地址行闪绿 1.2s
 static bool s_protect_dd_open = false;   // 保活策略下拉展开态（方案级）
 static int  s_protect_dd_hover = -1;     // 下拉展开时悬停项，-1=无
 static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
@@ -209,6 +210,45 @@ static void CancelPanelTransientInput_()
     s_p.pressed_profile = -1;
     s_p.scroll_button_pressed = 0;
     s_p.scroll_dragging = false;
+}
+
+// 复制 UTF-8 文本到剪贴板（CF_UNICODETEXT）。同 LogPack 的重试节奏：
+// 剪贴板被其它程序占用是常态。失败返回 false。
+static bool CopyTextToClipboard_(const char* utf8_text)
+{
+    if (!utf8_text || !utf8_text[0]) return false;
+    wchar_t wide[256] = {};
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8_text, -1, wide,
+            (int)(sizeof(wide) / sizeof(wide[0]))) <= 0)
+        return false;
+    const size_t bytes = (wcslen(wide) + 1) * sizeof(wchar_t);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (!OpenClipboard(nullptr)) {
+            Sleep(30);
+            continue;
+        }
+        bool ok = EmptyClipboard();
+        if (ok) {
+            HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (mem) {
+                void* raw = GlobalLock(mem);
+                if (raw) {
+                    memcpy(raw, wide, bytes);
+                    GlobalUnlock(mem);
+                    ok = SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+                    if (!ok) GlobalFree(mem); // 成功后归剪贴板所有
+                } else {
+                    GlobalFree(mem);
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
+        }
+        CloseClipboard();
+        return ok;
+    }
+    return false;
 }
 
 static RECT ProfileButtonRect_(int profile)
@@ -881,7 +921,7 @@ static bool IsConfigurablePanelStack_(const H3CombatCreature& stack, const H3Her
         H3AutoPolicy::MakeStableStackIdentity(0,
             (stack.cloneId > 0) ? -1 : stack.slotIndex, stack.type, 0);
     return H3AutoPolicy::IsConfigurablePanelStack(
-        stack.type, stack.numberAlive, has_ballistics,
+        stack.type, (int)stack.numberAtStart, has_ballistics,
         id.kind == H3AutoPolicy::STACK_ID_SUMMON);
 }
 
@@ -959,126 +999,113 @@ static void LoadSelectedProfileIntoCells_()
     RebindVisibleCells_();
 }
 
-// 枚举本场人类侧 21 槽部队表（存档部队表 + 读档关联的当前侧）。
-// 初始数量的权威来源是英雄军队 H3Hero::army（战斗中不写回，战后才结算
-// 伤亡，全程保持战前值——ALT+右键看英雄初始部队即读这里）；战斗单位
-// 的 slotIndex 就是军队槽 0..6 下标，按它回查。召唤物/克隆/战争机器
-// 不在军队里，退回 numberAtStart。空槽写 -1/0；界面不显示初始数量。
-static void BuildPanelArmyTable_(int out_types[21], int out_counts[21])
+// 接受战斗结果时随 ClearConfirmedProfiles 调用（ConfigLog 前向声明）：
+// 生效方案清空时草稿同步清空——否则下一场打开面板仍显示上一场部队的
+// 驻留规则，点「确定」后旧规则复活生效（方案生效≠界面所见）。下一场想
+// 沿用配置打开面板即自动载入本场最新存档（§17）。
+void ResetPanelDrafts()
 {
-    for (int i = 0; i < 21; ++i) { out_types[i] = -1; out_counts[i] = 0; }
-    H3CombatManager* mgr = GetCombatMgr();
-    if (!mgr) return;
-    int side = 0;
-    if (mgr->isHuman[0]) side = 0;
-    else if (mgr->isHuman[1]) side = 1;
-    else return;
-    H3Hero* hero = mgr->hero[side];
-    for (int i = 0; i < 21; ++i) {
-        H3CombatCreature& stack = mgr->stacks[side][i];
-        if (stack.type < 0 || stack.numberAlive <= 0) continue;
-        // 存档部队表只写开战部队 + 战争机器：召唤身份槽排除，避免混入
-        // 召唤物干扰读档四轮关联（轮 4 同类型匹配）。§2.6。
-        const H3AutoPolicy::StableStackIdentity id =
-            H3AutoPolicy::MakeStableStackIdentity(0,
-                (stack.cloneId > 0) ? -1 : stack.slotIndex, stack.type, 0);
-        if (id.kind == H3AutoPolicy::STACK_ID_SUMMON) continue;
-        out_types[i] = stack.type;
-        int initial = -1;
-        if (hero) {
-            const int army_slot = stack.slotIndex;
-            if (army_slot >= 0 && army_slot < 7
-                && hero->army.type[army_slot] == stack.type)
-                initial = hero->army.count[army_slot];
-        }
-        if (initial <= 0)
-            initial = (stack.numberAtStart > 0)
-                ? stack.numberAtStart : stack.numberAlive;
-        out_counts[i] = initial;
+    const AutoStackRule def = H3AutoPolicy::MakeDefaultRule();
+    const SummonProfileFields summon_def =
+        H3AutoPolicy::MakeDefaultSummonFields();
+    for (int p = 0; p < PROFILE_COUNT; ++p) {
+        for (int s = 0; s < MAX_STACKS; ++s)
+            s_p.draft_rules[p][s] = def;
+        s_p.draft_protect_strategy[p] = H3AutoPolicy::PS_NONE;
+        s_p.draft_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
+        s_p.draft_summon[p] = summon_def;
     }
+    LogInfo("[Panel] 草稿已随战斗结果清空（5 套方案+召唤参数）");
 }
 
-// 存档：把当前草稿（含未回写的可见行）写入选中编号的存档槽（读-改-写，
-// 其余槽保持原样），并记忆该编号。不改生效方案、不暂停。
-static void SaveProfilesToDisk_()
+// ======================================================================
+// 本场存档下拉框（§17 智能存读档）：
+//   - 「确定」时 AutoExecute 把 5 套方案追加进 <指纹>.json（每场保 30 条）；
+//   - 打开面板：若本场已有存档且本会话未载入过 → 自动载最新一条进草稿；
+//   - 下拉列出全部存档（时间降序），选中即载入草稿（确定才生效）。
+// ======================================================================
+static BattleStoreRecord s_battle_records[BATTLE_DD_MAX_ITEMS]; // ~300KB .bss
+static int  s_battle_record_count = 0;   // 文件序（升序：末尾=最新）
+static unsigned long long s_battle_loaded_fp = 0; // 该指纹本会话已载入
+static bool s_battle_dd_open = false;
+static int  s_battle_dd_hover = -1;      // 列表 hover（降序下标）
+static int  s_battle_dd_sel = -1;        // 当前选中条（降序下标，0=最新）
+// 选中项记忆（进程内、与战斗指纹关联）：「确定」时记下当前选中档的
+// 时间戳；下次打开同指纹面板按时间戳找回选中项（新档插到末尾不影响
+// 旧时间戳）。换战斗指纹不命中 → 默认最新。只两个量，不落盘。
+static unsigned long long s_battle_sel_fp = 0;
+static char s_battle_sel_time[20] = {}; // "yyyymmdd-hhmmss"
+
+// 降序下标（0=最新）→ 记录指针；越界 nullptr。
+static const BattleStoreRecord* BattleRecordAt_(int desc_index)
 {
-    LogDebug("[Panel] 保存入口：s_p=%p active=%d count=%d profile=%d",
-        &s_p, s_p.active ? 1 : 0, s_p.count, s_p.selected_profile);
-    SaveCurrentCellsToDraft_();
-    int army_types[21] = {};
-    int army_counts[21] = {};
-    BuildPanelArmyTable_(army_types, army_counts);
-    const bool ok = SaveProfileStore_(army_types, army_counts,
-        s_p.draft_rules[s_p.selected_profile],
-        s_p.draft_protect_strategy[s_p.selected_profile],
-        s_p.draft_stop_turns[s_p.selected_profile],
-        s_p.draft_summon[s_p.selected_profile],
-        s_p.selected_profile);
-    char* slot_path = new(std::nothrow) char[kPathCap_];
-    if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
-    LogInfo("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
-        ok ? "已存档" : "存档失败", slot_path ? slot_path : "");
-    delete[] slot_path;
-    SetStatusText_(ok ? T("panel.status_save_ok") : T("panel.status_save_fail"), 5000);
-    DrawPanelToBuffer_();
+    if (desc_index < 0 || desc_index >= s_battle_record_count) return nullptr;
+    return &s_battle_records[s_battle_record_count - 1 - desc_index];
 }
 
-// 读档：从选中编号的存档槽读一套草稿（四轮部队关联对位），并记忆该编号。
-// 不改生效方案、不暂停。
-static void LoadProfilesFromDisk_()
+// 把一条战斗存档载入面板草稿（5 套全量 + 激活编号；只改显示，确定才生效）。
+static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
 {
-    LogDebug("[Panel] 读档入口：profile=%d", s_p.selected_profile);
-    // 21 条规则约 1.7KB，堆分配避免游戏线程栈溢出。
-    AutoStackRule* loaded = new AutoStackRule[MAX_STACKS]();
-    uint8_t strategy = 0;
-    uint16_t stop_turns = 0;
-    SummonProfileFields summon = {};
-    int arch_types[21] = {};
-    int arch_counts[21] = {};
-    const bool ok = LoadProfileStore_(arch_types, arch_counts, loaded,
-        &strategy, &stop_turns, &summon, s_p.selected_profile);
-    if (ok) {
-        // 四轮关联：存档部队 → 当前部队槽。未匹配的当前槽保留原草稿
-        // （含打开面板时的初始化），未匹配的存档规则直接丢弃。
-        int cur_types[21] = {};
-        int cur_counts[21] = {};
-        BuildPanelArmyTable_(cur_types, cur_counts);
-        int arch_for_cur[21] = {};
-        H3AutoPolicy::BuildArchiveSlotMapByRounds(arch_types, arch_counts,
-            cur_types, cur_counts, arch_for_cur);
-        int matched = 0;
-        for (int cur = 0; cur < 21; ++cur) {
-            const int arch = arch_for_cur[cur];
-            if (arch < 0) continue;
-            ++matched;
-            s_p.draft_rules[s_p.selected_profile][cur] = loaded[arch];
-        }
-        s_p.draft_protect_strategy[s_p.selected_profile] = strategy;
-        s_p.draft_stop_turns[s_p.selected_profile] = stop_turns;
-        s_p.draft_summon[s_p.selected_profile] = summon;
-        s_stop_turns_editing = false;
-        CancelManaThEdit_();        // 草稿整体被替换：录入作废
-        CancelSummonNumEdit_();    // 草稿整体被替换：录入作废
-        CloseSummonDropdowns_();
-        PanelCancelAllProtectCountEdits_();
-        for (int k = 0; k < CELL_COUNT; ++k) {
-            s_p.cells[k].expanded = CEX_NONE;
-            s_p.cells[k].dirty = true;
-        }
-        s_protect_dd_open = false;
-        s_protect_dd_hover = -1;
-        LoadSelectedProfileIntoCells_();
-        LogInfo("[Panel] 读档关联：四轮匹配 %d/21 槽，未匹配存档槽已忽略",
-            matched);
+    for (int p = 0; p < PROFILE_COUNT; ++p) {
+        for (int s = 0; s < MAX_STACKS; ++s)
+            s_p.draft_rules[p][s] = rec.rules[p][s];
+        s_p.draft_protect_strategy[p] = rec.strategy[p];
+        s_p.draft_stop_turns[p] = rec.stop_turns[p];
+        s_p.draft_summon[p] = rec.summon[p];
     }
-    delete[] loaded;
-    char* slot_path = new(std::nothrow) char[kPathCap_];
-    if (slot_path) ProfileSlotPath(s_p.selected_profile, slot_path, kPathCap_);
-    LogInfo("[Panel] 方案%d%s：%s", s_p.selected_profile + 1,
-        ok ? "已读档" : "读档失败（文件不存在或损坏）", slot_path ? slot_path : "");
-    delete[] slot_path;
-    SetStatusText_(ok ? T("panel.status_load_ok") : T("panel.status_load_fail"), 5000);
-    DrawPanelToBuffer_();
+    s_p.selected_profile = rec.active;
+    s_stop_turns_editing = false;
+    CancelManaThEdit_();        // 草稿整体被替换：录入作废
+    CancelSummonNumEdit_();     // 草稿整体被替换：录入作废
+    CloseSummonDropdowns_();
+    PanelCancelAllProtectCountEdits_();
+    for (int k = 0; k < CELL_COUNT; ++k) {
+        s_p.cells[k].expanded = CEX_NONE;
+        s_p.cells[k].dirty = true;
+    }
+    s_protect_dd_open = false;
+    s_protect_dd_hover = -1;
+    LoadSelectedProfileIntoCells_();
+}
+
+// 刷新本场存档列表 + 首开自动载最新（打开面板时调用，草稿快照之后）。
+// 选中项恢复：本场指纹在内存里记过上次「确定」时的选中时间戳 →
+// 按时间戳找回对应条（新存档插入到末尾不影响旧时间戳，天然稳定）；
+// 找不到（记录被淘汰/首次）→ 默认最新（0）。自动载入仍只发生一次
+// （s_battle_loaded_fp 未置位时），选中项每次打开都恢复。
+static void RefreshBattleRecordsAndAutoload_()
+{
+    const unsigned long long fp = GetBattleFingerprint();
+    s_battle_dd_open = false;
+    s_battle_dd_hover = -1;
+    s_battle_dd_sel = -1;
+    s_battle_record_count = 0;
+    if (!fp) return;
+    if (!LoadBattleStore(fp, s_battle_records, BATTLE_DD_MAX_ITEMS,
+            &s_battle_record_count))
+        return;
+    if (s_battle_record_count <= 0) return;
+
+    // 选中项：同指纹且时间戳仍在列表里 → 恢复；否则默认最新。
+    int sel = 0;
+    if (s_battle_sel_fp == fp && s_battle_sel_time[0]) {
+        for (int i = 0; i < s_battle_record_count; ++i) {
+            const BattleStoreRecord* rec = BattleRecordAt_(i);
+            if (rec && strcmp(rec->time, s_battle_sel_time) == 0) { sel = i; break; }
+        }
+    }
+    s_battle_dd_sel = sel;
+
+    // 首开自动载入：本会话该指纹还没载过 → 载「当前选中项」进草稿。
+    if (s_battle_loaded_fp != fp) {
+        const BattleStoreRecord* rec = BattleRecordAt_(sel);
+        if (rec) {
+            LoadBattleRecordIntoDrafts_(*rec);
+            s_battle_loaded_fp = fp;
+            LogInfo("[Panel] 本场已有 %d 条存档，自动载入 %s（方案%d）",
+                s_battle_record_count, rec->time, rec->active + 1);
+        }
+    }
 }
 
 // 切换方案编号：先存回当前编号草稿，再把面板切到新编号的草稿
@@ -1140,6 +1167,8 @@ void OpenSettingsPanel_()
     s_spell_pick_cell = -1;
     s_spell_pick_slot = -1;
     s_help_modal_open = false;
+    s_battle_dd_open = false;
+    s_battle_dd_hover = -1;
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
     CancelSummonNumEdit_();
@@ -1214,7 +1243,24 @@ void OpenSettingsPanel_()
                 ++s_p.count;
             }
         }
+        // 草稿快照口径（方案生效范围=面板所见）：仅本场面板部队（含阵亡的
+        // 己方非召唤部队）保留草稿，其余槽位一律回默认——上一场战斗/已移除
+        // 部队的驻留规则不再随「确定」生效，也不会被存档按钮写进 ini。
+        int cleared = 0;
+        for (int p = 0; p < PROFILE_COUNT; ++p) {
+            for (int i = 0; i < MAX_STACKS; ++i) {
+                if (IsConfigurablePanelStack_(mgr->stacks[side][i], hero))
+                    continue;
+                const AutoStackRule& d = s_p.draft_rules[p][i];
+                if (d.action != AA_MANUAL || d.spellSlotCount > 0) ++cleared;
+                s_p.draft_rules[p][i] = H3AutoPolicy::MakeDefaultRule();
+            }
+        }
+        if (cleared > 0)
+            LogInfo("[Panel] 草稿快照：清掉 %d 条非本场部队驻留规则", cleared);
     }
+    // 本场存档下拉数据 + 首开自动载最新（在草稿快照之后覆盖草稿）。
+    RefreshBattleRecordsAndAutoload_();
     RebindVisibleCells_();
     LogDebug("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
     InstallBattleInputBlocker_();
@@ -1250,10 +1296,31 @@ static void CommitAndCloseSettingsPanel_()
     SaveCurrentCellsToDraft_();
     CommitSummonNumEdit_();        // 召唤阈值录入随勾号提交
     CloseSummonDropdowns_();
+    // out_store_added：内容有变、磁盘上真的新增了一条。内容未变时不新增，
+    // 选中项保持玩家当前选的那条。
+    bool store_added = false;
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
-        s_p.draft_protect_strategy, s_p.draft_stop_turns, s_p.draft_summon);
+        s_p.draft_protect_strategy, s_p.draft_stop_turns, s_p.draft_summon,
+        &store_added);
     // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
     RememberProfileSlot(s_p.selected_profile);
+    // 本场存档下拉：新增时立刻重读内存列表并切到新档（降序 0=最新），
+    // 不等下次打开面板——否则右上角条数不增加、选中项还停在旧档。
+    // 选中项记忆（与战斗指纹关联，下次打开按时间戳恢复选中）。
+    {
+        const unsigned long long fp = GetBattleFingerprint();
+        if (fp && store_added) {
+            if (LoadBattleStore(fp, s_battle_records, BATTLE_DD_MAX_ITEMS,
+                    &s_battle_record_count) && s_battle_record_count > 0)
+                s_battle_dd_sel = 0;
+        }
+        const BattleStoreRecord* sel = BattleRecordAt_(s_battle_dd_sel);
+        if (fp && sel) {
+            s_battle_sel_fp = fp;
+            strncpy(s_battle_sel_time, sel->time, sizeof(s_battle_sel_time) - 1);
+            s_battle_sel_time[sizeof(s_battle_sel_time) - 1] = 0;
+        }
+    }
     SyncActiveProtect();
     PauseAutoExecution();
     CloseSettingsPanel();
@@ -1275,6 +1342,8 @@ void CloseSettingsPanel()
     s_spell_pick_cell = -1;
     s_spell_pick_slot = -1;
     s_help_modal_open = false;
+    s_battle_dd_open = false;
+    s_battle_dd_hover = -1;
     s_protect_dd_open = false;
     s_protect_dd_hover = -1;
     if (s_stop_turns_editing) CancelStopTurnsEdit_();
@@ -1445,6 +1514,25 @@ static bool UpdateDropdownHover_(int px, int py)
         s_protect_dd_hover = new_dd_hover;
         changed = true;
     }
+    // 本场存档下拉同款：钩子即时更新悬停行（时间降序下标）。
+    if (s_battle_dd_open) {
+        int new_battle_hover = -1;
+        for (int i = 0; i < s_battle_record_count; ++i) {
+            const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
+            if (PointInRect_(px, py, BATTLE_DD_LIST_X, iy,
+                    BATTLE_DD_LIST_W, BATTLE_DD_ITEM_H)) {
+                new_battle_hover = i;
+                break;
+            }
+        }
+        if (new_battle_hover != s_battle_dd_hover) {
+            s_battle_dd_hover = new_battle_hover;
+            changed = true;
+        }
+    } else if (s_battle_dd_hover != -1) {
+        s_battle_dd_hover = -1;
+        changed = true;
+    }
     // 召唤页两个下拉（法术/召唤物行动）同卡片下拉：钩子即时更新悬停项。
     if (s_summon_spell_dd_open) {
         int new_sum_hover = -1;
@@ -1570,6 +1658,23 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     return;
                 }
             }
+            // 开源地址行（纯文本样式）：点击复制到剪贴板，成功后地址行
+            // 原位闪绿 1.2 秒（状态栏在帮助模态的遮暗层下，不够醒目）。
+            {
+                int lx = 0, ly = 0, lw = 0, lh = 0;
+                GetHelpLinkRect_(&lx, &ly, &lw, &lh);
+                if (PointInRect_(px, py, lx, ly, lw, lh)) {
+                    const char* url = T("help.link_url");
+                    const bool ok = CopyTextToClipboard_(url);
+                    if (ok) s_help_link_flash_tick = GetTickCount();
+                    SetStatusText_(T(ok ? "help.link_copied" : "help.link_fail"),
+                        3000);
+                    LogInfo("[Panel] %s开源地址 %s",
+                        ok ? "已复制" : "复制失败", url);
+                    DrawPanelToBuffer_();
+                    return;
+                }
+            }
             int bx = 0, by = 0, bw = 0, bh = 0;
             GetHelpModalCloseRect_(&bx, &by, &bw, &bh);
             if (PointInRect_(px, py, bx, by, bw, bh)) {
@@ -1683,6 +1788,47 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             }
         }
         return;
+    }
+
+    // 本场存档下拉展开时：点历史档即载入草稿、点按钮收起、点外收起
+    //（与召唤下拉同款语义；优先处理防穿透）。
+    if (s_battle_dd_open) {
+        if (raw_command == 4)
+            return;
+        if (raw_command == 8 || raw_command == 16) {
+            for (int i = 0; i < s_battle_record_count; ++i) {
+                const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
+                if (PointInRect_(px, py, BATTLE_DD_LIST_X, iy,
+                        BATTLE_DD_LIST_W, BATTLE_DD_ITEM_H)) {
+                    const BattleStoreRecord* rec = BattleRecordAt_(i);
+                    if (rec) {
+                        LoadBattleRecordIntoDrafts_(*rec);
+                        s_battle_dd_sel = i;
+                        s_battle_loaded_fp = GetBattleFingerprint();
+                        SetStatusText_(T("panel.status_battle_loaded"), 4000);
+                        LogInfo("[Panel] 载入本场存档 %s（方案%d，未确定不生效）",
+                            rec->time, rec->active + 1);
+                    }
+                    s_battle_dd_open = false;
+                    s_battle_dd_hover = -1;
+                    DrawPanelToBuffer_();
+                    return;
+                }
+            }
+            if (PointInRect_(px, py, BATTLE_DD_X, BATTLE_DD_Y,
+                    BATTLE_DD_W, BATTLE_DD_H)) {
+                if (raw_command == 8) {
+                    s_battle_dd_open = false;
+                    s_battle_dd_hover = -1;
+                    DrawPanelToBuffer_();
+                }
+                return;
+            }
+            s_battle_dd_open = false;
+            s_battle_dd_hover = -1;
+            DrawPanelToBuffer_();
+            return;
+        }
     }
 
     // 召唤页两个下拉展开时：选项即选、点框保持/收起、点外收起
@@ -1993,10 +2139,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         else if (PointInRect_(px, py, CANCEL_X, BTN_Y, BTN_W, BTN_H)) button = 2;
         else if (PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y, HELP_BTN_SIZE, HELP_BTN_SIZE))
             button = 3;
-        else if (PointInRect_(px, py, LOAD_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE))
-            button = 4;
-        else if (PointInRect_(px, py, SAVE_BTN_X, HELP_BTN_Y, STORE_BTN_W, HELP_BTN_SIZE))
-            button = 5;
+        else if (PointInRect_(px, py, BATTLE_DD_X, BATTLE_DD_Y,
+                 BATTLE_DD_W, BATTLE_DD_H))
+            button = 4;   // 本场存档下拉（原读档+存档合并区）
         if (button != 0) {
             s_p.pressed_button = button;
             DrawPanelToBuffer_();
@@ -2121,11 +2266,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             activate = PointInRect_(px, py, HELP_BTN_X, HELP_BTN_Y,
                 HELP_BTN_SIZE, HELP_BTN_SIZE);
         else if (pressed == 4)
-            activate = PointInRect_(px, py, LOAD_BTN_X, HELP_BTN_Y,
-                STORE_BTN_W, HELP_BTN_SIZE);
-        else if (pressed == 5)
-            activate = PointInRect_(px, py, SAVE_BTN_X, HELP_BTN_Y,
-                STORE_BTN_W, HELP_BTN_SIZE);
+            activate = PointInRect_(px, py, BATTLE_DD_X, BATTLE_DD_Y,
+                BATTLE_DD_W, BATTLE_DD_H);
         const bool redraw = pressed != 0 || s_p.scroll_button_pressed != 0
             || s_p.scroll_dragging;
         s_p.pressed_button = 0;
@@ -2152,10 +2294,16 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 LogInfo("[Panel] 打开帮助说明模态框");
                 DrawPanelToBuffer_();
             } else if (pressed == 4) {
-                LoadProfilesFromDisk_();
-                DrawPanelToBuffer_();
-            } else if (pressed == 5) {
-                SaveProfilesToDisk_();
+                // 打开/收起本场存档下拉（列表数据在打开面板时刷新）。
+                if (s_battle_record_count > 0) {
+                    s_battle_dd_open = !s_battle_dd_open;
+                    s_battle_dd_hover = -1;
+                    LogDebug("[Panel] 本场存档下拉 %s（%d 条）",
+                        s_battle_dd_open ? "展开" : "收起",
+                        s_battle_record_count);
+                } else {
+                    SetStatusText_(T("panel.status_battle_none"), 3000);
+                }
                 DrawPanelToBuffer_();
             }
             return;

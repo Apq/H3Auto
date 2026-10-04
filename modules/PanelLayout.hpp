@@ -49,11 +49,22 @@ static const int HELP_BTN_SIZE = 24;
 static const int HELP_BTN_X = PANEL_W - HELP_BTN_SIZE - 20; // 再左收 1px
 static const int HELP_BTN_Y = 20; // 再下收 2px
 
-// 「读档」「存档」：? 按钮左侧，同高 24，宽 44，间距 6。
+// 本场存档下拉（原「读档」「存档」两按钮合并区）：打开列出该场战斗
+// 每次「确定」的存档（时间降序），选中即载入草稿。列表向下展开浮层。
 static const int STORE_BTN_W = 44;
 static const int STORE_BTN_GAP = 6;
 static const int SAVE_BTN_X = HELP_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
 static const int LOAD_BTN_X = SAVE_BTN_X - STORE_BTN_GAP - STORE_BTN_W;
+// 按钮与展开列表同宽（160，容纳时间戳）、右缘对齐原两按钮区右缘。
+static const int BATTLE_DD_W = 160;
+static const int BATTLE_DD_X = SAVE_BTN_X + STORE_BTN_W - BATTLE_DD_W;
+static const int BATTLE_DD_Y = HELP_BTN_Y;
+static const int BATTLE_DD_H = HELP_BTN_SIZE;
+static const int BATTLE_DD_LIST_W = BATTLE_DD_W;
+static const int BATTLE_DD_LIST_X = BATTLE_DD_X;
+static const int BATTLE_DD_LIST_Y = HELP_BTN_Y + HELP_BTN_SIZE;
+static const int BATTLE_DD_ITEM_H = 14;
+static const int BATTLE_DD_MAX_ITEMS = 30;
 
 // ---- 多级导航：左侧 Tab 条 + 金框色分隔竖线（方案行以下、确定/取消以上）----
 enum {
@@ -110,6 +121,18 @@ static const int STOP_BOX_W = 52;
 static const int STOP_BOX_X = STOP_MANA_X - 10 - STOP_BOX_W;
 static const int STOP_LABEL_W = 42;
 static const int STOP_LABEL_X = STOP_BOX_X - 4 - STOP_LABEL_W;
+
+// 停止条件组金框（1px）：把「停止 [框] 回合」与「[✓] 敌方魔力≤ [框] 时停」
+// 两个一起生效的停止条件框起来，提示玩家这是一组。左边留 5px 内边距；
+// 右侧「时停」文字右缘已贴内容区右缘（660），框右缘=尾部文字右缘对齐，
+// 不再外扩（外扩会超出内容区、与右上控件挤）。上下各 4px 包住整行控件。
+static const int STOP_GROUP_PAD_X = 5;
+static const int STOP_GROUP_PAD_Y = 4;
+static const int STOP_GROUP_X = STOP_LABEL_X - STOP_GROUP_PAD_X;
+static const int STOP_GROUP_Y = PROTECT_DD_Y - STOP_GROUP_PAD_Y;
+static const int STOP_GROUP_W = STOP_MANA_TAIL_X + STOP_MANA_TAIL_W
+    - STOP_GROUP_X;
+static const int STOP_GROUP_H = PROTECT_DD_H + STOP_GROUP_PAD_Y * 2;
 
 // ---- 召唤页（PAGE_SUMMON）：设置行 + 说明行 + 召唤物行动卡 ----
 static const int SUMMON_ROW1_Y  = 124;   // 设置行（法术/队数/血量）
