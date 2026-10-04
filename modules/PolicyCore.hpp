@@ -848,35 +848,14 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
     return best;
 }
 
-// 方案存档（加载/保存按钮）：每个编号一个独立文件（H3Auto.profilesN.ini）。
-// 纯编解码：一行文本 "H3AP9 <21×部队表> <停止回合> <7 召唤整数>
-// <21 条规则> <1 条召唤共享规则>"。规则按槽位排列，每条 60 个十进制整数
-// （H3AP8 及更早一律拒绝；旧档读档失败需重新配置）。
-// 部队表在头部：每槽 2 个整数（生物类型、数量），空槽写 -1 0。
-// 部队表供读档时做四轮关联（存档部队 ↔ 当前部队），规则本体仍不含身份。
-// 文本在部队表之后有 1 个自动停止回合（0..999）与
-// 7 个召唤整数（启用/队数阈值/血量阈值/法术选择/条件组合/敌方魔力停止勾选/
-// 敌方魔力阈值）。
-// 存档格式：21*2 部队 + 1 停止回合 + 7 召唤 + 22 条规则（每条 60 整数）。
+// 方案存档：一套方案一个 JSON 对象，字段分开存，数组按实际数量存。
+// 不再使用 H3AP<N> 数字串。旧数字串一律拒绝，视为没有存档。
 static constexpr int PROFILE_STORE_SLOTS = 21;
-// 每条规则的整数字段数必须与 EncodeRuleInts/DecodeRuleInts 的写入数一致
-// （曾因手写 34 与实写 59 脱节导致越界写堆 = 保存后崩溃的根因）。
-// 用表达式自校验：6 头 + 16 航点 + 1 计数 + 2*10 近战对 + 1 计数 + 3 杂项
-// + 10 施法槽 + 3 尾（施法槽数量 + 保活方式 + 保活数量阈值）= 60。
+// 保留纯函数整数编解码供旧的独立方案文件代码编译；战斗 JSON 不再调用它。
 static constexpr int PROFILE_STORE_RULE_FIELDS =
     6 + MOVE_WAYPOINT_CAPACITY + 1 + 2 * MELEE_PAIR_CAPACITY + 1 + 3
     + SPELL_SLOT_CAPACITY + 3;
-// H3AP1（6205 整数，无部队表）：格式已废弃，同样拒绝。
-static constexpr int PROFILE_STORE_ARMY_INTS =
-    PROFILE_STORE_SLOTS * 2;
-// 召唤整数：启用(0..1) / 队数阈值(0..21) / 血量阈值(≥0) / 法术选择(0..4) /
-// 条件组合(0..1) / 敌方魔力停勾选(0..1) / 敌方魔力阈值(0..32767)。
-static constexpr int PROFILE_STORE_SUMMON_INTS = 7;
-// 召唤共享规则也是一条 60 整数规则（21 条部队规则之外的第 22 条）。
-// 42 部队 + 1 停止回合 + 7 召唤（含启用位）+ 22*60 = 1370。
-static constexpr int PROFILE_STORE_INTS =
-    PROFILE_STORE_ARMY_INTS
-    + 1 + PROFILE_STORE_SUMMON_INTS
+static constexpr int PROFILE_STORE_INTS = PROFILE_STORE_SLOTS * 2 + 1 + 7
     + (PROFILE_STORE_SLOTS + 1) * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 10;
 
@@ -1470,3 +1449,13 @@ using H3AutoPolicy::SEL_COUNT;
 using H3AutoPolicy::MELEE_PAIR_CAPACITY;
 using H3AutoPolicy::MOVE_WAYPOINT_CAPACITY;
 using H3AutoPolicy::SPELL_SLOT_CAPACITY;
+using H3AutoPolicy::AT_COUNT;
+using H3AutoPolicy::ATS_COUNT;
+using H3AutoPolicy::ProtectMode;
+using H3AutoPolicy::PM_COUNT_BELOW;
+using H3AutoPolicy::PM_LOSS_GT_RESTORE;
+using H3AutoPolicy::PM_NONE;
+using H3AutoPolicy::SUMMON_ELEMENT_COUNT;
+using H3AutoPolicy::SUMMON_COMBINE_AND;
+using H3AutoPolicy::SUMMON_COMBINE_OR;
+using H3AutoPolicy::MakeDefaultRule;

@@ -372,12 +372,10 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 // 战斗存档库（§17 智能存读档）：DLL 同目录，每场战斗（指纹）一个文件
 // <16位十六进制指纹>.json，同场多次「确定」各存一条，按时间升序排列，
 // 只保留最近 kBattlesKeep_ 条（旧的丢弃）。JSON 结构：
-//   {"version":1,"battle":"<hex16>","entries":[
-//     {"time":"yyyymmdd-hhmmss","active":1..5,
-//      "p":["H3AP9 …","H3AP9 …","H3AP9 …","H3AP9 …","H3AP9 …"]}, … ]}
-// 每方案的规则文本复用 EncodeProfileStoreText/DecodeProfileStoreText
-// （输出仅 H3AP9+数字+空格，JSON 字符串无需转义）。army 表喂 0：
-// 同指纹战斗即同部队，无需四轮关联，表仅存档格式占位。
+//   {"version":2,"battle":"<hex16>","entries":[
+//     {"time":"...","active":1..5,"profiles":[5 个方案对象]}]}
+// 方案对象按字段展开：stopTurns、summon、army[]。
+// 数组只写实际数量。旧 H3AP 数字串不再读取，解析失败视为没有存档。
 // 跨文件再按 mtime LRU 保留最近 kBattlesKeep_ 场。
 // ======================================================================
 static const int kBattlesKeep_ = 30;
@@ -438,77 +436,212 @@ static bool WriteTextFile_(const char* path, const char* text, int len)
     return ok;
 }
 
-// 在 text 中找 '"键"' 后的第一个 ':' 之后的值起点；找不到返回 nullptr。
-static const char* JsonFindValue_(const char* text, const char* key)
+// JSON 使用 nlohmann/json 3.11.3（单头文件，MIT）。
+// 游戏线程用 SEH，库侧关闭 C++ 异常：解析失败返回 discarded。
+#define JSON_NOEXCEPTION 1
+#include <nlohmann/json.hpp>
+using BattleJson = nlohmann::json;
+
+static int JsonInt_(const BattleJson& obj, const char* key, int fallback)
 {
-    char pat[32];
-    _snprintf(pat, sizeof(pat), "\"%s\"", key);
-    pat[sizeof(pat) - 1] = 0;
-    const char* p = strstr(text, pat);
-    if (!p) return nullptr;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return nullptr;
-    return p + 1;
+    if (!obj.is_object() || !obj.contains(key) || !obj[key].is_number_integer())
+        return fallback;
+    return obj[key].get<int>();
 }
 
-// 从 '"…"' 值起点提取字符串内容（不含引号）到 out；成功 true。
-static bool JsonReadString_(const char* v, char* out, int cap)
+static bool ParseRuleJson_(const BattleJson& obj, AutoStackRule* rule)
 {
-    if (!v || *v != '"') return false;
-    ++v;
-    int n = 0;
-    while (v[n] && v[n] != '"') {
-        if (n + 1 >= cap) return false;
-        out[n] = v[n];
-        ++n;
+    if (!obj.is_object() || !rule) return false;
+    AutoStackRule r = MakeDefaultRule();
+    const int action = JsonInt_(obj, "action", -1);
+    if (action < AA_MANUAL || action >= AA_COUNT) return false;
+    r.action = static_cast<AutoActionKind>(action);
+    const int kind = JsonInt_(obj, "kind", (int)r.target.kind);
+    if (kind >= AT_NONE && kind < AT_COUNT)
+        r.target.kind = static_cast<AutoTargetKind>(kind);
+    const int side = JsonInt_(obj, "side", (int)r.target.side);
+    if (side >= ATS_OWN && side < ATS_COUNT)
+        r.target.side = static_cast<AutoTargetSide>(side);
+    const int selector = JsonInt_(obj, "selector", (int)r.target.selector);
+    if (selector >= SEL_RANDOM && selector < SEL_COUNT)
+        r.target.selector = static_cast<AutoTargetSelector>(selector);
+    if (obj.contains("waypoints") && obj["waypoints"].is_array()) {
+        int count = 0;
+        for (const BattleJson& item : obj["waypoints"]) {
+            if (!item.is_number_integer() || count >= MOVE_WAYPOINT_CAPACITY)
+                break;
+            r.target.moveWaypoints[count++] =
+                static_cast<int16_t>(item.get<int>());
+        }
+        r.target.moveWaypointCount = static_cast<int8_t>(count);
     }
-    if (v[n] != '"') return false;
-    out[n] = 0;
+    if (obj.contains("melee") && obj["melee"].is_array()) {
+        int count = 0;
+        for (const BattleJson& pair : obj["melee"]) {
+            if (!pair.is_array() || pair.size() < 2 || count >= MELEE_PAIR_CAPACITY)
+                break;
+            if (!pair[0].is_number_integer() || !pair[1].is_number_integer())
+                break;
+            r.target.meleeStandHexes[count] =
+                static_cast<int16_t>(pair[0].get<int>());
+            r.target.meleeAttackHexes[count] =
+                static_cast<int16_t>(pair[1].get<int>());
+            ++count;
+        }
+        r.target.meleePairCount = static_cast<int8_t>(count);
+        if (count > 0) {
+            r.target.meleeStandHex = r.target.meleeStandHexes[0];
+            r.target.meleeAttackHex = r.target.meleeAttackHexes[0];
+        }
+    }
+    r.allowDefendFallback = JsonInt_(obj, "fallback", 0) != 0;
+    if (obj.contains("spells") && obj["spells"].is_array()) {
+        int count = 0;
+        for (const BattleJson& item : obj["spells"]) {
+            if (!item.is_number_integer() || count >= SPELL_SLOT_CAPACITY)
+                break;
+            r.spellSlots[count++] = static_cast<int8_t>(item.get<int>());
+        }
+        r.spellSlotCount = static_cast<int8_t>(count);
+    }
+    const int mode = JsonInt_(obj, "protectMode", (int)PM_NONE);
+    r.protectMode = (mode == (int)PM_COUNT_BELOW
+            || mode == (int)PM_LOSS_GT_RESTORE)
+        ? static_cast<ProtectMode>(mode) : PM_NONE;
+    const int protect_count = JsonInt_(obj, "protectCount", r.protectCountBelow);
+    r.protectCountBelow = protect_count < 0 ? 0 : protect_count;
+    *rule = r;
     return true;
 }
 
-// 解析一条 entry 对象文本（obj 指向 '{'）。文本内不含嵌套花括号。
-static bool ParseRecordText_(const char* obj, BattleStoreRecord* rec)
+static BattleJson RuleToJson_(const AutoStackRule& rule)
 {
-    const char* v = JsonFindValue_(obj, "time");
-    if (!v || !JsonReadString_(v, rec->time, sizeof(rec->time))) return false;
-    v = JsonFindValue_(obj, "active");
-    if (!v) return false;
-    rec->active = atoi(v) - 1;
-    if (rec->active < 0 || rec->active > 4) return false;
-    const char* pv = JsonFindValue_(obj, "p");
-    if (!pv || *pv != '[') return false;
-    ++pv;
-    // 32KB 单方案文本缓冲：堆分配防游戏线程栈溢出（读档同款惯例）。
-    char* one = new(std::nothrow) char[32 * 1024];
-    if (!one) return false;
-    bool ok = true;
-    for (int p = 0; p < 5 && ok; ++p) {
-        if (!JsonReadString_(pv, one, 32 * 1024)) { ok = false; break; }
-        int zero_types[21] = {};
-        int zero_counts[21] = {};
-        uint16_t turns = 0;
-        SummonProfileFields sf = {};
-        if (!H3AutoPolicy::DecodeProfileStoreText(one, zero_types,
-                zero_counts, rec->rules[p], &turns, &sf)) {
-            ok = false;
-            break;
-        }
-        rec->stop_turns[p] = turns;
-        rec->summon[p] = sf;
-        // 跳到下一个字符串值：pv 此时指向当前串的「开引号」（JsonReadString_
-        // 不动 pv）——闭引号 = strchr(pv+1)，下一个字符串的开引号 = 再 +1
-        // 越过闭引号后的分隔符（',' 或 '[' 直连的第一串由 ++pv 前移到位）。
-        pv = strchr(pv + 1, '"');          // 闭引号
-        if (!pv) { ok = false; break; }
-        pv = strchr(pv + 1, '"');          // 下一个字符串的开引号
-        if (!pv) {
-            if (p < 4) { ok = false; break; } // 还有方案没读：格式坏
-            break;                          // 第 5 串已读完：正常收尾
-        }
+    BattleJson obj = {
+        {"action", (int)rule.action},
+        {"kind", (int)rule.target.kind},
+        {"side", (int)rule.target.side},
+        {"selector", (int)rule.target.selector},
+        {"fallback", rule.allowDefendFallback ? 1 : 0},
+        {"protectMode", (int)rule.protectMode},
+        {"protectCount", rule.protectCountBelow},
+    };
+    if (rule.target.moveWaypointCount > 0) {
+        BattleJson waypoints = BattleJson::array();
+        for (int i = 0; i < rule.target.moveWaypointCount; ++i)
+            waypoints.push_back((int)rule.target.moveWaypoints[i]);
+        obj["waypoints"] = waypoints;
     }
-    delete[] one;
-    return ok;
+    if (rule.target.meleePairCount > 0) {
+        BattleJson pairs = BattleJson::array();
+        for (int i = 0; i < rule.target.meleePairCount; ++i)
+            pairs.push_back(BattleJson::array({
+                (int)rule.target.meleeStandHexes[i],
+                (int)rule.target.meleeAttackHexes[i]}));
+        obj["melee"] = pairs;
+    }
+    if (rule.spellSlotCount > 0) {
+        BattleJson spells = BattleJson::array();
+        for (int i = 0; i < rule.spellSlotCount; ++i)
+            spells.push_back((int)rule.spellSlots[i]);
+        obj["spells"] = spells;
+    }
+    return obj;
+}
+
+static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
+    uint16_t* stop_turns, SummonProfileFields* summon)
+{
+    if (!obj.is_object() || !rules || !stop_turns || !summon) return false;
+    const int turns = JsonInt_(obj, "stopTurns", -1);
+    if (turns < 0 || turns > 999) return false;
+    *stop_turns = static_cast<uint16_t>(turns);
+    if (!obj.contains("summon") || !obj["summon"].is_object()) return false;
+    const BattleJson& s = obj["summon"];
+    *summon = MakeDefaultSummonFields();
+    const int enabled = JsonInt_(s, "enabled", -1);
+    const int count = JsonInt_(s, "count", -1);
+    const int hp = JsonInt_(s, "hp", -1);
+    const int spell = JsonInt_(s, "spell", -1);
+    const int combine = JsonInt_(s, "combine", -1);
+    const int stop_mana = JsonInt_(s, "stopEnemyMana", -1);
+    const int mana = JsonInt_(s, "mana", -1);
+    if (enabled < 0 || enabled > 1 || count < 0 || count > 21 || hp < 0
+        || spell < 0 || spell > SUMMON_ELEMENT_COUNT
+        || (combine != SUMMON_COMBINE_AND && combine != SUMMON_COMBINE_OR)
+        || stop_mana < 0 || stop_mana > 1 || mana < 0 || mana > 32767)
+        return false;
+    summon->enabled = enabled;
+    summon->count_th = count;
+    summon->hp_th = hp;
+    summon->spell_pick = spell;
+    summon->cond_combine = combine;
+    summon->stop_enemy_mana = stop_mana;
+    summon->stop_mana_th = mana;
+    if (!s.contains("rule") || !ParseRuleJson_(s["rule"], &summon->summon_rule))
+        return false;
+    NormalizeSummonRule(&summon->summon_rule);
+    for (int i = 0; i < 21; ++i) rules[i] = MakeDefaultRule();
+    if (!obj.contains("army") || !obj["army"].is_array()) return false;
+    for (const BattleJson& unit : obj["army"]) {
+        if (!unit.is_object()) return false;
+        const int slot = JsonInt_(unit, "slot", -1);
+        if (slot < 0 || slot >= 21 || !unit.contains("rule")
+            || !ParseRuleJson_(unit["rule"], &rules[slot]))
+            return false;
+    }
+    return true;
+}
+
+static BattleJson ProfileToJson_(const AutoStackRule rules[21],
+    uint16_t stop_turns, const SummonProfileFields& summon)
+{
+    BattleJson army = BattleJson::array();
+    for (int slot = 0; slot < 21; ++slot) {
+        const AutoStackRule& rule = rules[slot];
+        if (rule.action == AA_MANUAL && rule.spellSlotCount == 0
+            && rule.protectMode == PM_NONE
+            && rule.target.moveWaypointCount == 0
+            && rule.target.meleePairCount == 0)
+            continue;
+        army.push_back({
+            {"slot", slot},
+            {"rule", RuleToJson_(rule)},
+        });
+    }
+    return {
+        {"stopTurns", (int)stop_turns},
+        {"summon", {
+            {"enabled", summon.enabled ? 1 : 0},
+            {"count", summon.count_th},
+            {"hp", summon.hp_th},
+            {"spell", summon.spell_pick},
+            {"combine", summon.cond_combine},
+            {"stopEnemyMana", summon.stop_enemy_mana ? 1 : 0},
+            {"mana", summon.stop_mana_th},
+            {"rule", RuleToJson_(summon.summon_rule)},
+        }},
+        {"army", army},
+    };
+}
+
+static bool ParseRecordJson_(const BattleJson& obj, BattleStoreRecord* rec)
+{
+    if (!obj.is_object() || !rec) return false;
+    if (!obj.contains("time") || !obj["time"].is_string()) return false;
+    const std::string time = obj["time"].get<std::string>();
+    if (time.size() >= sizeof(rec->time)) return false;
+    memcpy(rec->time, time.c_str(), time.size() + 1);
+    const int active = JsonInt_(obj, "active", 0) - 1;
+    if (active < 0 || active > 4) return false;
+    rec->active = active;
+    if (!obj.contains("profiles") || !obj["profiles"].is_array()
+        || obj["profiles"].size() != 5) return false;
+    for (int i = 0; i < 5; ++i) {
+        if (!ParseProfileJson_(obj["profiles"][i], rec->rules[i],
+                &rec->stop_turns[i], &rec->summon[i]))
+            return false;
+    }
+    return true;
 }
 
 // 读整库（升序=旧→新）。返回条数；文件不存在=0；损坏=-1。
@@ -521,29 +654,17 @@ static int LoadBattleStoreRaw_(unsigned long long fp,
     char* text = ReadTextFileAlloc_(path);
     delete[] path;
     if (!text) return 0;
-    // 单条 entry 文本 ≈5×32KB：堆缓冲防游戏线程栈溢出。
-    char* obj = new(std::nothrow) char[5 * 32 * 1024 + 1];
-    int count = 0;
-    if (!obj) { delete[] text; return -1; }
-    const char* p = strstr(text, "\"entries\"");
-    if (p) {
-        p = strchr(p, '[');
-        while (p && count < cap) {
-            p = strchr(p, '{');
-            if (!p) break;
-            const char* end = strchr(p, '}');
-            if (!end) break;
-            const size_t len = (size_t)(end - p + 1);
-            if (len >= (size_t)(5 * 32 * 1024 + 1)) break;
-            memcpy(obj, p, len);
-            obj[len] = 0;
-            if (!ParseRecordText_(obj, &records[count])) { count = -1; break; }
-            ++count;
-            p = end + 1;
-        }
-    }
-    delete[] obj;
+    const BattleJson root = BattleJson::parse(text, nullptr, false, true);
     delete[] text;
+    if (root.is_discarded() || !root.is_object()
+        || !root.contains("entries") || !root["entries"].is_array())
+        return -1;
+    int count = 0;
+    for (const BattleJson& entry : root["entries"]) {
+        if (count >= cap) break;
+        if (!ParseRecordJson_(entry, &records[count])) return -1;
+        ++count;
+    }
     return count;
 }
 
@@ -551,39 +672,31 @@ static int LoadBattleStoreRaw_(unsigned long long fp,
 static bool SaveBattleStoreRaw_(unsigned long long fp,
     const BattleStoreRecord* records, int count)
 {
-    const size_t buf_cap = (size_t)count * (5 * 32 * 1024 + 128) + 256;
-    char* text = new char[buf_cap];
-    int off = _snprintf(text, 256,
-        "{\"version\":1,\"battle\":\"%016llX\",\"entries\":[", fp);
-    bool ok = off > 0;
-    const int zero_types[21] = {};
-    const int zero_counts[21] = {};
-    for (int i = 0; ok && i < count; ++i) {
-        const BattleStoreRecord& r = records[i];
-        off += _snprintf(text + off, 160,
-            "%s\n {\"time\":\"%s\",\"active\":%d,\"p\":[",
-            i ? "," : "", r.time, r.active + 1);
-        for (int p = 0; ok && p < 5; ++p) {
-            if (p) text[off++] = ',';
-            text[off++] = '"';
-            const int n = H3AutoPolicy::EncodeProfileStoreText(zero_types,
-                zero_counts, r.rules[p], r.stop_turns[p],
-                r.summon[p], text + off, 32 * 1024);
-            if (n <= 0) { ok = false; break; }
-            off += n;
-            text[off++] = '"';
-        }
-        if (ok) off += _snprintf(text + off, 16, "]}");
+    char battle[32] = {};
+    _snprintf(battle, sizeof(battle), "%016llX", fp);
+    BattleJson entries = BattleJson::array();
+    for (int i = 0; i < count; ++i) {
+        BattleJson profiles = BattleJson::array();
+        for (int p = 0; p < 5; ++p)
+            profiles.push_back(ProfileToJson_(records[i].rules[p],
+                records[i].stop_turns[p], records[i].summon[p]));
+        entries.push_back({
+            {"time", records[i].time},
+            {"active", records[i].active + 1},
+            {"profiles", profiles},
+        });
     }
-    if (ok) {
-        off += _snprintf(text + off, 16, "]}\n");
-        char* path = new(std::nothrow) char[kPathCap_];
-        if (!path) { delete[] text; return false; }
-        BattleStorePath_(fp, path, kPathCap_);
-        ok = WriteTextFile_(path, text, off);
-        delete[] path;
-    }
-    delete[] text;
+    const BattleJson root = {
+        {"version", 2},
+        {"battle", battle},
+        {"entries", entries},
+    };
+    const std::string text = root.dump(2);
+    char* path = new(std::nothrow) char[kPathCap_];
+    if (!path) return false;
+    BattleStorePath_(fp, path, kPathCap_);
+    const bool ok = WriteTextFile_(path, text.c_str(), (int)text.size());
+    delete[] path;
     return ok;
 }
 
