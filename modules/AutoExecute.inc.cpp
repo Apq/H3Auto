@@ -1620,7 +1620,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 || spell == H3AutoPolicy::kSlowSpellId
                 || expertise_of[i] <= 0)
             continue;
-        bool found_stack = false;
+        int stack_durations[21] = {};
+        int stack_count = 0;
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[side][slot];
             if (!st || st->count_current <= 0) continue;
@@ -1630,16 +1631,10 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 continue;
             }
-            if (dur > 0) {
-                // 全体法术的持续回合一致：找到一队已有状态就采用它，
-                // 不让其它无法接受该法术的部队的 0 参与判定。
-                durations[i] = dur;
-                found_stack = true;
-                break;
-            }
+            stack_durations[stack_count++] = dur > 0 ? dur : 0;
         }
-        if (!found_stack)
-            durations[i] = 0; // 没有任何一队已有，视为缺失
+        durations[i] = H3AutoPolicy::RepresentativeMassDuration(
+            stack_durations, stack_count);
     }
     const int best_index = H3AutoPolicy::ChooseBuffToRefresh(
         durations, status.slot_count, refresh_turns);
@@ -1664,6 +1659,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0;
         int found_slow = -1;
         if (want_slow && !slow_masked) {
+            int stack_durations[21] = {};
+            int stack_count = 0;
             for (int slot = 0; slot < 21; ++slot) {
                 _BattleStack_* st = &mgr->stack[enemy_side][slot];
                 if (!st || st->count_current <= 0) continue;
@@ -1673,11 +1670,10 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     continue;
                 }
-                if (dur > 0) {
-                    found_slow = dur;
-                    break;
-                }
+                stack_durations[stack_count++] = dur > 0 ? dur : 0;
             }
+            found_slow = H3AutoPolicy::RepresentativeMassDuration(
+                stack_durations, stack_count);
         }
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[enemy_side][slot];

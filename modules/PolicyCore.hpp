@@ -187,8 +187,23 @@ struct StatusMaintainChoice {
     int mass;       // 1 = 专家群体，目标格只作施法锚点
 };
 
-// durations[i] 是 spell_ids[i] 在目标侧采用的代表剩余回合：>0 = 已带（全体
-// 法术找到任一已有队即可代表整侧），0 = 没有任何一队已有（视为缺失），
+// 全体法术的代表剩余回合。durations 是目标侧各存活队的原始值：
+// >0 已带，0 未带，-1 不存在。全体法术各可接受部队的剩余回合一致，
+// 所以找到任一已带部队就采用它；全是 0 才表示缺失。无法接受的 0
+// 不覆盖已经找到的正值。
+inline int RepresentativeMassDuration(const int* durations, int count)
+{
+    if (!durations || count <= 0) return -1;
+    bool saw_stack = false;
+    for (int i = 0; i < count; ++i) {
+        if (durations[i] < 0) continue;
+        saw_stack = true;
+        if (durations[i] > 0) return durations[i];
+    }
+    return saw_stack ? 0 : -1;
+}
+
+// durations[i] 是 spell_ids[i] 的代表剩余回合：>0 = 已带，0 = 整侧缺失，
 // -1 = 未选/英雄不可施。refresh_turns：只补 ≤ 该值的；多个达标取剩余最少者。
 inline int ChooseBuffToRefresh(const int* durations, int count,
     int refresh_turns)

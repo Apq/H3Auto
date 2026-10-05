@@ -819,6 +819,17 @@ void TestProfileStoreRoundtrip()
         "missing buff at zero turns is the most urgent");
     Check(MakeDefaultStatusFields().refresh_turns == 1,
         "status refresh threshold defaults to one");
+    const int mixed[] = {0, 5, 0};
+    const int representative = RepresentativeMassDuration(mixed, 3);
+    Check(representative == 5,
+        "mass buff uses one stack that already has it");
+    const int missing[] = {0, 0, -1};
+    Check(RepresentativeMassDuration(missing, 3) == 0,
+        "mass buff is missing only when nobody has it");
+    Check(RepresentativeMassDuration(nullptr, 3) == -1,
+        "mass buff without stacks is not refreshable");
+    Check(ChooseBuffToRefresh(&representative, 1, 1) == -1,
+        "representative duration above threshold is not refreshed");
     // 语义 A：敌方已有任意一队带迟缓（剩余 >1）即达标，不再施全群体
     // （抵抗术场景下部分命中就算完成，避免连续回合补群体）。
     const int enemy_durations[] = {4, 1, 0};
