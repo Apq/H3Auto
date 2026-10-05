@@ -145,6 +145,8 @@ static int  g_battle_attempt_id = 0;
 // 该法术，防止每回合无效重施。ResetAutoState 每场清零（部队构成
 // 可能变化，如亡灵队对士气/幸运法术天然免疫）。
 static unsigned long long g_status_immune_mask = 0;
+// 只抑制“当前没有可接受部队”的重复说明，不阻止以后出现可接受部队时再施。
+static unsigned long long g_status_norecipient_logged = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
 // takeover mismatch 聚合（0.5 对外版）：跟踪失效时每个部队每次行动都命中
 // 一次（玩家日志 2026-10-02 实证 4 小时 558 条 warn，真信号被刷屏淹没）。
@@ -764,6 +766,7 @@ void ResetAutoState()
     g_enemy_hp_value[1] = 0;
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
+    g_status_norecipient_logged = 0;
     ClearOneShotManual_();
     // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
@@ -1098,6 +1101,25 @@ static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
 // 原版士气成功标志：FUN_00464500 在随机判定成功时写 creature.flags@0x84 bit24，
 // 并在同一调用里请求下一次控制权；真实新回合的 FUN_00446e40 用 0xF8FFFFFF
 // 清掉 bit24/25/26。因此同部队再次激活时 bit24 仍在，才是士气额外行动。
+// 读不到生物资料时不排除：宁肯本回合重试，也不要把能吃的部队漏掉。
+static bool StackCanReceiveStatusSpell_(_BattleStack_* stack, int spell,
+    unsigned spell_flags)
+{
+    if (!stack) return false;
+    unsigned flags = 0;
+    int damage_high = 0;
+    int creature_id = -1;
+    __try {
+        flags = reinterpret_cast<H3CombatCreature*>(stack)->info.flags;
+        damage_high = stack->creature.damage_max;
+        creature_id = stack->creature_id;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+    return H3AutoPolicy::CreatureCanReceiveStatusSpell(
+        spell, spell_flags, flags, damage_high, creature_id);
+}
+
 static bool StackHasGoodMorale_(_BattleStack_* stack)
 {
     if (!stack) return false;
@@ -1620,11 +1642,26 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 || spell == H3AutoPolicy::kSlowSpellId
                 || expertise_of[i] <= 0)
             continue;
+        unsigned spell_flags = 0;
+        __try {
+            BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
+            if (spell_table)
+                spell_flags = *reinterpret_cast<unsigned*>(
+                    spell_table + spell * 0x88 + 0x0C);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            spell_flags = 0;
+        }
         int stack_durations[21] = {};
         int stack_count = 0;
+        int living = 0;
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[side][slot];
             if (!st || st->count_current <= 0) continue;
+            ++living;
+            // 各法术排除的生物不同（亡灵不吃圣灵、无士气不吃欢欣鼓舞、
+            // 非射击不吃精准射击等）。没有可接受目标仍去施放会弹出阻止框。
+            if (!StackCanReceiveStatusSpell_(st, spell, spell_flags))
+                continue;
             int dur = 0;
             __try {
                 dur = st->active_spell_duration[spell];
@@ -1632,6 +1669,11 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 continue;
             }
             stack_durations[stack_count++] = dur > 0 ? dur : 0;
+        }
+        if (living > 0 && stack_count == 0
+                && (g_status_norecipient_logged & (1ULL << spell)) == 0) {
+            g_status_norecipient_logged |= 1ULL << spell;
+            LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放", spell);
         }
         durations[i] = H3AutoPolicy::RepresentativeMassDuration(
             stack_durations, stack_count);
@@ -1659,11 +1701,25 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0;
         int found_slow = -1;
         if (want_slow && !slow_masked) {
+            unsigned slow_flags = 0;
+            __try {
+                BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
+                if (spell_table)
+                    slow_flags = *reinterpret_cast<unsigned*>(
+                        spell_table + H3AutoPolicy::kSlowSpellId * 0x88 + 0x0C);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                slow_flags = 0;
+            }
             int stack_durations[21] = {};
             int stack_count = 0;
+            int living_slow = 0;
             for (int slot = 0; slot < 21; ++slot) {
                 _BattleStack_* st = &mgr->stack[enemy_side][slot];
                 if (!st || st->count_current <= 0) continue;
+                ++living_slow;
+                if (!StackCanReceiveStatusSpell_(st, H3AutoPolicy::kSlowSpellId,
+                        slow_flags))
+                    continue;
                 int dur = 0;
                 __try {
                     dur = st->active_spell_duration[H3AutoPolicy::kSlowSpellId];
@@ -1674,12 +1730,20 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             }
             found_slow = H3AutoPolicy::RepresentativeMassDuration(
                 stack_durations, stack_count);
+            if (living_slow > 0 && stack_count == 0
+                    && (g_status_norecipient_logged
+                        & (1ULL << H3AutoPolicy::kSlowSpellId)) == 0) {
+                g_status_norecipient_logged |= 1ULL << H3AutoPolicy::kSlowSpellId;
+                LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放",
+                    H3AutoPolicy::kSlowSpellId);
+            }
         }
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[enemy_side][slot];
+            // found_slow < 0 表示没有可接受的敌方，不能改记成 0，否则会去施放。
             enemy_durations[slot] = (want_slow && !slow_masked
-                    && st && st->count_current > 0)
-                ? (found_slow >= 0 ? found_slow : 0) : -1;
+                    && st && st->count_current > 0 && found_slow >= 0)
+                ? found_slow : -1;
             enemy_hexes[slot] = 0;
         }
         const H3AutoPolicy::StatusMaintainChoice slow =

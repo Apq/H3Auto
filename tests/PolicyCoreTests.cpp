@@ -828,6 +828,32 @@ void TestProfileStoreRoundtrip()
         "mass buff is missing only when nobody has it");
     Check(RepresentativeMassDuration(nullptr, 3) == -1,
         "mass buff without stacks is not refreshable");
+    Check(!CreatureCanReceiveStatusSpell(41, 0, 0x40000u, 5, 56),
+        "undead cannot receive bless");
+    Check(!CreatureCanReceiveStatusSpell(41, 0, 0, 0, 148),
+        "zero-damage creatures cannot receive bless");
+    Check(CreatureCanReceiveStatusSpell(41, 0, 0, 50, 13),
+        "living attackers can receive bless");
+    Check(!CreatureCanReceiveStatusSpell(49, 0, 0x20000u, 50, 13),
+        "no-morale creatures cannot receive mirth");
+    Check(CreatureCanReceiveStatusSpell(49, 0, 0, 50, 6),
+        "ordinary creatures can receive mirth");
+    Check(!CreatureCanReceiveStatusSpell(44, 0, 0, 10, 6),
+        "non-shooters cannot receive precision");
+    Check(CreatureCanReceiveStatusSpell(44, 0, 0x4u, 10, 6),
+        "shooters can receive precision");
+    Check(!CreatureCanReceiveStatusSpell(51, 0, 0, 0, 147),
+        "zero-damage creatures cannot receive fortune");
+    Check(!CreatureCanReceiveStatusSpell(55, 0, 0, 0, 147),
+        "zero-damage creatures cannot receive slayer");
+    Check(!CreatureCanReceiveStatusSpell(27, 0x1000u, 0x40u, 0, 145),
+        "siege weapons cannot receive a cannot-target-siege spell");
+    Check(CreatureCanReceiveStatusSpell(27, 0, 0x40u, 0, 145),
+        "siege weapons can receive a spell that allows them");
+    Check(!CreatureCanReceiveStatusSpell(27, 0, 0, 20, 149),
+        "arrow towers receive no status spell");
+    Check(CreatureCanReceiveStatusSpell(54, 0, 0x40000u, 5, 56),
+        "slow has no undead exclusion");
     Check(ChooseBuffToRefresh(&representative, 1, 1) == -1,
         "representative duration above threshold is not refreshed");
     // 语义 A：敌方已有任意一队带迟缓（剩余 >1）即达标，不再施全群体

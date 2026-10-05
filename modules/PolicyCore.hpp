@@ -158,6 +158,20 @@ inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
         || (spell_flags & kSpellFlagExpertMass) != 0;
 }
 static constexpr int kSlowSpellId = 54;
+static constexpr int kBlessSpellId = 41;
+static constexpr int kPrecisionSpellId = 44;
+static constexpr int kMirthSpellId = 49;
+static constexpr int kSorrowSpellId = 50;
+static constexpr int kFortuneSpellId = 51;
+static constexpr int kMisfortuneSpellId = 52;
+static constexpr int kSlayerSpellId = 55;
+static constexpr int kArrowTowerCreatureId = 149;
+// 与 H3CreatureInformation::flags / H3Spell::flags 同一套位。
+static constexpr unsigned kCreatureFlagShooter = 0x4u;
+static constexpr unsigned kCreatureFlagSiegeWeapon = 0x40u;
+static constexpr unsigned kCreatureFlagNoMorale = 0x20000u;
+static constexpr unsigned kCreatureFlagUndead = 0x40000u;
+static constexpr unsigned kSpellFlagCannotTargetSiege = 0x1000u;
 // 补状态阈值默认值：剩余回合 ≤ 该值才补（阈值本体在
 // StatusProfileFields.refresh_turns，玩家可改）。
 static constexpr int kStatusRefreshTurns = 1;
@@ -191,6 +205,34 @@ struct StatusMaintainChoice {
 // >0 已带，0 未带，-1 不存在。全体法术各可接受部队的剩余回合一致，
 // 所以找到任一已带部队就采用它；全是 0 才表示缺失。无法接受的 0
 // 不覆盖已经找到的正值。
+// 原版 FUN_0044a1a0 在真正上效果之前按法术分开判断，不是 AI 价值。
+// 这里只复述“一定不能接受”的硬条件；敌方抵抗、反魔法不在这里。
+// 读不到的字段由调用方决定是否放行，本函数不猜。
+inline bool CreatureCanReceiveStatusSpell(int spell_id, unsigned spell_flags,
+    unsigned creature_flags, int damage_high, int creature_id)
+{
+    if (creature_id == kArrowTowerCreatureId) return false;
+    if ((creature_flags & kCreatureFlagSiegeWeapon) != 0
+            && (spell_flags & kSpellFlagCannotTargetSiege) != 0)
+        return false;
+    switch (spell_id) {
+    case kBlessSpellId:
+        if ((creature_flags & kCreatureFlagUndead) != 0) return false;
+        return damage_high > 0;
+    case kFortuneSpellId:
+    case kMisfortuneSpellId:
+    case kSlayerSpellId:
+        return damage_high > 0;
+    case kMirthSpellId:
+    case kSorrowSpellId:
+        return (creature_flags & kCreatureFlagNoMorale) == 0;
+    case kPrecisionSpellId:
+        return (creature_flags & kCreatureFlagShooter) != 0;
+    default:
+        return true;
+    }
+}
+
 inline int RepresentativeMassDuration(const int* durations, int count)
 {
     if (!durations || count <= 0) return -1;
