@@ -145,6 +145,9 @@ static int  g_battle_attempt_id = 0;
 // 该法术，防止每回合无效重施。ResetAutoState 每场清零（部队构成
 // 可能变化，如亡灵队对士气/幸运法术天然免疫）。
 static unsigned long long g_status_immune_mask = 0;
+// 目标侧个别部队无法接受某全体法术时的本场跳过位（bit=战场槽位）。
+// 群体法术仍会给其它可接受部队生效；不能让这类无效槽位拖成每回合重施。
+static unsigned long long g_status_skip_stacks[81] = {};
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
 // takeover mismatch 聚合（0.5 对外版）：跟踪失效时每个部队每次行动都命中
 // 一次（玩家日志 2026-10-02 实证 4 小时 558 条 warn，真信号被刷屏淹没）。
@@ -764,6 +767,7 @@ void ResetAutoState()
     g_enemy_hp_value[1] = 0;
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
+    memset(g_status_skip_stacks, 0, sizeof(g_status_skip_stacks));
     ClearOneShotManual_();
     // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
@@ -1639,7 +1643,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             durations[i] = -1;
             if (spell > 0 && spell < 81
                     && spell != H3AutoPolicy::kSlowSpellId
-                    && expertise_of[i] > 0) {
+                    && expertise_of[i] > 0
+                    && (g_status_skip_stacks[spell] & (1ULL << slot)) == 0) {
                 const int dur = st->active_spell_duration[spell];
                 durations[i] = dur > 0 ? dur : 0;
             }
@@ -1675,9 +1680,11 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[enemy_side][slot];
             // 同增益分支：不问 AI 价值，直接读剩余回合（0=未带）；
-            // 施后验证全免疫才置掩码跳过。
+            // 个别无法接受减速的槽位由施后验证加入跳过位。
             enemy_durations[slot] = (want_slow && !slow_masked
-                    && st && st->count_current > 0)
+                    && st && st->count_current > 0
+                    && (g_status_skip_stacks[H3AutoPolicy::kSlowSpellId]
+                        & (1ULL << slot)) == 0)
                 ? st->active_spell_duration[H3AutoPolicy::kSlowSpellId] : -1;
             enemy_hexes[slot] = 0;
         }
@@ -1747,28 +1754,30 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     LogInfo("[Status] cast done spell=%d mana=%d->%d casted=%d->%d(game=%d mark=1)",
         spell_id, st_mana_before, GetHeroMana_(mgr, side), st_casted_before,
         GetHeroCasted_(mgr, side), casted_by_game);
-    // 施后免疫验证（代替原 0x4477A0 门卫）：群体施放后目标侧没有任何
-    // 存活队 duration>0（全免疫/全被抵抗，如亡灵队 vs 士气法术）时置
-    // 掩码本场跳过，防止每回合无效重施烧法力。部分免疫（混合部队）不
-    // 受影响——有任一队吃到就继续正常维护。CastSpell→ApplySpell 同
-    // 步写 duration（casted/法力也是同步读的），这里立即可见。
+    // 施后验证：群体法术可能只覆盖部分部队。未获得持续时间的存活槽
+    // 记为本场无效槽（如战争机器/天然免疫），不再触发“缺状态”；若所有
+    // 存活目标都未获得，则整个法术本场跳过。部分生效时继续正常维护。
     {
         const int check_side =
             spell_id == H3AutoPolicy::kSlowSpellId ? enemy_side : side;
         bool any_received = false;
+        bool any_checked = false;
         __try {
             for (int slot = 0; slot < 21; ++slot) {
                 _BattleStack_* st = &mgr->stack[check_side][slot];
-                if (st && st->count_current > 0
-                        && st->active_spell_duration[spell_id] > 0) {
+                if (!st || st->count_current <= 0) continue;
+                any_checked = true;
+                if (st->active_spell_duration[spell_id] > 0) {
                     any_received = true;
-                    break;
+                } else {
+                    g_status_skip_stacks[spell_id] |= 1ULL << slot;
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             any_received = true; // 读不稳时不置掩码（宁重试勿误杀）
+            any_checked = false;
         }
-        if (!any_received) {
+        if (any_checked && !any_received) {
             g_status_immune_mask |= 1ULL << spell_id;
             LogInfo("[Status] spell=%d 施放后无任何目标生效（全免疫/全抵抗），本场跳过",
                 spell_id);
