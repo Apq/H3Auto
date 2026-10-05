@@ -138,7 +138,12 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
     if (ev == BE_RESULT_RETRY) {
         // 取消/重打：重排身份+重绑+清运行时（EnsureStackTrackingBound 内含）；
         // CM 保留——全手动是玩家显式选择，重打不清（设计文档 §10.1）。
+        // 重打仍是同一场。若本进程还没算过指纹（插件在结果窗期间才加载，
+        // 或快速战斗后直接重打），现在补算，打开面板才能看到本场存档。
+        // 已经算过则不重算，避免一场战斗中途改变指纹。
         g_ui_gone_grace_until = GetTickCount() + 3000;
+        if (GetBattleFingerprint() == 0)
+            OnBattleAppearedFingerprint_();
         EnsureStackTrackingBound();
         return;
     }
