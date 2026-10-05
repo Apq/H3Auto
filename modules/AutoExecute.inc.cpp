@@ -51,12 +51,12 @@ static void* g_pipeline_stack = nullptr; // 管线锚定的活动单位
 // 不变），PS_HANDLED 残留会挡住第二次行动；用「已落地 + action 已清 +
 // 控制权判定点再次询问同一单位」识别这是新的一次行动机会。
 static bool g_pipeline_action_landed = false;
-static int g_pipeline_landed_turn = -1;   // 命令落地时的战场回合号
-// 同单位再激活的回合号相同 = 士气额外行动（循环语义作用于回合：
-// 循环移动→防御、循环近战→重打本回合组合不推进游标）；
-// 回合号前进 = 新回合（极端情况：场上只剩一支部队，回合背靠背）。
+static int g_pipeline_landed_turn = -1;   // 命令落地时的战场行动计数
+// 同单位再激活时读 creature.flags@0x84 的 bit24：士气判定成功时原版置位，
+// 真实新回合开始时清掉。士气窗口内循环移动→防御、循环近战→重打本回合组合
+// 且不推进游标。不能用 turn：每次行动入口都加一；也不能用 0x132A0，
+// 它是魔幻法师施法间隔，不是通用回合计数。
 static bool g_pipeline_morale_extra = false;
-static int g_pipeline_morale_turn = -1;
 
 static const char* ControlModeName_(ControlMode m)
 {
@@ -1087,6 +1087,22 @@ static int GetCurrentBattleTurn_(_BattleMgr_* mgr)
             return cm->turn;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return -1;
+}
+
+// 原版士气成功标志：FUN_00464500 在随机判定成功时写 creature.flags@0x84 bit24，
+// 并在同一调用里请求下一次控制权；真实新回合的 FUN_00446e40 用 0xF8FFFFFF
+// 清掉 bit24/25/26。因此同部队再次激活时 bit24 仍在，才是士气额外行动。
+static bool StackHasGoodMorale_(_BattleStack_* stack)
+{
+    if (!stack) return false;
+    __try {
+        const unsigned flags =
+            reinterpret_cast<H3CombatCreature*>(stack)->info.flags;
+        return (flags & 0x01000000u) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogError("[Auto] 士气标志读取异常 code=0x%08X", GetExceptionCode());
+        return false;
+    }
 }
 
 // ==== 一回合一次施法：统一用游戏自己的 heroCasted[side] ====
@@ -2305,11 +2321,13 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     };
 
     // —— 士气高涨的额外行动：循环语义作用于回合，不作用于同回合的额外行动 ——
-    // 循环移动：不动（原地防御）；路径游标已在本回合正常推进，下回合走下一点。
-    // 循环近战：重打本回合刚执行过的组合，游标不往前推进（下回合继续原顺序）。
-    // 其余动作（远程/急救/防御/召唤物走位）无回合游标，自然再执行一次。
+    // 循环移动：无条件防御（不受“允许降级为防御”控制）；路径游标已在本回合
+    // 正常推进，下回合走下一点。循环近战：重打本回合刚执行过的组合，游标
+    // 不往前推进（下回合继续原顺序）。其余动作（远程/急救/防御/召唤物走位）
+    // 无回合游标，自然再执行一次。使用时重新核对当前部队的士气成功标志，
+    // 不能比较 turn：士气额外行动入口已经把 turn 加一。
     const bool morale_extra = g_pipeline_morale_extra
-        && g_pipeline_morale_turn == GetCurrentBattleTurn_(mgr);
+        && StackHasGoodMorale_(self);
     if (morale_extra && rule.action == AA_MOVE) {
         LogInfo("[Auto] morale extra: MOVE -> DEFEND slot=%d",
             self->army_slot_ix);
@@ -2701,68 +2719,41 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         TryAutoStop_(This);
-        // 管线复位不依赖 active_stack：自动模式下游戏不走「交给玩家」，
-        // active_stack 会一直空着（日志 active=-1/-1），放在它的判空里
-        // 复位就永远不发生——场上只剩一支部队时，打完一回合管线停在
-        // PS_HANDLED，之后每帧都「本部队已处理」直接跳过。
-        // 回合号前进 = 新回合，无条件复位。
-        if (This && g_pipeline_stage == PS_HANDLED && g_pipeline_action_landed
-            && This->action == 0) {
-            const int turn_now = GetCurrentBattleTurn_(This);
-            if (turn_now >= 0 && g_pipeline_landed_turn >= 0
-                && turn_now != g_pipeline_landed_turn) {
-                LogDebug("[Auto] 新回合复位管线 turn %d->%d",
-                    g_pipeline_landed_turn, turn_now);
-                g_pipeline_stage = PS_IDLE;
-                g_pipeline_action_landed = false;
-                g_pipeline_morale_extra = false;
-            } else {
-                // 每帧都会进这里，按回合去重，否则日志每秒上千行。
-                static int s_hold_logged_turn = -2;
-                if (s_hold_logged_turn != turn_now) {
-                    s_hold_logged_turn = turn_now;
-                    LogDebug("[Auto] 管线保持已处理 turn_now=%d landed_turn=%d action=%d",
-                        turn_now, g_pipeline_landed_turn, This->action);
-                }
-            }
+        // 统一使用 current_mon_side/index 对应的 CurrentTurnStack_：自动模式下
+        // active_stack 经常为空，若把复位放在 active_stack 判空内，士气额外行动
+        // 和“场上只剩一支部队”的新回合都会漏判，PS_HANDLED 会一直挡住提交。
+        _BattleStack_* current_stack = This ? CurrentTurnStack_(This) : nullptr;
+        if (This && current_stack && g_pipeline_stack
+            && g_pipeline_stack != current_stack) {
+            // 当前部队变化：旧单位管线残留整体清（等待/完成/已处理）。
+            if (g_pipeline_stage == PS_SPELL_POSTED)
+                ClearSpellWait_();
+            g_pipeline_stage = PS_IDLE;
+            g_pipeline_stack = nullptr;
+            g_pipeline_action_landed = false;
+            g_pipeline_morale_extra = false;
+        } else if (This && current_stack
+            && g_pipeline_stage == PS_HANDLED
+            && g_pipeline_stack == current_stack
+            && g_pipeline_action_landed && This->action == 0) {
+            // 命令已落地、action 已被执行器清回 0，且同一部队再次获得行动
+            // 机会。flags bit24 仍在 = 士气额外行动；否则 turn 前进 = 新回合。
+            // 该分支不依赖 active_stack，覆盖自动模式下的真实路径。
+            const int turn = GetCurrentBattleTurn_(This);
+            const bool morale_extra = StackHasGoodMorale_(current_stack);
+            g_pipeline_stage = PS_IDLE;
+            g_pipeline_action_landed = false;
+            g_pipeline_morale_extra = morale_extra;
+            if (morale_extra)
+                LogInfo("[Auto] morale re-action: reset pipeline slot=%d cid=0x%X turn=%d",
+                    current_stack->army_slot_ix,
+                    current_stack->creature_id, turn);
+            else
+                LogDebug("[Auto] same stack new turn: reset pipeline slot=%d turn=%d",
+                    current_stack->army_slot_ix, turn);
         }
-        if (This && This->active_stack) {
-            // 活动单位变化：旧单位管线残留整体清（等待/完成/已处理）。
-            if (g_pipeline_stack && g_pipeline_stack != This->active_stack) {
-                if (g_pipeline_stage == PS_SPELL_POSTED)
-                    ClearSpellWait_();
-                g_pipeline_stage = PS_IDLE;
-                g_pipeline_stack = nullptr;
-                g_pipeline_action_landed = false;
-                g_pipeline_morale_extra = false;
-            } else if (g_pipeline_stage == PS_HANDLED
-                && g_pipeline_stack == This->active_stack
-                && g_pipeline_action_landed && This->action == 0) {
-                // 同支部队消化完上一条命令后再次获得行动机会。本判定点
-                // 只在真正的行动时机发生（战斗动画期间不被调用），且要求
-                // 命令已落地、action 已被执行器清回 0——即这是全新的一次
-                // 行动机会，而非执行窗口内的重复询问。
-                // 回合号相同 = 士气高涨的额外行动（带 g_pipeline_morale_extra
-                // 标记，循环移动/近战按「循环作用于回合」特殊处理）；
-                // 回合号前进 = 新回合（极端情况：场上只剩一支部队，
-                // 回合背靠背、无其它部队插入触发不了单位变化复位）。
-                // 快捷施法由 hero_casted 挡住，士气额外行动不会二施。
-                const int turn = GetCurrentBattleTurn_(This);
-                const bool morale_extra =
-                    turn >= 0 && g_pipeline_landed_turn == turn;
-                g_pipeline_stage = PS_IDLE;
-                g_pipeline_action_landed = false;
-                g_pipeline_morale_extra = morale_extra;
-                g_pipeline_morale_turn = turn;
-                if (morale_extra)
-                    LogInfo("[Auto] morale re-action: reset pipeline slot=%d cid=0x%X",
-                        This->active_stack->army_slot_ix,
-                        This->active_stack->creature_id);
-                else
-                    LogDebug("[Auto] same stack new turn: reset pipeline slot=%d turn=%d",
-                        This->active_stack->army_slot_ix, turn);
-            }
-        }
+        // 自动模式的 current_stack 变化分支已覆盖 active_stack 为空的情况；
+        // active_stack 非空时仍以 current_stack 为准，避免游戏刷新滞后造成误判。
 
         const int decision = DecideTakeover(This);
         // 判定快照（debug）：decision 2=插件执行 1=交AI 0=保持原版。
