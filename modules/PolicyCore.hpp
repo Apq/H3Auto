@@ -187,9 +187,9 @@ struct StatusMaintainChoice {
     int mass;       // 1 = 专家群体，目标格只作施法锚点
 };
 
-// durations[i] 是 spell_ids[i] 在该队上的剩余回合：>0 = 已带（直接读），
-// 0 = 未带但可上（视为最紧迫），-1 = 未选/不可上（免疫/英雄不可施）。
-// refresh_turns：只补 ≤ 该值的；多个达标取剩余最少者（并列取靠前者）。
+// durations[i] 是 spell_ids[i] 在目标侧采用的代表剩余回合：>0 = 已带（全体
+// 法术找到任一已有队即可代表整侧），0 = 没有任何一队已有（视为缺失），
+// -1 = 未选/英雄不可施。refresh_turns：只补 ≤ 该值的；多个达标取剩余最少者。
 inline int ChooseBuffToRefresh(const int* durations, int count,
     int refresh_turns)
 {
