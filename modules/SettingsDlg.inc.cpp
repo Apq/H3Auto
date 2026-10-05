@@ -2176,6 +2176,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     continue;
                 if (s_status_dd_open < status.slot_count)
                     status.slots[s_status_dd_open] = s_status_dd_ids[i];
+                LogInfo("[Panel] 保持状态选择 slot=%d spell=%d (方案%d)",
+                    s_status_dd_open + 1, s_status_dd_ids[i],
+                    s_p.selected_profile + 1);
                 s_status_dd_open = -1;
                 s_status_dd_hover = -1;
                 DrawPanelToBuffer_();
