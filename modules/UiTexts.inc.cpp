@@ -32,7 +32,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "panel.tab_army", "部队" },
     { "panel.tab_summon", "召唤" },
     { "panel.tab_status", "保持状态" },
-    { "panel.status_note", "只列英雄已学会的范围状态魔法。多个都保持，哪个剩余回合先到阈值就补哪个" },
+    { "panel.status_note", "只列英雄已学会的全体状态魔法。多个都保持，哪个剩余回合先到阈值就补哪个" },
     { "panel.status_add", "+" },
     { "panel.status_slow", "敌方减速（需专家群体）" },
     { "panel.status_empty", "（无已学范围魔法）" },

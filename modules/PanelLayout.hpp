@@ -197,9 +197,9 @@ static const int SUMMON_FB_X  = SUMMON_ACT_DD_X + SUMMON_ACT_DD_W + 18;
 static const int SUMMON_FB_Y  = SUMMON_ACT_ROW_Y + 3;   // 与 18 高下拉中线对齐
 static const int SUMMON_FB_TEXT_W = 130;
 
-// 保持状态页：每行 4 个下拉。「+」先占第一个空位，点一下后移。
+// 保持状态页（自上而下）：说明行 → 「剩余回合≤[框] 时补」阈值行 →
+// 每行 4 个下拉的槽位区。「+」先占第一个空位，点一下后移。
 static const int STATUS_NOTE_Y = 108;
-static const int STATUS_ROW0_Y = 136;
 static const int STATUS_COLS = 4;
 static const int STATUS_GAP = 6;
 static const int STATUS_DD_W =
@@ -210,11 +210,10 @@ static const int STATUS_ADD_W = STATUS_DD_W;
 static const int STATUS_ADD_H = STATUS_DD_H;
 static const int STATUS_ITEM_H = 18;
 
-// 保持状态页阈值行（状态槽 4×2 下方）：「剩余回合≤ [框] 时补」。
-// 框内数字 1..9（默认 1）：任一已配置增益/减速在任一队上剩余回合 ≤ 它
-// 就补施该法术（多达标取剩余最少者）。见 s_status_th_* 编辑态。
-static const int STATUS_TH_ROW_Y =
-    STATUS_ROW0_Y + 2 * STATUS_ROW_H + 10;
+// 阈值行（说明行下方、槽位上方）：框内数字 1..9（默认 1）——任一已
+// 配置增益/减速在任一队上剩余回合 ≤ 它就补施该法术（多达标取剩余
+// 最少者）。见 s_status_th_* 编辑态。
+static const int STATUS_TH_ROW_Y = STATUS_NOTE_Y + 26;
 static const int STATUS_TH_ROW_H = 18;
 static const int STATUS_TH_LABEL_W = 66;   // 「剩余回合≤」（5 字符）
 static const int STATUS_TH_BOX_W  = 36;
@@ -224,6 +223,10 @@ static const int STATUS_TH_BOX_X  =
 static const int STATUS_TH_TAIL_X =
     STATUS_TH_BOX_X + STATUS_TH_BOX_W + 2;
 static const int STATUS_TH_MAX_DIGITS = 1; // 1..9
+
+// 槽位区第一行（阈值行下方）。
+static const int STATUS_ROW0_Y =
+    STATUS_TH_ROW_Y + STATUS_TH_ROW_H + 10;
 
 // 召唤页说明/启用文案已外置（UiTexts panel.summon_enable 等）。
 
