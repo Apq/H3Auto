@@ -6,6 +6,7 @@
 #include "BattleState.hpp"
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
+static void LogWarn(const char* fmt, ...);
 extern void ClearConfirmedProfiles();
 extern void ResetAutoState();
 extern bool IsPanelActive();
@@ -79,7 +80,9 @@ void SetPhase_(BattlePhase next, BattleEvent ev)
         }
     }
     if (!ok) {
-        LogInfo("[Phase] illegal %s -> %s (ev=%s)",
+        // 状态机被拒=事件与状态不一致，属于时序 bug 信号（对外版升 warn：
+        // 玩家日志出现即需关注；2026-10-02 玩家日志 71 条 illegal 暴露竞态）。
+        LogWarn("[Phase] illegal %s -> %s (ev=%s)",
             PhaseName_(g_phase), PhaseName_(next), EventName_(ev));
         return;
     }

@@ -4,6 +4,8 @@
 // 来自 SettingsDlg，反向被调用的函数经 PanelInput.hpp 声明。
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
+static void LogWarn(const char* fmt, ...);
+static void LogError(const char* fmt, ...);
 
 void OpenSettingsPanel_();
 static void CommitAndCloseSettingsPanel_();
@@ -403,7 +405,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         }
     }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogDebug("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
+        LogError("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -735,7 +737,7 @@ static bool InstallBattleInputBlocker_()
         *reinterpret_cast<void***>(item) = original_vtable;
         typedef H3DlgItem* (__thiscall *DestroyItemProc)(H3DlgItem*, BOOL8);
         reinterpret_cast<DestroyItemProc>(original_vtable[0])(item, TRUE);
-        LogInfo("[Panel] BattleUI 拒绝加入输入屏障控件。");
+        LogWarn("[Panel] BattleUI 拒绝加入输入屏障控件。");
         return false;
     }
 

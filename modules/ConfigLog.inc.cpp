@@ -754,7 +754,7 @@ bool LoadBattleStore(unsigned long long fp, BattleStoreRecord* records,
         const int n = LoadBattleStoreRaw_(fp, records, cap);
         if (n >= 0) { *out_count = n; ok = true; }
     } __except (code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
-        LogDebug("[BattleStore] 读战斗存档异常 code=0x%08X", code);
+        LogError("[BattleStore] 读战斗存档异常 code=0x%08X", code);
         ok = false;
     }
     if (!ok) *out_count = 0;
@@ -798,7 +798,7 @@ bool AppendBattleStoreRecord(unsigned long long fp,
         delete[] all;
         delete rec;
     } __except (code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
-        LogDebug("[BattleStore] 追加战斗存档异常 code=0x%08X", code);
+        LogError("[BattleStore] 追加战斗存档异常 code=0x%08X", code);
         ok = false;
     }
     return ok;

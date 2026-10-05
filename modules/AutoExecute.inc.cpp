@@ -141,6 +141,12 @@ static int  g_track_side = -1;
 static bool g_track_active = false;
 static int  g_battle_attempt_id = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
+// takeover mismatch 聚合（0.5 对外版）：跟踪失效时每个部队每次行动都命中
+// 一次（玩家日志 2026-10-02 实证 4 小时 558 条 warn，真信号被刷屏淹没）。
+// 同一场（attempt）只报首条详情，其余静默计数，ResetAutoState 收账汇总。
+static int g_mismatch_takeover_count = 0;   // DecideTakeover 判定点累计
+static int g_mismatch_skip_count = 0;       // dispatch 行动点累计
+static int g_mismatch_detail_attempt = -1;  // 本场详情是否已报过
 // 自动停止：最近两笔敌方血量。两笔都有效才外推，更早的不参与。
 static int g_enemy_hp_turn[2] = { -1, -1 };
 static int g_enemy_hp_value[2] = {};
@@ -762,6 +768,14 @@ void ResetAutoState()
     // 策略是本进程内的已确认设置，战斗状态重置时保留；
     // 跟踪表是“当前战斗绑定”，进程重置时清空。
     ClearStackTracking_();
+    // 失效聚合收账（见 g_mismatch_* 定义处注释）：本轮发生过 mismatch 才
+    // 一条汇总，正常玩法 0 条；战斗结束/重打/读档路径全部经过本函数。
+    if (g_mismatch_takeover_count > 0 || g_mismatch_skip_count > 0) {
+        LogWarn("[Track] 上一轮跟踪失效累计：判定点 %d 次 / 行动点 %d 次；已随重置恢复",
+            g_mismatch_takeover_count, g_mismatch_skip_count);
+        g_mismatch_takeover_count = 0;
+        g_mismatch_skip_count = 0;
+    }
     LogInfo("Auto state reset; confirmed strategies preserved, tracking cleared.");
 }
 
@@ -1263,7 +1277,7 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
     } __except (1) {
         g_cast_in_flight = false;
         CastSideGuardLeave_(cm, summon_cas);
-        LogWarn("[Summon] cast exception code=0x%08X spell=%d",
+        LogError("[Summon] cast exception code=0x%08X spell=%d",
             GetExceptionCode(), spell_id);
         return false;
     }
@@ -1538,14 +1552,15 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     } __except (1) {
         g_cast_in_flight = false;
         CastSideGuardLeave_(cm, prot_cas);
-        LogDebug("[Protect] cast exception code=0x%08X spell=%d slot=%d",
+        LogError("[Protect] cast exception code=0x%08X spell=%d slot=%d",
             GetExceptionCode(), best_spell, best_slot);
         return false;
     }
     g_cast_in_flight = false;
     CastSideGuardLeave_(cm, prot_cas);
     MarkHeroCastThisTurn_(mgr, side); // 补写玩家方 heroCasted（异常路径已 return）
-    LogDebug("[Protect] cast done spell=%d mana=%d->%d casted=%d->%d",
+    // 施法成功=玩家可感知事件（对账"它救没救/加没加"），info 落盘（§16.2）。
+    LogInfo("[Protect] cast done spell=%d mana=%d->%d casted=%d->%d",
         best_spell, prot_mana_before, GetHeroMana_(mgr, side),
         prot_casted_before, GetHeroCasted_(mgr, side));
     return true;
@@ -1656,7 +1671,7 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     } __except (1) {
         g_cast_in_flight = false;
         CastSideGuardLeave_(cm, st_cas);
-        LogWarn("[Status] cast exception code=0x%08X spell=%d",
+        LogError("[Status] cast exception code=0x%08X spell=%d",
             GetExceptionCode(), spell_id);
         return false;
     }
@@ -1664,7 +1679,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     CastSideGuardLeave_(cm, st_cas);
     const int casted_by_game = GetHeroCasted_(mgr, side);
     MarkHeroCastThisTurn_(mgr, side); // 补写玩家方 heroCasted（异常路径已 return）
-    LogDebug("[Status] cast done spell=%d mana=%d->%d casted=%d->%d(game=%d mark=1)",
+    // 同 [Protect] cast done：施法成功对玩家可感知，info 落盘（§16.2）。
+    LogInfo("[Status] cast done spell=%d mana=%d->%d casted=%d->%d(game=%d mark=1)",
         spell_id, st_mana_before, GetHeroMana_(mgr, side), st_casted_before,
         GetHeroCasted_(mgr, side), casted_by_game);
     return true;
@@ -2220,7 +2236,7 @@ static bool SubmitMelee_(_BattleMgr_* mgr, _BattleStack_* self,
 
     _BattleStack_* enemy = FindEnemyOccupyingHex_(mgr, self, attack_hex);
     if (!enemy) {
-        LogInfo("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
+        LogDebug("[Auto] melee attack hex=%d empty (no enemy head/tail) slot=%d",
             attack_hex, self->army_slot_ix);
         return false;
     }
@@ -2386,10 +2402,10 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (!ActiveStackMatchesTrack_(self)) {
         if (g_pipeline_stage == PS_SPELL_POSTED)
             ClearSpellWait_();
-        static void* s_last_mismatch = nullptr;
-        if (s_last_mismatch != self) {
-            s_last_mismatch = self;
-            LogWarn("[Track] skip action: mismatch side=%d slot=%d cid=0x%X count=%d",
+        ++g_mismatch_skip_count;
+        if (g_mismatch_detail_attempt != g_battle_attempt_id) {
+            g_mismatch_detail_attempt = g_battle_attempt_id;
+            LogWarn("[Track] skip action: mismatch side=%d slot=%d cid=0x%X count=%d（本场后续同类仅计数）",
                 self->def_group_ix, self->army_slot_ix,
                 self->creature_id, self->count_current);
         }
@@ -2418,8 +2434,9 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (want_spell && g_pipeline_stage != PS_SPELL_POSTED
         && !(g_pipeline_stage == PS_SPELL_DONE && g_pipeline_stack == self)) {
         // 本英雄本回合已施过法：跳过施法，直接进入部队动作。
+        // 正常业务流（游戏一回合一施，含玩家先手施过），info 留痕即可。
         if (GetHeroCasted_(mgr, side) != 0) {
-            LogWarn("[Spell] already cast this turn side=%d; skip quick key=%d",
+            LogInfo("[Spell] already cast this turn side=%d; skip quick key=%d",
                 side, spell_key);
             // 英雄每回合只能施法一次；本部队没有实际尝试，不消费循环槽位。
             g_pipeline_stage = PS_SPELL_DONE;
@@ -2554,13 +2571,13 @@ int DecideTakeover(_BattleMgr_* mgr)
 
     // 非本场已绑定的人类侧存活单位：不介入（控制权本就不该由我们改写）。
     if (!ActiveStackMatchesTrack_(stack)) {
-        static void* s_last_takeover_mismatch = nullptr;
-        if (s_last_takeover_mismatch != stack) {
-            s_last_takeover_mismatch = stack;
+        ++g_mismatch_takeover_count;
+        if (g_mismatch_detail_attempt != g_battle_attempt_id) {
+            g_mismatch_detail_attempt = g_battle_attempt_id;
             const int slot = stack->army_slot_ix;
             const StackTrackEntry* expected =
                 (slot >= 0 && slot < 21) ? &g_stack_track[slot] : nullptr;
-            LogWarn("[Track] takeover mismatch ptr=%p side=%d slot=%d cid=0x%X count=%d track_active=%d expected_bound=%d expected_alive=%d expected_side=%d expected_cid=0x%X",
+            LogWarn("[Track] takeover mismatch ptr=%p side=%d slot=%d cid=0x%X count=%d track_active=%d expected_bound=%d expected_alive=%d expected_side=%d expected_cid=0x%X（本场后续同类仅计数）",
                 stack, stack->def_group_ix, slot, stack->creature_id,
                 stack->count_current, g_track_active ? 1 : 0,
                 expected && expected->bound ? 1 : 0,
@@ -2653,7 +2670,7 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
         }
         return submitted;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogInfo("[Auto] 执行入口异常 code=0x%08X", GetExceptionCode());
+        LogError("[Auto] 执行入口异常 code=0x%08X", GetExceptionCode());
         return false;
     }
 }
@@ -2768,7 +2785,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0（控制权在玩家路径）。
         // 若需代发动作，在 Hook_BattleMsgProc 入口提交。
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogDebug("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
+        LogError("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
     }
     return 0;
 }
