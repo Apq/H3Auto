@@ -140,6 +140,11 @@ static StackTrackEntry g_stack_track[21] = {};
 static int  g_track_side = -1;
 static bool g_track_active = false;
 static int  g_battle_attempt_id = 0;
+// 保持状态「本场免疫跳过」位掩码（bit=法术 id）：群体施放后目标侧
+// 没有任何存活队 duration>0（全免疫/全被抵抗）时置位，本场不再选
+// 该法术，防止每回合无效重施。ResetAutoState 每场清零（部队构成
+// 可能变化，如亡灵队对士气/幸运法术天然免疫）。
+static unsigned long long g_status_immune_mask = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
 // takeover mismatch 聚合（0.5 对外版）：跟踪失效时每个部队每次行动都命中
 // 一次（玩家日志 2026-10-02 实证 4 小时 558 条 warn，真信号被刷屏淹没）。
@@ -758,6 +763,7 @@ void ResetAutoState()
     g_enemy_hp_value[0] = 0;
     g_enemy_hp_value[1] = 0;
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
+    g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
     ClearOneShotManual_();
     // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
@@ -1589,19 +1595,30 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     if (!mgr || !cm || !hero || side < 0 || side > 1) return false;
     const int status_turn = GetCurrentBattleTurn_(mgr);
     const int enemy_side = side ^ 1;
-    auto can_receive = [](_BattleStack_* st, int spell) -> bool {
-        if (!st || spell <= 0) return false;
-        BOOL8 ok = 0;
-        __try {
-            ok = FASTCALL_2(BOOL8, 0x4477A0, spell, st);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        return ok != 0;
-    };
     const StatusProfileFields& status = g_status[g_active_profile];
     // 补状态阈值（玩家可改，默认 1）：剩余回合 ≤ 它才补。
     const int refresh_turns = status.refresh_turns > 0
         ? status.refresh_turns : H3AutoPolicy::kStatusRefreshTurns;
+    // 每槽先过一遍英雄等级：没学/等级不足的法术整槽记 -1（不占用
+    // 本轮选择名额，否则未学的 0 会每回合挤掉真正该补的法术）。
+    int expertise_of[H3AutoPolicy::kStatusSlotCapacity] = {};
+    for (int i = 0; i < status.slot_count && i < H3AutoPolicy::kStatusSlotCapacity;
+            ++i) {
+        const int spell = status.slots[i];
+        if (spell <= 0 || spell >= 81) continue;
+        if (g_status_immune_mask & (1ULL << spell)) continue;
+        __try {
+            expertise_of[i] = hero->GetSpellExpertise(spell, cm->specialTerrain);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     int durations[H3AutoPolicy::kStatusSlotCapacity] = {};
+    // 诊断摘要：每槽在全部存活队上的最紧值（-1 没队能选/已跳过，
+    // 0 有队未带，>0 全都带着剩 N 回合）。
+    int min_dur[H3AutoPolicy::kStatusSlotCapacity] = {};
+    for (int i = 0; i < H3AutoPolicy::kStatusSlotCapacity; ++i) {
+        durations[i] = -1;
+        min_dur[i] = 99;
+    }
     int best_slot = -1;
     int best_index = -1;
     int best_duration = 99;
@@ -1611,18 +1628,22 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         for (int i = 0; i < status.slot_count; ++i) {
             const int spell = status.slots[i];
             // 减速打敌方，不拿己方部队的持续时间参与增益选择。
-            // 剩余回合直接读 active_spell_duration：0x4477A0 首句就是
-            // 「已带该效果(duration!=0) → 不可接受」，拿它当门卫会把
-            // 正在保持中的 buff 全判成 -1，只剩彻底掉光的才补。
-            // 未带(0)才问 0x4477A0：可上(免疫判定过)算 0 最紧迫，
-            // 不可上算 -1 排除。
+            // 剩余回合直接读 active_spell_duration：>0 = 已带；
+            // 未带记 0（最紧迫）。不拿 0x4477A0 当门卫——它底层是
+            // AI 施法价值评估（0x5A83A0 返回值 > 阈值才算"可接受"），
+            // 士气/幸运类法术（欢欣鼓舞 49 等）AI 权重≈0，原版 AI 从
+            // 不施，会被永久判 -1（2026-10-05 玩家报"添加了欢欣鼓舞
+            // 但没放"即此）。免疫兜底改在施后验证：施放后目标侧没
+            // 有任一队 duration>0 视为全免疫，置 g_status_immune_mask
+            // 本场跳过（防每回合无效重施）。
             durations[i] = -1;
             if (spell > 0 && spell < 81
-                    && spell != H3AutoPolicy::kSlowSpellId) {
+                    && spell != H3AutoPolicy::kSlowSpellId
+                    && expertise_of[i] > 0) {
                 const int dur = st->active_spell_duration[spell];
-                durations[i] = dur > 0 ? dur
-                    : (can_receive(st, spell) ? 0 : -1);
+                durations[i] = dur > 0 ? dur : 0;
             }
+            if (durations[i] < min_dur[i]) min_dur[i] = durations[i];
         }
         const int index = H3AutoPolicy::ChooseBuffToRefresh(
             durations, status.slot_count, refresh_turns);
@@ -1649,10 +1670,14 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         int enemy_durations[21] = {};
         int enemy_hexes[21] = {};
+        const bool slow_masked =
+            (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0;
         for (int slot = 0; slot < 21; ++slot) {
             _BattleStack_* st = &mgr->stack[enemy_side][slot];
-            enemy_durations[slot] = (want_slow && st && st->count_current > 0
-                    && can_receive(st, H3AutoPolicy::kSlowSpellId))
+            // 同增益分支：不问 AI 价值，直接读剩余回合（0=未带）；
+            // 施后验证全免疫才置掩码跳过。
+            enemy_durations[slot] = (want_slow && !slow_masked
+                    && st && st->count_current > 0)
                 ? st->active_spell_duration[H3AutoPolicy::kSlowSpellId] : -1;
             enemy_hexes[slot] = 0;
         }
@@ -1676,9 +1701,19 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         __try {
             if (cm) cas_now = cm->currentActiveSide;
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        LogDebug("[Status] slow branch want=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d",
+        // 诊断摘要：各增益槽在全部己方存活队上的最紧剩余回合
+        // （-1=没学/已跳过/没队可打，0=有队未带，>0=全带着剩 N）。
+        char buffs[80] = "";
+        for (int i = 0; i < status.slot_count
+                && i < H3AutoPolicy::kStatusSlotCapacity; ++i) {
+            char one[12];
+            _snprintf(one, sizeof(one), "%s%d", i ? "," : "",
+                min_dur[i] == 99 ? -1 : min_dur[i]);
+            strcat_s(buffs, sizeof(buffs), one);
+        }
+        LogDebug("[Status] slow branch want=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d buffs=[%s]",
             want_slow ? 1 : 0, expertise, spell_id, refresh_turns, status_turn,
-            cas_now, slow_low, slow_min == 99 ? -1 : slow_min);
+            cas_now, slow_low, slow_min == 99 ? -1 : slow_min, buffs);
         if (expertise < 3) return false;
     }
     // 保持状态列表里的法术都是全体魔法，不指定目标格。
@@ -1712,6 +1747,33 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     LogInfo("[Status] cast done spell=%d mana=%d->%d casted=%d->%d(game=%d mark=1)",
         spell_id, st_mana_before, GetHeroMana_(mgr, side), st_casted_before,
         GetHeroCasted_(mgr, side), casted_by_game);
+    // 施后免疫验证（代替原 0x4477A0 门卫）：群体施放后目标侧没有任何
+    // 存活队 duration>0（全免疫/全被抵抗，如亡灵队 vs 士气法术）时置
+    // 掩码本场跳过，防止每回合无效重施烧法力。部分免疫（混合部队）不
+    // 受影响——有任一队吃到就继续正常维护。CastSpell→ApplySpell 同
+    // 步写 duration（casted/法力也是同步读的），这里立即可见。
+    {
+        const int check_side =
+            spell_id == H3AutoPolicy::kSlowSpellId ? enemy_side : side;
+        bool any_received = false;
+        __try {
+            for (int slot = 0; slot < 21; ++slot) {
+                _BattleStack_* st = &mgr->stack[check_side][slot];
+                if (st && st->count_current > 0
+                        && st->active_spell_duration[spell_id] > 0) {
+                    any_received = true;
+                    break;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            any_received = true; // 读不稳时不置掩码（宁重试勿误杀）
+        }
+        if (!any_received) {
+            g_status_immune_mask |= 1ULL << spell_id;
+            LogInfo("[Status] spell=%d 施放后无任何目标生效（全免疫/全抵抗），本场跳过",
+                spell_id);
+        }
+    }
     return true;
 }
 
