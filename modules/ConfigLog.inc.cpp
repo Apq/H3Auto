@@ -564,6 +564,13 @@ static bool ParseStatusJson_(const BattleJson& obj, StatusProfileFields* status)
     *status = MakeDefaultStatusFields();
     if (!obj.is_object()) return true;
     status->slow = JsonInt_(obj, "slow", 0) != 0;
+    // 补状态阈值：缺省（旧记录）= 默认 1，坏数据回默认（与 slow/buffs
+    // 同为宽容读；缺省值与旧行为完全一致）。
+    const int refresh = JsonInt_(obj, "refreshTurns",
+        H3AutoPolicy::kStatusRefreshTurns);
+    status->refresh_turns = (refresh >= 1
+        && refresh <= H3AutoPolicy::kStatusRefreshTurnsMax)
+        ? refresh : H3AutoPolicy::kStatusRefreshTurns;
     if (!obj.contains("buffs") || !obj["buffs"].is_array()) return true;
     int count = 0;
     for (const BattleJson& item : obj["buffs"]) {
@@ -581,7 +588,8 @@ static BattleJson StatusToJson_(const StatusProfileFields& status)
     BattleJson buffs = BattleJson::array();
     for (int i = 0; i < status.slot_count && i < kStatusSlotCapacity; ++i)
         if (status.slots[i] > 0) buffs.push_back(status.slots[i]);
-    return {{"buffs", buffs}, {"slow", status.slow ? 1 : 0}};
+    return {{"buffs", buffs}, {"slow", status.slow ? 1 : 0},
+        {"refreshTurns", status.refresh_turns}};
 }
 
 static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],

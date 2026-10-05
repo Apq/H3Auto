@@ -78,6 +78,12 @@ static bool s_mana_th_editing = false;
 static char s_mana_th_text[8] = {};        // 最多 5 位 + 结束符
 static int  s_mana_th_caret = 0;
 static DWORD s_mana_th_caret_tick = 0;
+
+// 保持状态页「剩余回合≤N 时补」阈值（方案级，1..9 默认 1）。
+static bool s_status_th_editing = false;
+static char s_status_th_text[8] = {};      // 最多 1 位 + 结束符
+static int  s_status_th_caret = 0;
+static DWORD s_status_th_caret_tick = 0;
 static const int STOP_TURNS_MAX_DIGITS = 3; // 输入上限 3 位；提交截到 999
 static char s_status_text[512] = {};
 static DWORD s_status_until = 0;
@@ -721,6 +727,31 @@ static void CancelManaThEdit_()
     s_mana_th_caret = 0;
 }
 
+// 补状态阈值录入提交：空=1（下限即默认，无 0 语义——0 会导致永不补），
+// 钳 1..9；写回当前方案状态草稿。
+static void CommitStatusThEdit_()
+{
+    int value = 0;
+    for (int i = 0; s_status_th_text[i]; ++i)
+        value = value * 10 + s_status_th_text[i] - '0';
+    if (value < 1) value = 1;
+    if (value > H3AutoPolicy::kStatusRefreshTurnsMax)
+        value = H3AutoPolicy::kStatusRefreshTurnsMax;
+    s_p.draft_status[s_p.selected_profile].refresh_turns = value;
+    s_status_th_editing = false;
+    s_status_th_text[0] = 0;
+    s_status_th_caret = 0;
+    LogInfo("[Panel] 补状态阈值=%d (方案%d)", value,
+        s_p.selected_profile + 1);
+}
+
+static void CancelStatusThEdit_()
+{
+    s_status_th_editing = false;
+    s_status_th_text[0] = 0;
+    s_status_th_caret = 0;
+}
+
 // ===== 召唤页（PAGE_SUMMON）控件状态 =====
 // 三个下拉（法术/条件组合/召唤物行动）悬停高亮；法术下拉选项 0..4（自动+四系）。
 static bool s_summon_spell_dd_open = false;
@@ -1195,6 +1226,7 @@ static void SwitchPanelPage_(int page)
     if (page < 0 || page >= PAGE_COUNT || page == s_p.active_page) return;
     if (s_stop_turns_editing) CommitStopTurnsEdit_();
     if (s_mana_th_editing) CommitManaThEdit_();
+    if (s_status_th_editing) CommitStatusThEdit_(); // 跨页收尾
     CommitSummonNumEdit_();        // 召唤页阈值录入跨页收尾
     CloseSummonDropdowns_();
     PanelCommitAllProtectCountEdits_();
@@ -1216,6 +1248,7 @@ static void SelectProfile_(int profile)
     SaveCurrentCellsToDraft_();
     if (s_stop_turns_editing) CommitStopTurnsEdit_();
     if (s_mana_th_editing) CommitManaThEdit_(); // 魔力阈值属于旧编号
+    if (s_status_th_editing) CommitStatusThEdit_(); // 补状态阈值属于旧编号
     CommitSummonNumEdit_();        // 召唤阈值属于旧编号：切换前提交
     CloseSummonDropdowns_();
     s_p.selected_profile = profile;
@@ -1417,6 +1450,7 @@ void CloseSettingsPanel()
     s_battle_dd_hover = -1;
     if (s_stop_turns_editing) CancelStopTurnsEdit_();
     if (s_mana_th_editing) CancelManaThEdit_();
+    if (s_status_th_editing) CancelStatusThEdit_();
     CancelSummonNumEdit_();
     CloseSummonDropdowns_();
     PanelCancelAllProtectCountEdits_();
@@ -1840,6 +1874,42 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
+    // 补状态阈值录入中：与敌方魔力阈值同款（点外提交、点内按光标定位）。
+    if (s_status_th_editing && (raw_command == 8 || raw_command == 16)) {
+        if (!PointInRect_(px, py, STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+                STATUS_TH_BOX_W, STATUS_TH_ROW_H) && raw_command == 16) {
+            CommitStatusThEdit_();
+            DrawPanelToBuffer_();
+        } else if (raw_command == 8
+            && PointInRect_(px, py, STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+                STATUS_TH_BOX_W, STATUS_TH_ROW_H)) {
+            H3Font* fnt = GetSmallFont();
+            const int text_x = STATUS_TH_BOX_X + 8; // 与绘制端一致
+            const int len = (int)strlen(s_status_th_text);
+            int best = len, best_dist = 0x7FFFFFFF;
+            for (int i = 0; i <= len; ++i) {
+                char prefix[8] = {};
+                if (i > 0) memcpy(prefix, s_status_th_text, i);
+                const int bx = text_x
+                    + (fnt ? fnt->GetMaxLineWidth(prefix) : 0);
+                int dist = px - bx;
+                if (dist < 0) dist = -dist;
+                if (dist < best_dist) { best_dist = dist; best = i; }
+            }
+            if (best != s_status_th_caret) {
+                s_status_th_caret = best;
+                s_status_th_caret_tick = GetTickCount();
+                DrawPanelToBuffer_();
+            }
+        }
+        if (raw_command == 16 && PanelAnyProtectCountEditing_()
+            && !s_cnt_lb_in_box) {
+            PanelCommitAllProtectCountEdits_();
+            DrawPanelToBuffer_();
+        }
+        return;
+    }
+
     // 召唤页阈值录入中：与停止回合同款（点外提交、点内按光标定位）。
     if (s_summon_edit_which != SUMMON_EDIT_NONE
         && (raw_command == 8 || raw_command == 16)) {
@@ -2193,6 +2263,23 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         if (s_p.active_page == PAGE_STATUS) {
             StatusProfileFields& status =
                 s_p.draft_status[s_p.selected_profile];
+            // 「剩余回合≤[框] 时补」阈值框：与其它数字框同款进入编辑
+            // （预填当前值、光标在末尾；已在编辑态点框内不重置）。
+            if (PointInRect_(px, py, STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+                    STATUS_TH_BOX_W, STATUS_TH_ROW_H)) {
+                if (!s_status_th_editing) {
+                    s_status_th_editing = true;
+                    const int cur = status.refresh_turns;
+                    s_status_th_text[0] = 0;
+                    if (cur > 0)
+                        _snprintf(s_status_th_text,
+                            sizeof(s_status_th_text), "%d", cur);
+                    s_status_th_caret = (int)strlen(s_status_th_text);
+                    s_status_th_caret_tick = GetTickCount();
+                    DrawPanelToBuffer_();
+                }
+                return;
+            }
             bool handled = false;
             for (int i = 0; i < status.slot_count && !handled; ++i) {
                 int x = 0, y = 0;
@@ -2546,7 +2633,7 @@ void HandlePanelInput_()
     // 前台判定失败），两条键盘路径都被掐死。GetAsyncKeyState 不依赖焦点，
     // 编辑态放行；滚屏/翻页仍受前台判定保护。
     if (!IsGameWindowForeground_() && !s_stop_turns_editing
-        && !s_mana_th_editing) {
+        && !s_mana_th_editing && !s_status_th_editing) {
         CancelPanelTransientInput_();
         previous_up_down = up_down;
         previous_down_down = down_down;

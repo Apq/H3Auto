@@ -210,6 +210,21 @@ static const int STATUS_ADD_W = STATUS_DD_W;
 static const int STATUS_ADD_H = STATUS_DD_H;
 static const int STATUS_ITEM_H = 18;
 
+// 保持状态页阈值行（状态槽 4×2 下方）：「剩余回合≤ [框] 时补」。
+// 框内数字 1..9（默认 1）：任一已配置增益/减速在任一队上剩余回合 ≤ 它
+// 就补施该法术（多达标取剩余最少者）。见 s_status_th_* 编辑态。
+static const int STATUS_TH_ROW_Y =
+    STATUS_ROW0_Y + 2 * STATUS_ROW_H + 10;
+static const int STATUS_TH_ROW_H = 18;
+static const int STATUS_TH_LABEL_W = 66;   // 「剩余回合≤」（5 字符）
+static const int STATUS_TH_BOX_W  = 36;
+static const int STATUS_TH_TAIL_W = 27;    // 「时补」
+static const int STATUS_TH_BOX_X  =
+    GRID_FRAME_X + STATUS_TH_LABEL_W + 2;
+static const int STATUS_TH_TAIL_X =
+    STATUS_TH_BOX_X + STATUS_TH_BOX_W + 2;
+static const int STATUS_TH_MAX_DIGITS = 1; // 1..9
+
 // 召唤页说明/启用文案已外置（UiTexts panel.summon_enable 等）。
 
 // 硬编码默认标签（INI 加载失败时使用）

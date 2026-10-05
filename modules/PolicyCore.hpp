@@ -158,20 +158,26 @@ inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
         || (spell_flags & kSpellFlagExpertMass) != 0;
 }
 static constexpr int kSlowSpellId = 54;
+// 补状态阈值默认值：剩余回合 ≤ 该值才补（阈值本体在
+// StatusProfileFields.refresh_turns，玩家可改）。
 static constexpr int kStatusRefreshTurns = 1;
+static constexpr int kStatusRefreshTurnsMax = 9;
 static constexpr int kStatusSlotCapacity = 8;
 
 // 保持状态是方案级设置，不挂在单支部队上。
 // slots 存已选法术 id；0 表示空槽。slow 单独开关，只在专家群体时生效。
+// refresh_turns：补状态阈值，剩余回合 ≤ 它才补（1..kStatusRefreshTurnsMax）。
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
     int slot_count;
     int slow;
+    int refresh_turns;
 };
 
 inline StatusProfileFields MakeDefaultStatusFields()
 {
     StatusProfileFields fields = {};
+    fields.refresh_turns = kStatusRefreshTurns;
     return fields;
 }
 
@@ -181,14 +187,17 @@ struct StatusMaintainChoice {
     int mass;       // 1 = 专家群体，目标格只作施法锚点
 };
 
-// durations[i] 是 spell_ids[i] 在该队上的剩余回合。
-// 只补 ≤ kStatusRefreshTurns 的；全是 -1 表示未勾选。
-inline int ChooseBuffToRefresh(const int* durations, int count)
+// durations[i] 是 spell_ids[i] 在该队上的剩余回合：>0 = 已带（直接读），
+// 0 = 未带但可上（视为最紧迫），-1 = 未选/不可上（免疫/英雄不可施）。
+// refresh_turns：只补 ≤ 该值的；多个达标取剩余最少者（并列取靠前者）。
+inline int ChooseBuffToRefresh(const int* durations, int count,
+    int refresh_turns)
 {
     if (!durations || count <= 0) return -1;
+    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
     int best = -1;
     for (int i = 0; i < count; ++i) {
-        if (durations[i] < 0 || durations[i] > kStatusRefreshTurns) continue;
+        if (durations[i] < 0 || durations[i] > refresh_turns) continue;
         if (best < 0 || durations[i] < durations[best]) best = i;
     }
     return best;
@@ -196,21 +205,23 @@ inline int ChooseBuffToRefresh(const int* durations, int count)
 
 // 敌方减速：己方必须是专家群体。enemy_durations 覆盖全部存活敌方。
 // 语义 A（2026-10-05 用户定）：群体迟缓按「全体覆盖」算达标——敌方已
-// 有任意一队带迟缓 buff（剩余 > kStatusRefreshTurns）就不再施，只有
+// 有任意一队带迟缓 buff（剩余 > refresh_turns）就不再施，只有
 // 敌方没有任何一队被覆盖时才施全群体。理由：敌方可能有抵抗术，部分
 // 命中是常态，若按「任一队缺失即补」会在被抵抗后连续多回合重复施放，
 // 挤占一回合一次的施法位与魔力；被抵抗的队留到全体 buff 将断时随群
 // 体一起重新覆盖。-1 表示该队不存在/免疫，不参与覆盖判定。
 inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
-    const int* enemy_durations, const int* enemy_hexes, int enemy_count)
+    const int* enemy_durations, const int* enemy_hexes, int enemy_count,
+    int refresh_turns)
 {
     StatusMaintainChoice choice = {-1, -1, 0};
     if (!expert_mass || !enemy_durations || !enemy_hexes || enemy_count <= 0)
         return choice;
+    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
     int best = -1;
     for (int i = 0; i < enemy_count; ++i) {
         if (enemy_durations[i] < 0) continue;      // 不存在/免疫：跳过
-        if (enemy_durations[i] > kStatusRefreshTurns)
+        if (enemy_durations[i] > refresh_turns)
             return choice;                         // 已有覆盖：达标，不再施
         if (best < 0 || enemy_durations[i] < enemy_durations[best]) best = i;
     }

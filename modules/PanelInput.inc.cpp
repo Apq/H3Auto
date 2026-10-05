@@ -78,6 +78,9 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             } else if (s_mana_th_editing) {
                 CancelManaThEdit_();
                 DrawPanelToBuffer_();
+            } else if (s_status_th_editing) {
+                CancelStatusThEdit_();
+                DrawPanelToBuffer_();
             } else if (PanelAnyProtectCountEditing_()) {
                 PanelCancelAllProtectCountEdits_();
                 DrawPanelToBuffer_();
@@ -91,10 +94,12 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         }
         if (wParam == VK_RETURN
             && (s_stop_turns_editing || s_mana_th_editing
+                || s_status_th_editing
                 || PanelAnyProtectCountEditing_()
                 || s_summon_edit_which != SUMMON_EDIT_NONE)) {
             if (s_stop_turns_editing) CommitStopTurnsEdit_();
             if (s_mana_th_editing) CommitManaThEdit_();
+            if (s_status_th_editing) CommitStatusThEdit_();
             CommitSummonNumEdit_();
             PanelCommitAllProtectCountEdits_();
             DrawPanelToBuffer_();
@@ -221,6 +226,66 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 if (repeatable) {
                     s_mana_repeat_vk = wParam;
                     s_mana_repeat_tick = now;
+                }
+                DrawPanelToBuffer_();
+            }
+            if (changed || wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE
+                || IsDigitKey_(wParam))
+                return 1;
+        }
+        // 补状态阈值录入（保持状态页）：与敌方魔力阈值同款
+        // （钩子即时处理 + 首次重复延迟）；1 位数字（1..9）。
+        if (s_status_th_editing) {
+            static WPARAM s_stth_repeat_vk = 0;
+            static DWORD s_stth_repeat_tick = 0;
+            const DWORD now = GetTickCount();
+            const bool repeatable = wParam == VK_LEFT || wParam == VK_RIGHT
+                || wParam == VK_BACK || wParam == VK_DELETE;
+            const bool first = (lParam & 0x40000000) == 0;
+            if (repeatable && !first) {
+                const DWORD gap = (s_stth_repeat_vk == wParam)
+                    ? (DWORD)30 : (DWORD)400;
+                if (now - s_stth_repeat_tick < gap)
+                    return 1;
+            }
+            const int len = (int)strlen(s_status_th_text);
+            bool changed = false;
+            if (wParam == VK_BACK && s_status_th_caret > 0) {
+                memmove(s_status_th_text + s_status_th_caret - 1,
+                    s_status_th_text + s_status_th_caret,
+                    len - s_status_th_caret + 1);
+                --s_status_th_caret;
+                changed = true;
+            } else if (wParam == VK_DELETE && s_status_th_caret < len) {
+                memmove(s_status_th_text + s_status_th_caret,
+                    s_status_th_text + s_status_th_caret + 1,
+                    len - s_status_th_caret);
+                changed = true;
+            } else if (wParam == VK_LEFT && s_status_th_caret > 0) {
+                --s_status_th_caret;
+                changed = true;
+            } else if (wParam == VK_RIGHT && s_status_th_caret < len) {
+                ++s_status_th_caret;
+                changed = true;
+            } else if (IsDigitKey_(wParam)) {
+                const int d = DigitFromVk_(wParam);
+                if (d >= 0 && len < STATUS_TH_MAX_DIGITS
+                    && s_status_th_caret <= len) {
+                    memmove(s_status_th_text + s_status_th_caret + 1,
+                        s_status_th_text + s_status_th_caret,
+                        len - s_status_th_caret + 1);
+                    s_status_th_text[s_status_th_caret] =
+                        static_cast<char>('0' + d);
+                    ++s_status_th_caret;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                s_status_th_caret_tick = now;
+                if (repeatable) {
+                    s_stth_repeat_vk = wParam;
+                    s_stth_repeat_tick = now;
                 }
                 DrawPanelToBuffer_();
             }

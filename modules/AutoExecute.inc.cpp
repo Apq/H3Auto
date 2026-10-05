@@ -1598,6 +1598,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         return ok != 0;
     };
     const StatusProfileFields& status = g_status[g_active_profile];
+    // 补状态阈值（玩家可改，默认 1）：剩余回合 ≤ 它才补。
+    const int refresh_turns = status.refresh_turns > 0
+        ? status.refresh_turns : H3AutoPolicy::kStatusRefreshTurns;
     int durations[H3AutoPolicy::kStatusSlotCapacity] = {};
     int best_slot = -1;
     int best_index = -1;
@@ -1608,13 +1611,21 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         for (int i = 0; i < status.slot_count; ++i) {
             const int spell = status.slots[i];
             // 减速打敌方，不拿己方部队的持续时间参与增益选择。
-            durations[i] = (spell > 0 && spell < 81
-                    && spell != H3AutoPolicy::kSlowSpellId
-                    && can_receive(st, spell))
-                ? st->active_spell_duration[spell] : -1;
+            // 剩余回合直接读 active_spell_duration：0x4477A0 首句就是
+            // 「已带该效果(duration!=0) → 不可接受」，拿它当门卫会把
+            // 正在保持中的 buff 全判成 -1，只剩彻底掉光的才补。
+            // 未带(0)才问 0x4477A0：可上(免疫判定过)算 0 最紧迫，
+            // 不可上算 -1 排除。
+            durations[i] = -1;
+            if (spell > 0 && spell < 81
+                    && spell != H3AutoPolicy::kSlowSpellId) {
+                const int dur = st->active_spell_duration[spell];
+                durations[i] = dur > 0 ? dur
+                    : (can_receive(st, spell) ? 0 : -1);
+            }
         }
         const int index = H3AutoPolicy::ChooseBuffToRefresh(
-            durations, status.slot_count);
+            durations, status.slot_count, refresh_turns);
         if (index >= 0 && durations[index] < best_duration) {
             best_duration = durations[index];
             best_index = index;
@@ -1622,8 +1633,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         }
     }
     if (best_index >= 0)
-        LogDebug("[Status] buff pick spell=%d slot=%d remain=%d turn=%d",
-            status.slots[best_index], best_slot, best_duration, status_turn);
+        LogDebug("[Status] buff pick spell=%d slot=%d remain=%d th=%d turn=%d",
+            status.slots[best_index], best_slot, best_duration, refresh_turns,
+            status_turn);
     int spell_id = best_index >= 0 ? status.slots[best_index] : -1;
     (void)best_slot;
     if (spell_id < 0) {
@@ -1646,15 +1658,16 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         }
         const H3AutoPolicy::StatusMaintainChoice slow =
             H3AutoPolicy::ChooseSlowTarget(
-                expertise >= 3, enemy_durations, enemy_hexes, 21);
+                expertise >= 3, enemy_durations, enemy_hexes, 21,
+                refresh_turns);
         spell_id = slow.spell_id;
         // 实锤快照：cas=施法前 currentActiveSide；slow_low/min=敌方迟缓
-        // 剩余时长 ≤1 的队数与最小值（-1 视为无/免疫，不参与）。
+        // 剩余时长 ≤阈值 的队数与最小值（-1 视为无/免疫，不参与）。
         int slow_low = 0;
         int slow_min = 99;
         for (int q = 0; q < 21; ++q) {
             if (enemy_durations[q] >= 0
-                    && enemy_durations[q] <= H3AutoPolicy::kStatusRefreshTurns) {
+                    && enemy_durations[q] <= refresh_turns) {
                 ++slow_low;
                 if (enemy_durations[q] < slow_min) slow_min = enemy_durations[q];
             }
@@ -1663,9 +1676,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         __try {
             if (cm) cas_now = cm->currentActiveSide;
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        LogDebug("[Status] slow branch want=%d exp=%d pick=%d turn=%d cas=%d slow_low=%d slow_min=%d",
-            want_slow ? 1 : 0, expertise, spell_id, status_turn, cas_now,
-            slow_low, slow_min == 99 ? -1 : slow_min);
+        LogDebug("[Status] slow branch want=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d",
+            want_slow ? 1 : 0, expertise, spell_id, refresh_turns, status_turn,
+            cas_now, slow_low, slow_min == 99 ? -1 : slow_min);
         if (expertise < 3) return false;
     }
     // 保持状态列表里的法术都是全体魔法，不指定目标格。
@@ -1821,6 +1834,10 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (st.slot_count > H3AutoPolicy::kStatusSlotCapacity)
             st.slot_count = H3AutoPolicy::kStatusSlotCapacity;
         st.slow = st.slow ? 1 : 0;
+        // 补状态阈值钳制（面板已钳，此处兜底：草稿来源不可信原则）。
+        if (st.refresh_turns < 1
+                || st.refresh_turns > H3AutoPolicy::kStatusRefreshTurnsMax)
+            st.refresh_turns = H3AutoPolicy::kStatusRefreshTurns;
         g_status[p] = st;
     }
     g_active_profile = active_profile;

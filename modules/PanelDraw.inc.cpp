@@ -601,6 +601,13 @@ static const char* PanelTipAt_(int px, int py)
                 && py >= SUMMON_NOTE_Y && py < SUMMON_NOTE_Y + SUMMON_NOTE_H)
                 return T("panel.summon_note");
         }
+        // 保持状态页专属控件 tips（阈值行）。
+        if (s_p.active_page == PAGE_STATUS
+            && px >= GRID_FRAME_X
+            && px < STATUS_TH_TAIL_X + STATUS_TH_TAIL_W
+            && py >= STATUS_TH_ROW_Y - 2
+            && py < STATUS_TH_ROW_Y + STATUS_TH_ROW_H + 2)
+            return T("tips.status_th");
         for (const P& t : kPageTips) {
             if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h)
                 return T(t.k);
@@ -1089,6 +1096,57 @@ static void DrawStatusPage_(H3LoadedPcx16* scr)
             s_p.status_add_armed, false);
         CellControl_DrawPlusButton(scr, x + (STATUS_ADD_W - 16) / 2,
             y + (STATUS_ADD_H - 16) / 2, 16, s_p.status_add_armed);
+    }
+
+    // 「剩余回合≤[框] 时补」阈值行（方案级 1..9 默认 1）：多个已配置
+    // 法术都保持，任一在任一队剩余 ≤ 阈值就补它（多达标取最少者）。
+    // 框与其它数字框同款（编辑态高亮底 + 左对齐 + 闪烁光标）。
+    DrawTxt(scr, small_font, T("panel.status_th_label"),
+        GRID_FRAME_X, STATUS_TH_ROW_Y, STATUS_TH_LABEL_W, STATUS_TH_ROW_H,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    {
+        char tnum[8] = {};
+        if (s_status_th_editing)
+            _snprintf(tnum, sizeof(tnum), "%s", s_status_th_text);
+        else
+            _snprintf(tnum, sizeof(tnum), "%d",
+                status.refresh_turns > 0 ? status.refresh_turns
+                    : H3AutoPolicy::kStatusRefreshTurns);
+        Fill(scr, STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+            STATUS_TH_BOX_W, STATUS_TH_ROW_H,
+            s_status_th_editing ? 104 : 74,
+            s_status_th_editing ? 70 : 52,
+            s_status_th_editing ? 28 : 24);
+        scr->DrawFrame(STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+            STATUS_TH_BOX_W, STATUS_TH_ROW_H,
+            (BYTE)210, (BYTE)170, (BYTE)72);
+        if (s_status_th_editing) {
+            const int text_x = STATUS_TH_BOX_X + 8;
+            DrawTxt(scr, small_font, tnum, text_x, STATUS_TH_ROW_Y,
+                STATUS_TH_BOX_W - 12, STATUS_TH_ROW_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            const bool tcaret_on =
+                ((GetTickCount() - s_status_th_caret_tick) / 500) % 2 == 0;
+            if (tcaret_on) {
+                char tprefix[8] = {};
+                const int tcaret = s_status_th_caret;
+                if (tcaret > 0)
+                    memcpy(tprefix, tnum, tcaret < 7 ? tcaret : 7);
+                const INT32 tprefix_w =
+                    small_font ? small_font->GetMaxLineWidth(tprefix) : 0;
+                Fill(scr, text_x + tprefix_w,
+                    STATUS_TH_ROW_Y + (STATUS_TH_ROW_H - 10) / 2, 2, 10,
+                    210, 170, 72); // 金色竖线光标
+            }
+        } else {
+            DrawTxt(scr, small_font, tnum, STATUS_TH_BOX_X, STATUS_TH_ROW_Y,
+                STATUS_TH_BOX_W, STATUS_TH_ROW_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+        }
+        DrawTxt(scr, small_font, T("panel.status_th_tail"),
+            STATUS_TH_TAIL_X, STATUS_TH_ROW_Y, STATUS_TH_TAIL_W,
+            STATUS_TH_ROW_H,
+            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 }
 

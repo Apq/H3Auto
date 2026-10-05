@@ -801,28 +801,45 @@ void TestProfileStoreRoundtrip()
     Check(ProjectEnemyTurnsLeft(10, 1000, 100, 9) == 1, "remaining turns round up");
 
     const int durations[] = {3, 1, -1, 0};
-    Check(ChooseBuffToRefresh(durations, 4) == 3,
+    Check(ChooseBuffToRefresh(durations, 4, 1) == 3,
         "buff refresh picks the shortest remaining duration");
-    Check(ChooseBuffToRefresh(durations, 2) == 1,
+    Check(ChooseBuffToRefresh(durations, 2, 1) == 1,
         "buff at one turn still refreshes");
     const int fresh[] = {2, 4};
-    Check(ChooseBuffToRefresh(fresh, 2) == -1,
+    Check(ChooseBuffToRefresh(fresh, 2, 1) == -1,
         "buff above one turn is not refreshed");
+    // 玩家可调阈值：阈值 3 时剩余 2/3 都达标，取最少者。
+    Check(ChooseBuffToRefresh(fresh, 2, 3) == 0,
+        "wider threshold refreshes the two-turn buff first");
+    Check(ChooseBuffToRefresh(fresh, 2, 2) == 0,
+        "threshold two refreshes the two-turn buff");
+    Check(ChooseBuffToRefresh(fresh, 2, 0) == -1,
+        "no buff qualifies above the threshold");
+    Check(ChooseBuffToRefresh(durations, 4, 0) == 3,
+        "missing buff at zero turns is the most urgent");
+    Check(MakeDefaultStatusFields().refresh_turns == 1,
+        "status refresh threshold defaults to one");
     // 语义 A：敌方已有任意一队带迟缓（剩余 >1）即达标，不再施全群体
     // （抵抗术场景下部分命中就算完成，避免连续回合补群体）。
     const int enemy_durations[] = {4, 1, 0};
     const int enemy_hexes[] = {10, 20, 30};
-    Check(ChooseSlowTarget(true, enemy_durations, enemy_hexes, 3).spell_id == -1,
+    Check(ChooseSlowTarget(true, enemy_durations, enemy_hexes, 3, 1).spell_id == -1,
         "slow: any covered enemy means no cast");
-    Check(ChooseSlowTarget(false, enemy_durations, enemy_hexes, 3).spell_id == -1,
+    Check(ChooseSlowTarget(false, enemy_durations, enemy_hexes, 3, 1).spell_id == -1,
         "slow without expert mass does nothing");
     const int uncovered[] = {1, 0, -1};
     const StatusMaintainChoice slow =
-        ChooseSlowTarget(true, uncovered, enemy_hexes, 3);
+        ChooseSlowTarget(true, uncovered, enemy_hexes, 3, 1);
     Check(slow.spell_id == 54 && slow.target_hex == 20 && slow.mass == 1,
         "slow: fully uncovered enemy side casts on the fewest-turns enemy");
-    Check(ChooseSlowTarget(true, uncovered, enemy_hexes, 0).spell_id == -1,
+    Check(ChooseSlowTarget(true, uncovered, enemy_hexes, 0, 1).spell_id == -1,
         "slow: no enemies means no cast");
+    // 阈值同步作用于减速覆盖判定：剩余 2 > 阈值 1 视为已覆盖。
+    const int covered2[] = {2, 0};
+    Check(ChooseSlowTarget(true, covered2, enemy_hexes, 2, 1).spell_id == -1,
+        "slow: two turns left above threshold one counts covered");
+    Check(ChooseSlowTarget(true, covered2, enemy_hexes, 2, 3).spell_id == 54,
+        "slow: wider threshold recasts at two turns left");
 }
 
 void TestSummonChannel()
