@@ -152,6 +152,10 @@ static bool s_result_cancel_armed = false;
 // 的过渡空窗被当成接受结果。
 static DWORD s_result_closed_since = 0;
 static const DWORD RESULT_CLOSE_GRACE_MS = 1500;
+// 取消已按但 BattleUI 迟迟不回（如结果窗上直接退出/读档）：总超时后按
+// 终局裁决。结果窗意图未裁决期间 UI_GONE 兜底退位（见 CheckAutoFight-
+// DialogClosed），本超时保证裁决必然发生、状态不会卡在 RESULT。
+static const DWORD RESULT_ABORT_TIMEOUT_MS = 8000;
 
 // 前向声明
 static void SetPanelScrollRow_(int row);
@@ -436,12 +440,24 @@ static void CheckBattleResultLifecycle_()
 
     if (battle_ui_exists) {
         s_result_closed_since = 0;
-    } else if (!s_result_accept_armed && !s_result_cancel_armed) {
+    } else {
+        // 窗口已消失：从消失时刻起统一计时（armed 与否都计，供总超时用）。
         const DWORD now = GetTickCount();
         if (s_result_closed_since == 0)
             s_result_closed_since = now;
-        if (now - s_result_closed_since < RESULT_CLOSE_GRACE_MS)
+        const bool armed =
+            s_result_accept_armed || s_result_cancel_armed;
+        // 未捕获到点击（键盘 ESC/回车关窗走这里）：短宽限防过渡空窗误判。
+        if (!armed && now - s_result_closed_since < RESULT_CLOSE_GRACE_MS)
             return;
+        // 取消已按：等 BattleUI 回来（权威重打信号）；总超时内不裁决。
+        if (s_result_cancel_armed
+            && now - s_result_closed_since < RESULT_ABORT_TIMEOUT_MS)
+            return;
+        // 超时仍未回来：战斗没有在重打，按终局（无战斗 UI 收场）裁决，
+        // 清掉 cancel_armed 让纯函数走 CLEAR 分支而非无限 WAIT。
+        if (s_result_cancel_armed)
+            s_result_cancel_armed = false;
     }
 
     const H3AutoPolicy::ResultLifecycleAction lifecycle_action =
@@ -542,8 +558,14 @@ static void CheckAutoFightDialogClosed()
     } else if (++s_battle_ui_missing_frames >= 3) {
         // 状态机事件源（S1/S4）：战斗 UI 消失兜底（读档/中途退出等未经结算）。
         // 重打宽限期内不视为兜底（UI 重建常超 3 帧，见重构步骤 S4.2）。
+        // 结果窗意图未裁决期间（s_saw_cpresult）兜底退位：玩家用键盘关
+        // 结果窗时点击捕捉不到，Life 层要等宽限/超时才裁决，此间 UI_GONE
+        // 抢跑会把状态推到 PEACE，随后 RESULT_RETRY/RESULT_ACCEPTED 被拒、
+        // 边动作丢失（重打后跟踪不重绑 → 全场 takeover mismatch）。
+        // 裁决必然发生：未捕获点击 1500ms 宽限、取消已按 8000ms 总超时。
         if ((InCombat_() || g_phase == BP_RESULT)
-            && GetTickCount() > g_ui_gone_grace_until)
+            && GetTickCount() > g_ui_gone_grace_until
+            && !s_saw_cpresult)
             SetPhase_(BP_ENDED, BE_BATTLE_UI_GONE);
         s_saw_explanation_dlg_in_battle = false;
         s_autofight_right_press_armed = false;

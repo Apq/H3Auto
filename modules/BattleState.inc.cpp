@@ -57,6 +57,13 @@ void SetPhase_(BattlePhase next, BattleEvent ev)
         { BP_COMBAT_OPEN,   BP_RESULT,        BE_RESULT_SHOWN },
         { BP_RESULT,        BP_COMBAT_CLOSED, BE_RESULT_RETRY },
         { BP_RESULT,        BP_ENDED,         BE_RESULT_ACCEPTED },
+        // UI_GONE 抢跑补边：结果窗意图事件到达晚于 UI_GONE 时状态已被推到
+        // PEACE，这两条边让重打/接受的边动作照样幂等补执行（玩家日志
+        // 2026-10-02：46 次重打/25 次接受被拒，重打后跟踪不重绑 → 全场
+        // takeover mismatch）。边动作按 ev 分发，from=PEACE 与 from=RESULT
+        // 走同一套（EnsureStackTrackingBound / 清方案），重复执行安全。
+        { BP_PEACE,         BP_COMBAT_CLOSED, BE_RESULT_RETRY },
+        { BP_PEACE,         BP_ENDED,         BE_RESULT_ACCEPTED },
         { BP_COMBAT_CLOSED, BP_ENDED,         BE_BATTLE_UI_GONE },
         { BP_COMBAT_OPEN,   BP_ENDED,         BE_BATTLE_UI_GONE },
         { BP_RESULT,        BP_ENDED,         BE_BATTLE_UI_GONE },  // 结算中读档/退出
