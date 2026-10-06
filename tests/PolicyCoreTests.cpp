@@ -1,5 +1,6 @@
 #include "../modules/PolicyCore.hpp"
 #include "../modules/CrashGuardCore.hpp"
+#include "../modules/PanelInputCore.hpp"
 
 #include <cstdlib>
 #include <initializer_list>
@@ -30,6 +31,33 @@ void CheckActions(int creature, bool ranged, bool artillery, bool firstAid,
     int i = 0;
     for (AutoActionKind action : expected)
         Check(actual[i++] == action, name);
+}
+
+void TestPanelItemOwnership()
+{
+    int dialog = 0, other_dialog = 0;
+    int first_item = 0, current_item = 0, recycled_resource_node = 0;
+    int* items[] = { &first_item, &current_item };
+    Check(PanelOwnsTrackedItem(&dialog, &dialog, items, 2, &current_item),
+        "current dialog owns tracked input blocker");
+    Check(PanelOwnsTrackedItem(&dialog, &dialog, items, 2, &first_item),
+        "owned item can be first in list");
+    Check(!PanelOwnsTrackedItem(&dialog, &dialog, items, 2, &recycled_resource_node),
+        "retry reused dialog address does not authorize old item writes");
+    Check(!PanelOwnsTrackedItem(&other_dialog, &dialog, items, 2, &current_item),
+        "different current dialog rejects tracked item");
+    Check(!PanelOwnsTrackedItem(nullptr, &dialog, items, 2, &current_item),
+        "missing current dialog rejects tracked item");
+    Check(!PanelOwnsTrackedItem(&dialog, nullptr, items, 2, &current_item),
+        "missing tracked dialog rejects item");
+    Check(!PanelOwnsTrackedItem(&dialog, &dialog, static_cast<int* const*>(nullptr),
+            2, &current_item), "missing owned list rejects item");
+    Check(!PanelOwnsTrackedItem(&dialog, &dialog, items, 0, &current_item),
+        "empty owned list rejects item");
+    Check(!PanelOwnsTrackedItem(&dialog, &dialog, items, 2,
+            static_cast<int*>(nullptr)), "missing tracked item rejects access");
+    Check(!PanelOwnsTrackedItem(&dialog, &dialog, items, 65537, &current_item),
+        "corrupt owned list count rejects access before scanning");
 }
 
 void TestPanelAdmission()
@@ -107,6 +135,86 @@ void TestBattleFingerprint()
     Check(ComputeBattleFingerprint(g) == fp, "count-zero slot ignored");
 }
 
+void TestForceFieldFields()
+{
+    const ForceFieldProfileFields def = MakeDefaultForceFieldFields();
+    Check(def.anchor_hex[0] == -1 && def.anchor_hex[1] == -1,
+        "force field defaults have two unset anchors");
+    ForceFieldProfileFields fields = def;
+    NormalizeForceFieldFields(&fields);
+    Check(fields.anchor_hex[0] == -1 && fields.anchor_hex[1] == -1,
+        "force field defaults normalize unchanged");
+    NormalizeForceFieldFields(nullptr);
+    const ForceFieldProfileFields inputs[] = {
+        {{86, 87}}, {{86, 86}}, {{-1, 87}}, {{0, 185}},
+        {{16, 17}}, {{185, 1}}, {{-9, 186}}, {{1, 170}},
+    };
+    const ForceFieldProfileFields expected[] = {
+        {{86, 87}}, {{86, -1}}, {{87, -1}}, {{185, -1}},
+        {{-1, -1}}, {{185, 1}}, {{-1, -1}}, {{1, -1}},
+    };
+    for (int i = 0; i < 8; ++i) {
+        fields = inputs[i];
+        NormalizeForceFieldFields(&fields);
+        Check(fields.anchor_hex[0] == expected[i].anchor_hex[0]
+                && fields.anchor_hex[1] == expected[i].anchor_hex[1],
+            "force field normalization removes duplicates and compacts anchors");
+        NormalizeForceFieldFields(&fields);
+        Check(fields.anchor_hex[0] == expected[i].anchor_hex[0]
+                && fields.anchor_hex[1] == expected[i].anchor_hex[1],
+            "force field normalization is idempotent");
+    }
+    for (int anchor = -2; anchor <= 187; ++anchor) {
+        const bool valid = anchor >= 1 && anchor <= 185
+            && anchor % 17 != 0 && anchor % 17 != 16;
+        fields = {{anchor, -1}};
+        NormalizeForceFieldFields(&fields);
+        Check(fields.anchor_hex[0] == (valid ? anchor : -1)
+                && fields.anchor_hex[1] == -1,
+            "force field first anchor normalizes battlefield borders and bounds");
+        fields = {{-1, anchor}};
+        NormalizeForceFieldFields(&fields);
+        Check(fields.anchor_hex[0] == (valid ? anchor : -1)
+                && fields.anchor_hex[1] == -1,
+            "force field second anchor normalizes and compacts into first slot");
+        Check(IsValidForceFieldAnchor(anchor) == valid,
+            "force field anchor validation matches normalized value");
+    }
+}
+
+void TestForceFieldSelection()
+{
+    const ForceFieldPresence states[] = {FF_UNKNOWN, FF_ABSENT, FF_PRESENT};
+    const ForceFieldProfileFields configurations[] = {
+        {{-1, -1}}, {{86, -1}}, {{-1, 87}}, {{86, 87}}, {{87, 86}},
+    };
+    for (const ForceFieldProfileFields& fields : configurations) {
+        for (ForceFieldPresence first : states) {
+            for (ForceFieldPresence second : states) {
+                const ForceFieldPresence presence[2] = {first, second};
+                const int expected = fields.anchor_hex[0] != -1 && first != FF_PRESENT
+                    ? fields.anchor_hex[0]
+                    : fields.anchor_hex[1] != -1 && second != FF_PRESENT
+                        ? fields.anchor_hex[1] : -1;
+                Check(SelectForceFieldAnchor(fields, presence) == expected,
+                    "force field selects first configured missing or unknown anchor");
+            }
+        }
+    }
+    const int invalid_anchors[] = {0, 16, 17, 33, 170, 186};
+    for (int anchor : invalid_anchors) {
+        const ForceFieldProfileFields fields = {{anchor, 87}};
+        for (ForceFieldPresence first : states) {
+            for (ForceFieldPresence second : states) {
+                const ForceFieldPresence presence[2] = {first, second};
+                Check(SelectForceFieldAnchor(fields, presence)
+                        == (second == FF_PRESENT ? -1 : 87),
+                    "force field skips invalid slot and returns anchor rather than slot index");
+            }
+        }
+    }
+}
+
 void TestBattleStoreRecord()
 {
     // 基准记录：方案 2 激活，方案 1 的 0 号槽有非默认动作。
@@ -119,6 +227,9 @@ void TestBattleStoreRecord()
     r1.summon[2].enabled = 1;
     r1.summon[2].count_th = 3;
     r1.summon[2].hp_th = 800;
+    for (int p = 0; p < 5; ++p)
+        r1.forcefield[p] = MakeDefaultForceFieldFields();
+    r1.forcefield[2] = {{86, 87}};
 
     // 完全相同（时间戳相同）→ 内容相同。
     BattleStoreRecord r2 = r1;
@@ -140,6 +251,17 @@ void TestBattleStoreRecord()
     Check(!BattleStoreRecordContentEquals(r1, r6), "stop turns change differs");
     BattleStoreRecord r7 = r1; r7.summon[2].hp_th = 801;
     Check(!BattleStoreRecordContentEquals(r1, r7), "summon field change differs");
+    for (int p = 0; p < 5; ++p) {
+        for (int slot = 0; slot < 2; ++slot) {
+            BattleStoreRecord changed = r1;
+            changed.forcefield[p].anchor_hex[slot] = 88;
+            Check(!BattleStoreRecordContentEquals(r1, changed),
+                "either force field anchor change differs in every profile");
+            changed.forcefield[p].anchor_hex[slot] = r1.forcefield[p].anchor_hex[slot];
+            Check(BattleStoreRecordContentEquals(r1, changed),
+                "restored force field anchor deduplicates in every profile");
+        }
+    }
 
     // 时间戳格式校验。
     Check(BattleStoreStampValid("20261004-164530"), "valid stamp");
@@ -1160,8 +1282,11 @@ void TestCrashGuardCore()
 
 int main()
 {
+    TestPanelItemOwnership();
     TestPanelAdmission();
     TestBattleFingerprint();
+    TestForceFieldFields();
+    TestForceFieldSelection();
     TestBattleStoreRecord();
     TestWarMachineActions();
     TestSelectorsAreIndependent();

@@ -122,18 +122,17 @@ static void DrawPanelButtons_(H3LoadedPcx16* destination)
 
 static void DrawMeleePickMarker_()
 {
-    if (!s_panel_hidden_for_pick || s_melee_pick_phase != 2
-        || !CellControl_HexValid(s_melee_pick_stand_hex))
-        return;
-
+    if (!s_panel_hidden_for_pick || s_forcefield_pick) return;
     H3CombatManager* mgr = GetCombatMgr();
     if (!mgr || !mgr->CCellShdPcx) return;
+    int marker_hex = s_melee_pick_phase == 2 ? s_melee_pick_stand_hex : -1;
+    if (!CellControl_HexValid(marker_hex)) return;
     __try {
         // 可见路径：画到 screenPcx16 + 后缓冲。
         // 绝不能 ShadeSquare/写 drawBuffer——那会污染战场离屏缓冲，
         // 结束拾取后的 Refresh 会把蓝标重新画出来。
         // 只脏 screen 层；结束时完整 Refresh 从干净 drawBuffer 重建即可撤销。
-        H3CombatSquare& sq = mgr->squares[s_melee_pick_stand_hex];
+        H3CombatSquare& sq = mgr->squares[marker_hex];
         int dlg_x = 0;
         int dlg_y = 0;
         if (mgr->dlg) {
@@ -187,14 +186,14 @@ static void DrawMeleePickMarker_()
         const bool blitted = BlitPcx16ToBackBuffer_(s_marker_tile, abs_x, abs_y);
 
         static int s_marker_log_hex = -1;
-        if (s_marker_log_hex != s_melee_pick_stand_hex) {
-            s_marker_log_hex = s_melee_pick_stand_hex;
+        if (!s_forcefield_pick && s_marker_log_hex != marker_hex) {
+            s_marker_log_hex = marker_hex;
             LogDebug("[Panel] melee marker draw hex=%d rel=(%d,%d) abs=(%d,%d) dlg=(%d,%d) screen=%d blt=%d",
                 s_melee_pick_stand_hex, (int)sq.left, (int)sq.top,
                 abs_x, abs_y, dlg_x, dlg_y, screen_ok ? 1 : 0, blitted ? 1 : 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogError("[Panel] melee marker draw exception hex=%d", s_melee_pick_stand_hex);
+        LogError("[Panel] pick marker draw exception hex=%d", marker_hex);
     }
 }
 
@@ -530,7 +529,9 @@ static const char* PanelTipAt_(int px, int py)
         const int ty = TAB_FIRST_Y + i * (TAB_ITEM_H + TAB_GAP);
         if (px >= TAB_X && px < TAB_X + TAB_ITEM_W
             && py >= ty && py < ty + TAB_ITEM_H)
-            return T(page == PAGE_ARMY ? "tips.tab_army" : "tips.tab_summon");
+            return T(page == PAGE_ARMY ? "tips.tab_army"
+                : page == PAGE_SUMMON ? "tips.tab_summon"
+                : page == PAGE_STATUS ? "tips.tab_status" : "tips.tab_tactics");
     }
     // 非部队页：只有方案级控件与共通按钮的 tip。
     if (s_p.active_page != PAGE_ARMY) {
@@ -601,6 +602,10 @@ static const char* PanelTipAt_(int px, int py)
                 && py >= SUMMON_NOTE_Y && py < SUMMON_NOTE_Y + SUMMON_NOTE_H)
                 return T("panel.summon_note");
         }
+        if (s_p.active_page == PAGE_STATUS
+            && PointInRect_(px, py, GRID_FRAME_X, FF_ROW_Y,
+                FF_LABEL_W + 6 + 2 * (FF_SLOT_W + FF_SLOT_GAP), FF_SLOT_H))
+            return T("tips.forcefield_pick");
         // 保持状态页专属控件 tips（阈值行）。
         if (s_p.active_page == PAGE_STATUS
             && px >= GRID_FRAME_X
@@ -959,6 +964,30 @@ static void DrawSummonCombo_(H3LoadedPcx16* scr, H3Font* small_font,
     CellControl_DrawArrow(scr, x + w - 14, y + h / 2 - 2, !open);
 }
 
+static void DrawForceFieldRow_(H3LoadedPcx16* scr)
+{
+    H3Font* font = GetSmallFont();
+    const ForceFieldProfileFields& ff = s_p.draft_forcefield[s_p.selected_profile];
+    DrawTxt(scr, font, T("panel.forcefield_label"),
+        GRID_FRAME_X, FF_ROW_Y, FF_LABEL_W, FF_SLOT_H,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    for (int i = 0; i < 2; ++i) {
+        const bool existing = ff.anchor_hex[i] >= 0;
+        if (!existing && i > 0 && ff.anchor_hex[i - 1] < 0) break;
+        const int x = FF_SLOT_X + i * (FF_SLOT_W + FF_SLOT_GAP);
+        CellControl_DrawButtonBg(scr, x, FF_ROW_Y, FF_SLOT_W, FF_SLOT_H, false, false);
+        if (existing) {
+            char label[12] = {};
+            CellControl_FormatPosition(label, sizeof(label), ff.anchor_hex[i]);
+            DrawTxt(scr, font, label, x + 1, FF_ROW_Y, FF_SLOT_W - 2, FF_SLOT_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+        } else {
+            CellControl_DrawPlusButton(scr, x + (FF_SLOT_W - 16) / 2,
+                FF_ROW_Y + (FF_SLOT_H - 16) / 2, 16, false);
+        }
+    }
+}
+
 static void DrawSummonPage_(H3LoadedPcx16* scr)
 {
     if (!scr) return;
@@ -1076,6 +1105,7 @@ static void DrawStatusPage_(H3LoadedPcx16* scr)
 {
     if (!scr) return;
     H3Font* small_font = GetSmallFont();
+    DrawForceFieldRow_(scr);
     DrawTxt(scr, small_font, T("panel.status_note"),
         GRID_FRAME_X, STATUS_NOTE_Y, GRID_FRAME_W, 18,
         (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
@@ -1302,6 +1332,7 @@ static void DrawPanelToBuffer_()
     } else if (s_p.active_page == PAGE_SUMMON) {
         // 召唤页：设置行 + 说明行 + 召唤物行动卡（无滚动条）。
         DrawSummonPage_(scr);
+
     } else if (s_p.active_page == PAGE_STATUS) {
         DrawStatusPage_(scr);
         if (s_status_dd_open >= 0) {

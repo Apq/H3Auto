@@ -1009,7 +1009,7 @@ static constexpr int PROFILE_STORE_RULE_FIELDS =
     + SPELL_SLOT_CAPACITY + 3;
 static constexpr int PROFILE_STORE_INTS = PROFILE_STORE_SLOTS * 2 + 1 + 7
     + (PROFILE_STORE_SLOTS + 1) * PROFILE_STORE_RULE_FIELDS;
-static constexpr int DEFAULT_STOP_TURNS = 10;
+static constexpr int DEFAULT_STOP_TURNS = 4;
 
 // 方案级召唤配置（随 H3AP9 方案存档）。保活与召唤同一条施法通道：
 // 保活优先，无人可救且 enabled 时才走召唤。
@@ -1039,6 +1039,50 @@ inline SummonProfileFields MakeDefaultSummonFields()
     return fields;
 }
 
+// 力盾只随战斗 JSON 存档，不进入 H3AP9 独立方案文本。
+struct ForceFieldProfileFields {
+    int anchor_hex[2];
+};
+
+inline ForceFieldProfileFields MakeDefaultForceFieldFields()
+{
+    ForceFieldProfileFields fields = {{-1, -1}};
+    return fields;
+}
+
+inline bool IsValidForceFieldAnchor(int anchor_hex)
+{
+    return anchor_hex >= 1 && anchor_hex <= 185
+        && anchor_hex % 17 != 0 && anchor_hex % 17 != 16;
+}
+
+inline void NormalizeForceFieldFields(ForceFieldProfileFields* fields)
+{
+    if (!fields) return;
+    for (int i = 0; i < 2; ++i)
+        if (!IsValidForceFieldAnchor(fields->anchor_hex[i])) fields->anchor_hex[i] = -1;
+    if (fields->anchor_hex[0] == fields->anchor_hex[1]) fields->anchor_hex[1] = -1;
+    if (fields->anchor_hex[0] == -1 && fields->anchor_hex[1] != -1) {
+        fields->anchor_hex[0] = fields->anchor_hex[1];
+        fields->anchor_hex[1] = -1;
+    }
+}
+
+enum ForceFieldPresence {
+    FF_UNKNOWN = -1,
+    FF_ABSENT = 0,
+    FF_PRESENT = 1,
+};
+
+inline int SelectForceFieldAnchor(const ForceFieldProfileFields& fields,
+    const ForceFieldPresence presence[2])
+{
+    for (int i = 0; i < 2; ++i)
+        if (IsValidForceFieldAnchor(fields.anchor_hex[i]) && presence[i] != FF_PRESENT)
+            return fields.anchor_hex[i];
+    return -1;
+}
+
 // ======================================================================
 // 战斗存档记录（§17 智能存读档）：一场战斗一条 = 时间戳 + 激活方案 +
 // 5 套完整方案。存档文件 <指纹>.json 按时间序保存 ≤30 条（集成层
@@ -1051,6 +1095,7 @@ struct BattleStoreRecord {
     uint16_t stop_turns[5];
     SummonProfileFields summon[5];
     StatusProfileFields status[5];
+    ForceFieldProfileFields forcefield[5];
 };
 
 // 两条记录内容是否完全相同（忽略时间戳）：「确定」时与文件里最后一
@@ -1073,6 +1118,9 @@ inline bool BattleStoreRecordContentEquals(const BattleStoreRecord& a,
             return false;
         if (!bytes_equal(&a.status[p], &b.status[p], sizeof(StatusProfileFields)))
             return false;
+        for (int i = 0; i < 2; ++i)
+            if (a.forcefield[p].anchor_hex[i] != b.forcefield[p].anchor_hex[i])
+                return false;
         if (!bytes_equal(a.rules[p], b.rules[p], sizeof(a.rules[p])))
             return false;
     }
@@ -1576,6 +1624,15 @@ using H3AutoPolicy::AutoTargetRule;
 using H3AutoPolicy::AutoStackRule;
 using H3AutoPolicy::SummonProfileFields;
 using H3AutoPolicy::MakeDefaultSummonFields;
+using H3AutoPolicy::ForceFieldProfileFields;
+using H3AutoPolicy::MakeDefaultForceFieldFields;
+using H3AutoPolicy::IsValidForceFieldAnchor;
+using H3AutoPolicy::NormalizeForceFieldFields;
+using H3AutoPolicy::ForceFieldPresence;
+using H3AutoPolicy::FF_UNKNOWN;
+using H3AutoPolicy::FF_ABSENT;
+using H3AutoPolicy::FF_PRESENT;
+using H3AutoPolicy::SelectForceFieldAnchor;
 using H3AutoPolicy::BattleStoreRecord;
 using H3AutoPolicy::BattleStoreRecordContentEquals;
 using H3AutoPolicy::BattleStoreStampValid;

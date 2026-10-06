@@ -73,11 +73,16 @@ enum {
     PAGE_STATUS  = 2,   // 保持状态：友方增益列表 + 敌方减速
     PAGE_COUNT   = 3,
 };
-// Tab 显示：部队、召唤、保持状态。
 static const int TAB_VISIBLE_COUNT = 3;
 static const int kTabOrder[TAB_VISIBLE_COUNT] = {
     PAGE_ARMY, PAGE_SUMMON, PAGE_STATUS,
 };
+static const int FF_ROW_Y = 108;
+static const int FF_LABEL_W = 80;
+static const int FF_SLOT_X = GRID_FRAME_X + FF_LABEL_W + 6;
+static const int FF_SLOT_W = 40;
+static const int FF_SLOT_H = 18;
+static const int FF_SLOT_GAP = 6;
 static const int TAB_X       = 17;   // Tab 条左缘
 static const int TAB_W       = 108;  // Tab 条总宽
 static const int TAB_ITEM_W  = 100;
@@ -197,9 +202,8 @@ static const int SUMMON_FB_X  = SUMMON_ACT_DD_X + SUMMON_ACT_DD_W + 18;
 static const int SUMMON_FB_Y  = SUMMON_ACT_ROW_Y + 3;   // 与 18 高下拉中线对齐
 static const int SUMMON_FB_TEXT_W = 130;
 
-// 保持状态页（自上而下）：说明行 → 「剩余回合≤[框] 时补」阈值行 →
-// 每行 4 个下拉的槽位区。「+」先占第一个空位，点一下后移。
-static const int STATUS_NOTE_Y = 108;
+// 保持状态页：力盾落点行 → 说明 → 阈值 → 每行 4 个状态槽。
+static const int STATUS_NOTE_Y = FF_ROW_Y + 28;
 static const int STATUS_COLS = 4;
 static const int STATUS_GAP = 6;
 static const int STATUS_DD_W =

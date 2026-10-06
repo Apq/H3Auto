@@ -86,6 +86,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 DrawPanelToBuffer_();
             } else if (s_spell_pick_cell >= 0)
                 EndSpellPick_();
+            else if (s_forcefield_pick)
+                EndForceFieldPick_();
             else if (!s_panel_hidden_for_pick) {
                 SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_CANCEL); // 状态机关闭边（S2.2）
                 CloseSettingsPanel();
@@ -520,7 +522,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     // 用 SquareAtCoordinates(0x464380) 转换，不依赖 mouseCoord 也不恢复 hover，
     // 因此拾取期间游戏不会显示任何与待行动兵种相关的悬停高亮，只有我
     // 们自己的蓝色格子标示。左键松开=确认，右键=取消。
-    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0)) {
+    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0 || s_forcefield_pick)) {
         const int raw = static_cast<int>(msg.command);
         // 只用松开确认；LCLICK_OUTSIDE/RCLICK_OUTSIDE 与 UP 会在同一次点击里连发，
         // 只处理 UP 即可，无需按时间或格号去重。
@@ -760,6 +762,30 @@ static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
     return nullptr;
 }
 
+static bool IsBattleInputBlockerLive_(H3BaseDlg* battle_ui)
+{
+    // A retry can reuse the dialog address while the old item storage holds a resource node.
+    if (!battle_ui || battle_ui != s_input_blocker.battle_ui
+        || !s_input_blocker.item || !s_input_blocker.original_vtable)
+        return false;
+    H3Vector<H3DlgItem*>& items = battle_ui->GetList();
+    const uintptr_t first = reinterpret_cast<uintptr_t>(items.begin());
+    const uintptr_t end = reinterpret_cast<uintptr_t>(items.end());
+    if (!first || end < first || (end - first) % sizeof(H3DlgItem*) != 0
+        || end - first > items.RawSizeAllocated())
+        return false;
+    const unsigned count = static_cast<unsigned>((end - first) / sizeof(H3DlgItem*));
+    if (!H3AutoPolicy::PanelOwnsTrackedItem(battle_ui, s_input_blocker.battle_ui,
+            items.begin(), count, static_cast<H3DlgItem*>(s_input_blocker.item)))
+        return false;
+    // Only inspect the object after finding it in the current dialog's owned list.
+    void** vtable = *reinterpret_cast<void***>(s_input_blocker.item);
+    return s_input_blocker.item->GetParent() == battle_ui
+        && s_input_blocker.item->GetID() == 0x7FFE
+        && (vtable == s_input_blocker.local_vtable
+            || vtable == s_input_blocker.original_vtable);
+}
+
 static bool InstallBattleInputBlocker_()
 {
     H3BaseDlg* battle_ui = FindDialogByVtable_(s_combat_dialog_vtable);
@@ -776,11 +802,14 @@ static bool InstallBattleInputBlocker_()
     // Create + AddItem 到链尾（恒为最上层）。旧 item 还原 vtable 并隐藏后
     // 不再命中不拦截，留待 BattleUI 析构时由游戏统一回收。
     if (s_input_blocker.item) {
-        if (s_input_blocker.battle_ui == battle_ui) {
+        if (IsBattleInputBlockerLive_(battle_ui)) {
             *reinterpret_cast<void***>(s_input_blocker.item) =
                 s_input_blocker.original_vtable;
             s_input_blocker.item->HideDeactivate();
             LogInfo("[Panel] 旧输入屏障已隐藏 item=%p，改用全新安装。",
+                s_input_blocker.item);
+        } else {
+            LogWarn("[Panel] stale input blocker discarded without access item=%p",
                 s_input_blocker.item);
         }
         s_input_blocker = {};
@@ -798,13 +827,9 @@ static bool InstallBattleInputBlocker_()
     s_input_blocker.local_vtable[2] = reinterpret_cast<void*>(&BlockBattleItemMessage_);
     *reinterpret_cast<void***>(item) = s_input_blocker.local_vtable;
 
-    if (!battle_ui->AddItem(item, TRUE)) {
-        *reinterpret_cast<void***>(item) = original_vtable;
-        typedef H3DlgItem* (__thiscall *DestroyItemProc)(H3DlgItem*, BOOL8);
-        reinterpret_cast<DestroyItemProc>(original_vtable[0])(item, TRUE);
-        LogWarn("[Panel] BattleUI 拒绝加入输入屏障控件。");
-        return false;
-    }
+    // AddItem transfers ownership before LoadItem; its return is not a success flag.
+    // Never destroy an item that is already in the dialog's owned vector.
+    battle_ui->AddItem(item, TRUE);
 
     s_input_blocker.battle_ui = battle_ui;
     s_input_blocker.item = item;
@@ -817,9 +842,17 @@ static bool InstallBattleInputBlocker_()
 static void RemoveBattleInputBlocker_()
 {
     if (!s_input_blocker.item) return;
-    *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.original_vtable;
-    s_input_blocker.item->HideDeactivate();
-    LogInfo("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
+    H3BaseDlg* battle_ui = FindDialogByVtable_(s_combat_dialog_vtable);
+    if (IsBattleInputBlockerLive_(battle_ui)) {
+        *reinterpret_cast<void***>(s_input_blocker.item) = s_input_blocker.original_vtable;
+        s_input_blocker.item->HideDeactivate();
+        LogInfo("[Panel] BattleUI 输入屏障已停用。 item=%p。", s_input_blocker.item);
+    } else {
+        LogWarn("[Panel] stale input blocker discarded without access item=%p",
+            s_input_blocker.item);
+    }
+    // The game owns the hidden item; never retain it across dialog destruction/retry.
+    s_input_blocker = {};
 }
 
 // 实验：面板打开时把 H3 模态深度计数器（0x69FEA4）顶成 1，看 HD.dll 的
@@ -916,8 +949,35 @@ static void EndMeleePick_()
 // 转成 hex 回填。right_click=true 表示取消当前拾取。
 // 战场拾取回填：hex 由屏障处理器从消息坐标通过 SquareAtCoordinates 转换后传入。
 // right_click=true 表示取消当前拾取。
+static void EndForceFieldPick_()
+{
+    s_forcefield_pick = false;
+    s_forcefield_pick_slot = -1;
+    s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
+    RefreshBattleAfterPick_();
+    ForcePanelModalDepth_(true);
+    DrawPanelToBuffer_();
+}
+
 static void DoPickCapture_(int hex, bool right_click)
 {
+    if (s_forcefield_pick) {
+        if (right_click) {
+            EndForceFieldPick_();
+            return;
+        }
+        if (!CellControl_HexValid(hex) || s_forcefield_pick_slot < 0
+            || s_forcefield_pick_slot >= 2) return;
+        ForceFieldProfileFields& ff = s_p.draft_forcefield[s_p.selected_profile];
+        const int slot = s_forcefield_pick_slot;
+        ff.anchor_hex[slot] = hex;
+        NormalizeForceFieldFields(&ff);
+        LogInfo("[ForceField] anchor picked profile=%d slot=%d hex=%d",
+            s_p.selected_profile + 1, slot + 1, hex);
+        EndForceFieldPick_();
+        return;
+    }
     // 循环移动：每次只点 1 格。已有槽覆盖，末尾「＋」追加；右键取消不改原记录。
     if (s_move_pick_cell >= 0 && s_move_pick_cell < CELL_COUNT) {
         if (right_click) {
@@ -1013,7 +1073,7 @@ static void UpdatePanelModalSuspension_()
     // 手动挂起（s_panel_modal_suspended=true）以让出战场点击。此时不能让
     // 本函数按“无系统模态”把挂起状态重置回 false，否则会立刻重装输入拦截、
     // 吃掉战场点击，导致拾取永远收不到坐标、反复重进选格模式。
-    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0) return;
+    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0 || s_forcefield_pick) return;
     const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
     // The same counter also rises while the game is inactive. Only an in-game
     // modal dialog should hide the panel; clicking outside must leave it intact.

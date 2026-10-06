@@ -25,6 +25,7 @@ PatcherInstance* _PI = nullptr;
 #include "modules/Compat.inc.cpp"
 #include "modules/PanelGfx.inc.cpp"
 #include "modules/AutoExecute.inc.cpp"
+#include "modules/ForceField.inc.cpp"
 #include "modules/BattleState.inc.cpp"
 #include "modules/CellControl.inc.cpp"
 #include "modules/SettingsDlg.inc.cpp"

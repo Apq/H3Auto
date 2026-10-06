@@ -151,6 +151,7 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
         g_ui_gone_grace_until = GetTickCount() + 3000;
         if (GetBattleFingerprint() == 0)
             OnBattleAppearedFingerprint_();
+        ResetForceFieldRuntime_();
         EnsureStackTrackingBound();
         return;
     }

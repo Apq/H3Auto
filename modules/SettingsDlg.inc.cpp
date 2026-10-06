@@ -36,6 +36,7 @@ static struct Panel {
     uint16_t draft_stop_turns[PROFILE_COUNT];       // 自动停止回合草稿，0=关闭，0..999
     SummonProfileFields draft_summon[PROFILE_COUNT]; // 召唤通道草稿（启用/阈值/法术/召唤物规则/敌方法力停）
     StatusProfileFields draft_status[PROFILE_COUNT]; // 保持状态草稿
+    H3AutoPolicy::ForceFieldProfileFields draft_forcefield[PROFILE_COUNT];
     bool status_add_armed; // 保持状态「＋」已按下，松开才追加
     int selected_profile;                           // 当前编号 0..4（存档文件编号 = 界面方案 1-5）
     int pressed_profile;
@@ -117,6 +118,9 @@ static int s_melee_pick_stand_hex = -1;
 static bool s_pick_wait_button_release = false;
 static int s_move_pick_cell = -1;
 static int s_move_pick_wp = -1;
+static bool s_forcefield_pick = false;
+static int s_forcefield_pick_slot = -1;
+static void EndForceFieldPick_();
 
 // ===== 保活通道下拉（方案级）与数字键拦截 =====
 
@@ -1145,6 +1149,7 @@ void ResetPanelDrafts()
         s_p.draft_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         s_p.draft_summon[p] = summon_def;
         s_p.draft_status[p] = H3AutoPolicy::MakeDefaultStatusFields();
+        s_p.draft_forcefield[p] = H3AutoPolicy::MakeDefaultForceFieldFields();
     }
     LogInfo("[Panel] 草稿已随战斗结果清空（5 套方案+召唤参数）");
 }
@@ -1183,6 +1188,7 @@ static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
         s_p.draft_stop_turns[p] = rec.stop_turns[p];
         s_p.draft_summon[p] = rec.summon[p];
         s_p.draft_status[p] = rec.status[p];
+        s_p.draft_forcefield[p] = rec.forcefield[p];
     }
     s_p.selected_profile = rec.active;
     s_stop_turns_editing = false;
@@ -1284,6 +1290,8 @@ void OpenSettingsPanel_()
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
     s_panel_modal_suspended = false;
     s_panel_hidden_for_pick = false;
+    s_forcefield_pick = false;
+    s_forcefield_pick_slot = -1;
     s_pick_wait_button_release = false;
     s_melee_pick_cell = -1;
     s_melee_pick_pair = -1;
@@ -1323,6 +1331,7 @@ void OpenSettingsPanel_()
     memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
     memcpy(s_p.draft_summon, g_summon, sizeof(s_p.draft_summon));
     memcpy(s_p.draft_status, g_status, sizeof(s_p.draft_status));
+    memcpy(s_p.draft_forcefield, g_forcefield, sizeof(s_p.draft_forcefield));
     s_stop_turns_editing = false;
     CancelManaThEdit_();
     for (int i = 0; i < CELL_COUNT; ++i)
@@ -1387,7 +1396,12 @@ void OpenSettingsPanel_()
     RefreshBattleRecordsAndAutoload_();
     RebindVisibleCells_();
     LogDebug("[Panel] 打开阶段：部队枚举完成 count=%d", s_p.count);
-    InstallBattleInputBlocker_();
+    if (!InstallBattleInputBlocker_()) {
+        LogError("[Panel] 输入屏障安装失败，取消打开设置面板。");
+        SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_CANCEL);
+        CloseSettingsPanel();
+        return;
+    }
     LogDebug("[Panel] 打开阶段：输入屏障完成");
     EnsurePanelButtonPcxResources_();
     ForcePanelDefaultCursor_();
@@ -1425,7 +1439,7 @@ static void CommitAndCloseSettingsPanel_()
     bool store_added = false;
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
         s_p.draft_stop_turns, s_p.draft_summon, s_p.draft_status,
-        &store_added);
+        s_p.draft_forcefield, &store_added);
     // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
     RememberProfileSlot(s_p.selected_profile);
     // 本场存档下拉：新增时立刻重读内存列表并切到新档（降序 0=最新），
@@ -1460,6 +1474,8 @@ void CloseSettingsPanel()
     s_melee_pick_pair = -1;
     s_melee_pick_stand_hex = -1;
     s_panel_hidden_for_pick = false;
+    s_forcefield_pick = false;
+    s_forcefield_pick_slot = -1;
     s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
@@ -2124,6 +2140,18 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP)) {
         // 保持状态页：右键已有下拉框删除该项，后面的项和「+」前移。
         if (s_p.active_page == PAGE_STATUS) {
+            ForceFieldProfileFields& ff = s_p.draft_forcefield[s_p.selected_profile];
+            for (int i = 0; i < 2; ++i) {
+                if (ff.anchor_hex[i] < 0) break;
+                const int x = FF_SLOT_X + i * (FF_SLOT_W + FF_SLOT_GAP);
+                if (!PointInRect_(px, py, x, FF_ROW_Y, FF_SLOT_W, FF_SLOT_H)) continue;
+                for (int n = i; n + 1 < 2; ++n) ff.anchor_hex[n] = ff.anchor_hex[n + 1];
+                ff.anchor_hex[1] = -1;
+                LogInfo("[ForceField] anchor removed profile=%d slot=%d",
+                    s_p.selected_profile + 1, i + 1);
+                DrawPanelToBuffer_();
+                return;
+            }
             StatusProfileFields& status =
                 s_p.draft_status[s_p.selected_profile];
             for (int i = 0; i < status.slot_count; ++i) {
@@ -2280,6 +2308,23 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 s_p.selected_profile + 1);
             DrawPanelToBuffer_();
             return;
+        }
+
+        if (s_p.active_page == PAGE_STATUS) {
+            const ForceFieldProfileFields& ff = s_p.draft_forcefield[s_p.selected_profile];
+            for (int i = 0; i < 2; ++i) {
+                if (i > 0 && ff.anchor_hex[i - 1] < 0) break;
+                const int x = FF_SLOT_X + i * (FF_SLOT_W + FF_SLOT_GAP);
+                if (!PointInRect_(px, py, x, FF_ROW_Y, FF_SLOT_W, FF_SLOT_H)) continue;
+                s_forcefield_pick = true;
+                s_forcefield_pick_slot = i;
+                s_panel_hidden_for_pick = true;
+                s_pick_wait_button_release = true;
+                HidePanelForPick_();
+                LogInfo("[ForceField] battlefield pick begin profile=%d slot=%d",
+                    s_p.selected_profile + 1, i + 1);
+                return;
+            }
         }
 
         // 保持状态页：点已有槽位展开下拉换法术；点「＋」追加一个槽并展开。

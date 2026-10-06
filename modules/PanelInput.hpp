@@ -4,6 +4,7 @@
 #pragma once
 
 #include "PanelLayout.hpp"
+#include "PanelInputCore.hpp"
 
 static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam);

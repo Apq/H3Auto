@@ -3,10 +3,13 @@
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
+#include "ForceField.hpp"
+
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
     const SummonProfileFields summon[5],
-    const StatusProfileFields status[5], bool* out_store_added);
+    const StatusProfileFields status[5],
+    const ForceFieldProfileFields forcefield[5], bool* out_store_added);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
 extern AutoStackRule g_active_rules[21];
@@ -777,6 +780,7 @@ void ResetAutoState()
     g_enemy_hp_turn[1] = -1;
     g_enemy_hp_value[0] = 0;
     g_enemy_hp_value[1] = 0;
+    ResetForceFieldRuntime_();
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
     g_status_norecipient_logged = 0;
@@ -1382,7 +1386,7 @@ static void TryAutoStop_(_BattleMgr_* mgr)
         if (side >= 0 && side <= 1 && mgr->hero[1 - side]) {
             bool has_book = false;
             __try {
-                // 魔法书 = 0 号宝物（DoesWearArtifact @0x4E2C90，Compat 自带）。
+                // 魔法书 = 0 号宝物；WearsArtifact 的入口是 0x4D9460。
                 has_book = mgr->hero[1 - side]->DoesWearArtifact(0) != 0;
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 has_book = false;
@@ -1938,7 +1942,8 @@ static bool CanYieldFailedActionToPlayer_(_BattleMgr_* mgr, int creature_id)
 void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
     const SummonProfileFields summon[5],
-    const StatusProfileFields status[5], bool* out_store_added)
+    const StatusProfileFields status[5],
+    const ForceFieldProfileFields forcefield[5], bool* out_store_added)
 {
     if (out_store_added) *out_store_added = false;
     if (active_profile < 0 || active_profile >= 5)
@@ -1978,8 +1983,13 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
                 || st.refresh_turns > H3AutoPolicy::kStatusRefreshTurnsMax)
             st.refresh_turns = H3AutoPolicy::kStatusRefreshTurns;
         g_status[p] = st;
+        ForceFieldProfileFields ff = forcefield
+            ? forcefield[p] : H3AutoPolicy::MakeDefaultForceFieldFields();
+        H3AutoPolicy::NormalizeForceFieldFields(&ff);
+        g_forcefield[p] = ff;
     }
     g_active_profile = active_profile;
+    ResetForceFieldRuntime_();
 
     // 身份按本场现编（含召唤物：本场内可执行，重打重排自动丢弃其规则）。
     const int side = ResolveHumanSide_(o_BattleMgr);
@@ -2019,7 +2029,8 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         bool skipped = false;
         if (AppendBattleStoreRecord(g_battle_fp,
                 (const AutoStackRule(*)[21])g_profiles,
-                g_stop_turns, g_summon, g_status, g_active_profile, &skipped)) {
+                g_stop_turns, g_summon, g_status, g_forcefield,
+                g_active_profile, &skipped)) {
             LogInfo("[BattleStore] %s（active=%d）",
                 skipped ? "内容未变，不新增存档" : "已存档", g_active_profile + 1);
             if (!skipped && out_store_added) *out_store_added = true;
@@ -2533,6 +2544,7 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
 static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 {
     if (!mgr) return false;
+    if (!EnsureForceFieldBeforeAction_(mgr)) return false;
     if (g_phase != BP_COMBAT_CLOSED) return false; // 状态机守卫（S5.3）
     if (mgr->auto_combat) return false;
     if (IsHiddenBattle(mgr)) return false;
@@ -2827,6 +2839,7 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
     if (g_phase != BP_COMBAT_CLOSED) return false; // 状态机守卫（S5.3）
     __try {
         PollControlHotkeys_(mgr);
+        if (!EnsureForceFieldBeforeAction_(mgr)) return false;
         const int decision = DecideTakeover(mgr);
         if (decision != CD_EXECUTE_H3AUTO)
             return false;
@@ -2870,6 +2883,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
     }
     __try {
         PollControlHotkeys_(This);
+        if (!EnsureForceFieldBeforeAction_(This)) return 0;
         // 每次行动（控制权交玩家）都判保活（事件型，无回合标记）：
         // 复活按各队方式（剩余数量≤/损失量大于恢复量），召唤按阈值，
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。

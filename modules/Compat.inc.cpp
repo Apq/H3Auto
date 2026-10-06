@@ -129,7 +129,7 @@ struct _Hero_ {
     unsigned char power;
     unsigned char knowledge;
     int GetLandModifierUnder() { return THISCALL_1(int, 0x4E5210, this); }
-    bool DoesWearArtifact(int art_id) { return THISCALL_2(bool, 0x4E2C90, this, art_id); }
+    bool DoesWearArtifact(int art_id) { return THISCALL_2(BOOL, 0x4D9460, this, art_id) != FALSE; }
     int GetSpell_Specialisation_Bonuses(int spell_id, int skill_level, int damage) { return THISCALL_4(int, 0x4E6260, this, spell_id, skill_level, damage); }
 };
 #pragma pack(pop)
