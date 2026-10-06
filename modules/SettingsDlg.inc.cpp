@@ -637,15 +637,13 @@ static INT Hook_BltComplete_Inner_(LoHook* h, HookContext* c)
     return EXEC_DEFAULT;
 }
 
-// 铠甲外壳（§18 L2/L3）：钩子内任何异常被吞并记 error，安全默认
-// EXEC_DEFAULT（放行原版 Blt）；累计异常达阈值后熔断直接放行。
+// 铠甲外壳（§18 L2）：钩子内任何异常被吞并记 error，安全默认
+// EXEC_DEFAULT（放行原版 Blt）。异常聚合限流，钩子保持可用。
 INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
 {
-    if (!GuardHookBlown_(GHID_BLT)) {
-        __try {
-            return Hook_BltComplete_Inner_(h, c);
-        } __except (GuardCrashFilter_(GHID_BLT, GetExceptionInformation())) {}
-    }
+    __try {
+        return Hook_BltComplete_Inner_(h, c);
+    } __except (GuardCrashFilter_(GHID_BLT, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
@@ -658,11 +656,9 @@ static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c);
 
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
 {
-    if (!GuardHookBlown_(GHID_MSGPROC)) {
-        __try {
-            return Hook_BattleMsgProc_Inner_(h, c);
-        } __except (GuardCrashFilter_(GHID_MSGPROC, GetExceptionInformation())) {}
-    }
+    __try {
+        return Hook_BattleMsgProc_Inner_(h, c);
+    } __except (GuardCrashFilter_(GHID_MSGPROC, GetExceptionInformation())) {}
     return EXEC_DEFAULT;   // 安全默认：放行消息给原版处理
 }
 

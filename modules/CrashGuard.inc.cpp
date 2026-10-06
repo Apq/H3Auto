@@ -13,8 +13,9 @@
 //      默认值（LoHook=EXEC_DEFAULT 放行原版；HiHook=按原参调原函数；
 //      键盘钩子=CallNextHookEx 透传）。插件故障 = 功能跳过，游戏回到
 //      原版行为，绝不把异常抛回游戏主循环。
-//   L3 自熔断：同一钩子累计 kFuseLimit(8) 次异常后本进程内停用该路径
-//      （防崩溃循环 + 防 error 日志刷屏）。
+//   L3 异常聚合：同一钩子首次异常记完整详情，之后每 100 次记一行计数；
+//      钩子永远保持可用（异常被吞掉后下次调用继续尝试——不做熔断式
+//      停用，那会让功能静默失效）。
 //   L4 版本门卫：挂任何钩子前校验 SoD 数据指纹（力场表 0x63CF18/2C，
 //      实测取证见 H3Note\BattleCrashFix逆向笔记.md），不吻合则只保留
 //      日志、不挂钩——防完整版/HotA/改版 exe 上的偏移错配崩溃。
@@ -35,7 +36,7 @@
 
 using namespace H3AutoGuard;
 
-// ---- 钩子 id（熔断计数用；顺序与 §12 Hook 列表一致）----
+// ---- 钩子 id（异常聚合计数用；顺序与 §12 Hook 列表一致）----
 enum {
     GHID_BLT = 0,        // 0x600430 LoHook 每帧
     GHID_MSGPROC,        // 0x4746B0 LoHook 战斗消息
@@ -62,7 +63,6 @@ static Ring               s_ring;
 static volatile LONG      s_ring_lock = 0;   // 自旋锁（崩溃上下文禁内核锁）
 static volatile LONG      s_veh_seen = 0;    // 过滤后的首次机会异常总数
 static volatile LONG      s_hook_faults[GHID_COUNT] = {};
-static volatile LONG      s_hook_blown[GHID_COUNT]  = {};
 static volatile LONG      s_uef_busy = 0;
 static LPTOP_LEVEL_EXCEPTION_FILTER s_prev_uef = nullptr;
 
@@ -128,27 +128,18 @@ int GuardCrashFilter_(int hook_id, EXCEPTION_POINTERS* ep)
         if (hook_id < 0 || hook_id >= GHID_COUNT) return EXCEPTION_EXECUTE_HANDLER;
         const unsigned long code = ep->ExceptionRecord->ExceptionCode;
         const LONG n = InterlockedIncrement(&s_hook_faults[hook_id]);
-        GuardLogOne_(GuardHookName_(hook_id), code,
-            reinterpret_cast<unsigned long long>(
-                ep->ExceptionRecord->ExceptionAddress),
-            ep->ExceptionRecord);
-        if (n == kFuseLimit) {
-            InterlockedExchange(&s_hook_blown[hook_id], 1);
-            LogError("[Guard] 钩子 %s 累计异常 %d 次，本进程内停用该路径，后续走原版逻辑",
-                GuardHookName_(hook_id), kFuseLimit);
-        } else if (n > kFuseLimit) {
-            InterlockedExchange(&s_hook_blown[hook_id], 1);
+        if (n == 1) {
+            GuardLogOne_(GuardHookName_(hook_id), code,
+                reinterpret_cast<unsigned long long>(
+                    ep->ExceptionRecord->ExceptionAddress),
+                ep->ExceptionRecord);
+        } else if (n % kFaultLogEvery == 0) {
+            LogError("[Guard] 钩子 %s 累计异常 %ld 次（每次已吞掉并走安全默认，钩子保持可用）",
+                GuardHookName_(hook_id), n);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return EXCEPTION_EXECUTE_HANDLER;
-}
-
-// 熔断查询：true = 该钩子路径已停用，外壳应直接走安全默认。
-bool GuardHookBlown_(int hook_id)
-{
-    if (hook_id < 0 || hook_id >= GHID_COUNT) return true;
-    return s_hook_blown[hook_id] != 0;
 }
 
 // ---- VEH：首次机会异常进环（仅记录，绝不改分发结果）----
@@ -235,6 +226,13 @@ static void GuardWriteFatalReport_(PEXCEPTION_POINTERS ep)
             for (WORD i = 0; i < n; ++i)
                 GuardLogFrame_(reinterpret_cast<unsigned long long>(frames[i]));
     }
+
+    // 各钩子累计异常汇总（归因参考：崩前哪些路径已多次吞异常）。
+    for (int id = 0; id < GHID_COUNT; ++id) {
+        if (s_hook_faults[id] > 0)
+            LogError("[Guard] 钩子 %s 本次会话累计异常 %ld 次",
+                GuardHookName_(id), s_hook_faults[id]);
+    }
     LogError("[Guard] ====== 报告结束 ======");
 }
 
@@ -293,7 +291,7 @@ bool GuardVerifySodBytes_()
 void InstallCrashGuard()
 {
     if (AddVectoredExceptionHandler(1, GuardVeh_))
-        LogInfo("[Guard] 崩溃自记录已启用：VEH 首次机会环 + 未处理异常报告 + 钩子铠甲/熔断");
+        LogInfo("[Guard] 崩溃自记录已启用：VEH 首次机会环 + 未处理异常报告 + 钩子铠甲（异常聚合，钩子保持可用）");
     else
         LogError("[Guard] VEH 安装失败，仅保留未处理异常报告与钩子铠甲");
     s_prev_uef = SetUnhandledExceptionFilter(GuardUef_);
