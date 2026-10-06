@@ -1,8 +1,10 @@
 #include "../modules/PolicyCore.hpp"
+#include "../modules/CrashGuardCore.hpp"
 
 #include <cstdlib>
 #include <initializer_list>
 #include <iostream>
+#include <string>
 
 using namespace H3AutoPolicy;
 
@@ -1090,6 +1092,72 @@ void TestSummonRuleNormalization()
 
 } // namespace
 
+namespace {
+
+void TestCrashGuardCore()
+{
+    using namespace H3AutoGuard;
+
+    // 噪音过滤：C++ throw / OutputDebugString / 线程命名 / 单步不进历史环。
+    Check(IsNoiseExceptionCode(0xE06D7363), "cpp throw is noise");
+    Check(IsNoiseExceptionCode(0x40010006), "OutputDebugStringA is noise");
+    Check(IsNoiseExceptionCode(0x4001000A), "OutputDebugStringW is noise");
+    Check(IsNoiseExceptionCode(0x406D1388), "thread name is noise");
+    Check(IsNoiseExceptionCode(0x80000004), "single step is noise");
+    Check(!IsNoiseExceptionCode(0xC0000005), "access violation is not noise");
+    Check(!IsNoiseExceptionCode(0xC00000FD), "stack overflow is not noise");
+    Check(!IsNoiseExceptionCode(0x80000003), "breakpoint is not noise");
+
+    // 异常码命名。
+    Check(ExceptionCodeName(0xC0000005) != nullptr
+        && std::string(ExceptionCodeName(0xC0000005)) == "访问冲突",
+        "av named");
+    Check(std::string(ExceptionCodeName(0xC0000374)) == "堆损坏",
+        "heap corruption named");
+    Check(ExceptionCodeName(0x12345678) == nullptr, "unknown code unnamed");
+
+    // 访问冲突操作类型。
+    Check(std::string(AVOperationName(0)) == "读取", "av read");
+    Check(std::string(AVOperationName(1)) == "写入", "av write");
+    Check(std::string(AVOperationName(8)) == "执行(DEP)", "av dep");
+    Check(std::string(AVOperationName(99)) == "访问", "av unknown op");
+
+    // 历史环：覆盖式回绕，Get 按 最旧→最新。
+    Ring ring;
+    for (int i = 0; i < 12; ++i) {
+        RingRecord r = {};
+        r.code = 0xC0000005;
+        r.addr = 0x1000 + static_cast<unsigned long long>(i);
+        ring.Push(r);
+    }
+    Check(ring.Count() == kRingCap, "ring capped at capacity");
+    RingRecord out = {};
+    Check(ring.Get(0, &out) && out.addr == 0x1004,
+        "ring oldest is 5th pushed (12-8)");
+    Check(ring.Get(kRingCap - 1, &out) && out.addr == 0x100B,
+        "ring newest is last pushed");
+    Check(!ring.Get(kRingCap, &out), "ring rejects out of range");
+
+    // 版本门卫指纹：实测 SoD 力场表特征值。
+    Check(ForceFieldTableLooksLikeSod(2, 0, -16, 3, 0, -16, -34,
+            "C15spE1.def", "C15spE10.def"),
+        "sod force field table matches");
+    Check(!ForceFieldTableLooksLikeSod(3, 0, -16, 3, 0, -16, -34,
+            "C15spE1.def", "C15spE10.def"),
+        "wrong basic count rejected");
+    Check(!ForceFieldTableLooksLikeSod(2, 0, -16, 3, 0, -16, -33,
+            "C15spE1.def", "C15spE10.def"),
+        "wrong cell offset rejected");
+    Check(!ForceFieldTableLooksLikeSod(2, 0, -16, 3, 0, -16, -34,
+            "C09sxxxx.def", "C15spE10.def"),
+        "wrong def prefix rejected");
+    Check(!ForceFieldTableLooksLikeSod(2, 0, -16, 3, 0, -16, -34,
+            nullptr, "C15spE10.def"),
+        "null def rejected");
+}
+
+} // namespace
+
 int main()
 {
     TestPanelAdmission();
@@ -1110,6 +1178,7 @@ TestArchiveSlotMapRounds();
     TestSummonMoveHex();
     TestSummonRuleNormalization();
     TestProfileStoreRoundtrip();
+    TestCrashGuardCore();
     std::cout << "PolicyCoreTests: " << g_checks << " checks passed\n";
     return 0;
 }

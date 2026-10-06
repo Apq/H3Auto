@@ -19,6 +19,7 @@ PatcherInstance* _PI = nullptr;
 // 模块按顺序包含到同一个翻译单元，保证 patcher 全局对象和静态辅助函数共享同一份状态。
 #include "modules/IniUtf8.inc.cpp"
 #include "modules/ConfigLog.inc.cpp"
+#include "modules/CrashGuard.inc.cpp"   // 依赖 ConfigLog 落盘函数；其后模块用钩子铠甲/熔断
 #include "modules/UiTexts.inc.cpp"
 #include "modules/LogPack.inc.cpp"
 #include "modules/Compat.inc.cpp"

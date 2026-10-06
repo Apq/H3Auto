@@ -10,6 +10,8 @@ extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
 extern int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags);
 extern void LoadUiTexts();
+extern void InstallCrashGuard();          // CrashGuard.inc.cpp：VEH+UEF 崩溃自记录
+extern bool GuardVerifySodBytes_();       // CrashGuard.inc.cpp：SoD 数据指纹门卫
 extern char g_profiles_path[MAX_PATH];
 
 // ---- 版本自证（0.5 对外版）----
@@ -54,6 +56,16 @@ static void LogSelfVersion_()
 static void StartPlugin()
 {
     LogSelfVersion_();
+    // 崩溃自记录无条件安装：版本不对/不挂钩也要能记录崩溃（§18 L1）。
+    InstallCrashGuard();
+
+    // 版本门卫（§18 L4）：SoD 数据指纹不吻合（完整版/HotA/改版 exe）时
+    // 只保留日志，不挂任何钩子——偏移错配是插件端最典型的崩溃源。
+    if (!GuardVerifySodBytes_()) {
+        LogError("打铁助手: 游戏版本校验失败，已停用全部钩子（仅保留日志功能）。");
+        return;
+    }
+
     LogInfo("打铁助手: registering hooks.");
 
     // LoHook: 每帧检测自动战斗对话框 + 画面板

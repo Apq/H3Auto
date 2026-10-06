@@ -609,7 +609,7 @@ static void CheckAutoFightDialogClosed()
 
 extern bool TryAutoExecuteActiveStack(bool allow_unit_action);
 
-INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
+static INT Hook_BltComplete_Inner_(LoHook* h, HookContext* c)
 {
     (void)h; (void)c;
     static int s_frame = 0;
@@ -637,12 +637,36 @@ INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
     return EXEC_DEFAULT;
 }
 
+// 铠甲外壳（§18 L2/L3）：钩子内任何异常被吞并记 error，安全默认
+// EXEC_DEFAULT（放行原版 Blt）；累计异常达阈值后熔断直接放行。
+INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
+{
+    if (!GuardHookBlown_(GHID_BLT)) {
+        __try {
+            return Hook_BltComplete_Inner_(h, c);
+        } __except (GuardCrashFilter_(GHID_BLT, GetExceptionInformation())) {}
+    }
+    return EXEC_DEFAULT;
+}
+
 // 战斗消息处理入口（FUN_004746b0 @ 0x4746B0）。this=H3CombatManager 在 ECX，
 // 消息指针 msg 在栈上 [esp+4]。msg[0]=类型（4=鼠标移动），msg[4]=x，msg[5]=y。
 // 1) 面板打开时：把鼠标移动坐标改成离屏，清掉 hover 高亮。
 // 2) 面板关闭时：若当前活动单位应由 H3Auto 主动执行，则在此提交 action 字段，
 //    让原版主循环自然进入 FUN_004786b0 执行动画/伤害/回合推进。
+static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c);
+
 INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
+{
+    if (!GuardHookBlown_(GHID_MSGPROC)) {
+        __try {
+            return Hook_BattleMsgProc_Inner_(h, c);
+        } __except (GuardCrashFilter_(GHID_MSGPROC, GetExceptionInformation())) {}
+    }
+    return EXEC_DEFAULT;   // 安全默认：放行消息给原版处理
+}
+
+static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c)
 {
     (void)h;
 

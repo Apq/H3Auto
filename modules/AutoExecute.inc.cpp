@@ -451,23 +451,27 @@ static HHOOK s_combat_kb_hook = nullptr;
 
 static LRESULT CALLBACK CombatHotkeyKbHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    // bit31=1 是 keyup；bit30=1 是自动重复（按住不放），都不要。
-    if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)
-        && !IsPanelActive())
-    {
-        if ((int)wParam == cfg.toggle_manual_vk) {
-            g_auto_state.kb_toggle_seen = true;
-            // 边沿日志：定位「打一回合就停」是不是第二次 F9 按下造成的。
-            // 只在按下边沿记（bit30/bit31 已过滤自动重复与抬起），每次物理
-            // 按键最多一行。
-            LogDebug("[Control] 捕获启停热键按下 vk=0x%X", (int)wParam);
-        }
-        else if ((int)wParam == cfg.one_shot_manual_vk)
-            g_auto_state.kb_oneshot_seen = true;
-        else if ((int)wParam == cfg.open_settings_vk)
-            g_auto_state.kb_open_panel_seen = true;
+    if (!GuardHookBlown_(GHID_KB)) {
+        __try {
+            // bit31=1 是 keyup；bit30=1 是自动重复（按住不放），都不要。
+            if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)
+                && !IsPanelActive())
+            {
+                if ((int)wParam == cfg.toggle_manual_vk) {
+                    g_auto_state.kb_toggle_seen = true;
+                    // 边沿日志：定位「打一回合就停」是不是第二次 F9 按下造成的。
+                    // 只在按下边沿记（bit30/bit31 已过滤自动重复与抬起），每次物理
+                    // 按键最多一行。
+                    LogDebug("[Control] 捕获启停热键按下 vk=0x%X", (int)wParam);
+                }
+                else if ((int)wParam == cfg.one_shot_manual_vk)
+                    g_auto_state.kb_oneshot_seen = true;
+                else if ((int)wParam == cfg.open_settings_vk)
+                    g_auto_state.kb_open_panel_seen = true;
+            }
+        } __except (GuardCrashFilter_(GHID_KB, GetExceptionInformation())) {}
     }
-    return CallNextHookEx(nullptr, code, wParam, lParam);
+    return CallNextHookEx(nullptr, code, wParam, lParam);   // 安全默认：透传钩子链
 }
 
 static void EnsureCombatKbHook_()
@@ -715,7 +719,7 @@ static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
 }
 
 // 原版 0x4786B0 真正开始执行 action 时调用：确认单次接管的人工动作已消费。
-int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
+static int HH_OnBattleActionExecute_Inner_(HiHook* h, _BattleMgr_* This, int flags)
 {
     __try {
         // action=1 是英雄施法，不结束单次接管：玩家可先施法再给该部队下命令。
@@ -738,7 +742,17 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
                 SetControlMode_(CM_AUTO);
             }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    } __except (GuardCrashFilter_(GHID_ACTION_EXEC, GetExceptionInformation())) {}
+    // 原函数调用在 __try 之外：原版代码自身的崩溃（游戏 bug）不属于插件
+    // 铠甲的吞没范围，正常传播（§18 L2 边界）。
+    return THISCALL_2(int, h->GetDefaultFunc(), This, flags);
+}
+
+// 铠甲外壳（§18 L2/L3）：熔断后按原参直调原函数，纯原版行为。
+int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
+{
+    if (!GuardHookBlown_(GHID_ACTION_EXEC))
+        return HH_OnBattleActionExecute_Inner_(h, This, flags);
     return THISCALL_2(int, h->GetDefaultFunc(), This, flags);
 }
 
@@ -2844,7 +2858,7 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
 //   - 有配置要代发动作 → 仍返回 0，由消息入口提交 action
 //   - 手动 / 其它 → 返回 0，真正留给玩家
 // 蛊惑等“本就不会交给玩家”的情况：orig 已非 0，我们直接放行。
-int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
+static int HH_ShouldAutoExecute_Inner_(HiHook* h, _BattleMgr_* This)
 {
     int orig = THISCALL_1(int, h->GetDefaultFunc(), This);
     if (orig != 0) {
@@ -2918,8 +2932,16 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
             return 1;           // 仅战争机器特殊：交回 AI
         // CD_EXECUTE_H3AUTO / CD_KEEP_ORIGINAL：返回 0（控制权在玩家路径）。
         // 若需代发动作，在 Hook_BattleMsgProc 入口提交。
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogError("[Auto] 行动判定发生异常 code=0x%08X", GetExceptionCode());
+    } __except (GuardCrashFilter_(GHID_SHOULD_AUTO, GetExceptionInformation())) {
     }
     return 0;
+}
+
+// 铠甲外壳（§18 L2/L3）：熔断后直调原函数返回其结果，纯原版行为。
+// 原函数调用在 Inner 的 __try 之外：原版自身的崩溃正常传播（§18 L2 边界）。
+int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
+{
+    if (!GuardHookBlown_(GHID_SHOULD_AUTO))
+        return HH_ShouldAutoExecute_Inner_(h, This);
+    return THISCALL_1(int, h->GetDefaultFunc(), This);
 }
