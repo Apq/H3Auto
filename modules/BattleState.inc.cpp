@@ -137,8 +137,15 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
 
     if (ev == BE_RESULT_RETRY) {
         // 取消/重打：重排身份+重绑+清运行时（EnsureStackTrackingBound 内含）；
-        // CM 保留——全手动是玩家显式选择，重打不清（设计文档 §10.1）。
-        // 重打仍是同一场。若本进程还没算过指纹（插件在结果窗期间才加载，
+        // 2026-10-06 修复：进场一律回全手动——上一场 AUTO 中重打时若保留 AUTO，
+        // 方案在场 + 控制权残留，玩家还没按 F9 一进战斗就自动打了。
+        // 自动执行只能由 F9 显式启动（设计文档 §10.1 语义修正）。
+        if (g_control != CM_MANUAL) {
+            ClearOneShotManual_();
+            SetControlMode_(CM_MANUAL);
+            LogInfo("[Control] 重打进场：切回全手动（按 F9 启动自动）");
+        }
+        // 若本进程还没算过指纹（插件在结果窗期间才加载，
         // 或快速战斗后直接重打），现在补算，打开面板才能看到本场存档。
         // 已经算过则不重算，避免一场战斗中途改变指纹。
         g_ui_gone_grace_until = GetTickCount() + 3000;
@@ -158,18 +165,19 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
 
     if (ev == BE_RESULT_ACCEPTED) {
         // 接受：清方案+清运行时+跟踪（OnBattleResultAccepted 内含）；
-        // 决策③：跨场不残留全手动，下一场恢复自动。
+        // 决策③（2026-10-06 修正）：进场默认全手动，自动只能由 F9 显式启动，
+        // 跨场不再"恢复自动"——否则读档重打没按 F9 就自动打。
         ClearConfirmedProfiles();
         ResetAutoState();
-        SetControlMode_(CM_AUTO);
+        SetControlMode_(CM_MANUAL);
         return;
     }
 
     if (ev == BE_BATTLE_UI_GONE) {
         // 兜底（读档/中途退出）：清运行时+跟踪+面板（ResetAutoState 内含静默关面板）；
-        // 决策②：5 套方案保留；CM 重置同接受。
+        // 决策②（2026-10-06 修正）：5 套方案保留；CM 重置为全手动（原为回自动）。
         ResetAutoState();
-        SetControlMode_(CM_AUTO);
+        SetControlMode_(CM_MANUAL);
         return;
     }
 }

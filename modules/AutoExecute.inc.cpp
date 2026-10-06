@@ -32,9 +32,15 @@ enum ControlMode {
     CM_AUTO,           // 自动执行
     CM_MANUAL,         // F9 全手动：本场所有已配置部队交回玩家
     CM_ONESHOT_WAIT,   // J 单次接管待命：等下一支可接管部队
-    CM_ONESHOT_LOCKED, // J 单次接管锁定中：锁定部队完成玩家动作后回 AUTO
+    CM_ONESHOT_LOCKED, // J 单次接管锁定中：锁定部队完成玩家动作后回按下前模式
 };
-static ControlMode g_control = CM_AUTO;
+// 2026-10-06 修复：自动执行只能由 F9 显式启动，任何进场（进程启动/新战斗/
+// 重打/读档兜底/接受结果）默认全手动——否则上一场 AUTO 中重打或读档重进，
+// 方案保留 + 控制权残留 AUTO，一进战斗还没按 F9 就自动打了。
+static ControlMode g_control = CM_MANUAL;
+// J 单次接管结束后的返回模式：按 J 时记录（AUTO 中按 J 完成回 AUTO 继续，
+// MANUAL 中按 J 完成回 MANUAL；不再固定回 AUTO）。
+static ControlMode g_oneshot_return = CM_MANUAL;
 
 // ===== 单位管线子状态（重构步骤 §1.2；锚定 g_pipeline_stack 活动单位）=====
 // 取代旧 spell_waiting/spell_wait_stack/spell_done_stack/last_handled_stack 四标志。
@@ -619,6 +625,9 @@ static bool TryArmOneShotOnStack_(_BattleMgr_* mgr, _BattleStack_* stack, bool f
 
 static void ArmOneShotManual_(_BattleMgr_* mgr)
 {
+    // 记录按 J 前的模式（仅在尚未进入单次接管时；待命转正不覆盖）。
+    if (g_control != CM_ONESHOT_WAIT && g_control != CM_ONESHOT_LOCKED)
+        g_oneshot_return = g_control;
     if (!mgr) {
         g_control = CM_ONESHOT_WAIT;
         RefreshControlStatusHint_();
@@ -712,7 +721,7 @@ static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
     LogDebug("[Control] oneshot expired by active change old_slot=%d new_side=%d new_slot=%d",
         g_auto_state.oneshot_slot, stack->def_group_ix, stack->army_slot_ix);
     ClearOneShotManual_();
-    SetControlMode_(CM_AUTO);
+    SetControlMode_(g_oneshot_return);
     return false;
 }
 
@@ -737,7 +746,7 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
                 LogDebug("[Control] oneshot completed by player action=%d slot=%d",
                     This->action, stack ? stack->army_slot_ix : -1);
                 ClearOneShotManual_();
-                SetControlMode_(CM_AUTO);
+                SetControlMode_(g_oneshot_return);
             }
         }
     } __except (GuardCrashFilter_(GHID_ACTION_EXEC, GetExceptionInformation())) {}
@@ -772,9 +781,9 @@ void ResetAutoState()
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
     g_status_norecipient_logged = 0;
     ClearOneShotManual_();
-    // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回 AUTO。
+    // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回按 J 前的模式。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
-        g_control = CM_AUTO;
+        g_control = g_oneshot_return;
     g_auto_state.kb_toggle_seen = false;
     g_auto_state.kb_oneshot_seen = false;
     g_auto_state.last_status_text[0] = 0;
