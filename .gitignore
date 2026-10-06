@@ -71,7 +71,7 @@ Testing/
 # Visual Studio per-user state and indexes
 .vs/
 
-Release/
+Release/*
 !Release/*.zip
 .cowork-temp
 .hermes-tmp*
