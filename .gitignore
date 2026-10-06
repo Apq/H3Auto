@@ -72,5 +72,6 @@ Testing/
 .vs/
 
 Release/
+!Release/*.zip
 .cowork-temp
 .hermes-tmp*
