@@ -241,7 +241,7 @@ static const char* HelpLogLevelOptKey_(int lv)
 static const int HELP_DD_LABEL_W = 80;
 static const int HELP_DD_W  = 120;
 static const int HELP_DD_H  = 22;
-static const int HELP_DD_ITEM_H = 20;
+static int HelpDropdownRowHeight_() { return SmallFontRowHeight_(20); }
 static const int HELP_PACK_BTN_W = 180;
 static const int HELP_PACK_BTN_H = 26;
 
@@ -271,9 +271,9 @@ static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
     int x = 0, y = 0, w = 0, h = 0;
     GetHelpLogLevelDdRect_(&x, &y, &w, &h);
     if (out_x) *out_x = x;
-    if (out_y) *out_y = y + HELP_DD_H + item * HELP_DD_ITEM_H;
+    if (out_y) *out_y = y + HELP_DD_H + item * HelpDropdownRowHeight_();
     if (out_w) *out_w = w;
-    if (out_h) *out_h = HELP_DD_ITEM_H;
+    if (out_h) *out_h = HelpDropdownRowHeight_();
 }
 
 static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h)
@@ -355,7 +355,11 @@ static void DrawBattleDropdownButton_(H3LoadedPcx16* destination)
 static void DrawBattleDropdownList_(H3LoadedPcx16* scr)
 {
     if (!scr || !s_battle_dd_open || s_battle_record_count <= 0) return;
-    const int list_h = s_battle_record_count * BATTLE_DD_ITEM_H;
+    const int row_h = BattleDropdownRowHeight_();
+    const int rows = BattleDropdownVisibleRows_();
+    const int first = BattleDropdownFirstRow_();
+    const int list_h = rows * row_h;
+    if (list_h <= 0) return;
     // 列表底：与保活列表同款深底 + 双层金框。
     Fill(scr, BATTLE_DD_LIST_X, BATTLE_DD_LIST_Y, BATTLE_DD_LIST_W, list_h,
         48, 32, 18);
@@ -364,10 +368,11 @@ static void DrawBattleDropdownList_(H3LoadedPcx16* scr)
     scr->DrawFrame(BATTLE_DD_LIST_X + 1, BATTLE_DD_LIST_Y + 1,
         BATTLE_DD_LIST_W - 2, list_h - 2, (BYTE)112, (BYTE)82, (BYTE)36);
     char line[40];
-    for (int i = 0; i < s_battle_record_count; ++i) {
+    for (int row = 0; row < rows; ++row) {
+        const int i = first + row;
         const BattleStoreRecord* rec = BattleRecordAt_(i);
         if (!rec) continue;
-        const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
+        const int iy = BATTLE_DD_LIST_Y + row * row_h;
         // 每项独立底色+边框（同卡片/保活下拉暖色主题）。
         BYTE bg_r, bg_g, bg_b, fr, fg, fb;
         if (i == s_battle_dd_hover) {
@@ -381,13 +386,13 @@ static void DrawBattleDropdownList_(H3LoadedPcx16* scr)
             fr = 166; fg = 112; fb = 40;
         }
         Fill(scr, BATTLE_DD_LIST_X + 2, iy + 1, BATTLE_DD_LIST_W - 4,
-            BATTLE_DD_ITEM_H - 2, bg_r, bg_g, bg_b);
+            row_h - 2, bg_r, bg_g, bg_b);
         scr->DrawFrame(BATTLE_DD_LIST_X + 2, iy + 1, BATTLE_DD_LIST_W - 4,
-            BATTLE_DD_ITEM_H - 2, fr, fg, fb);
+            row_h - 2, fr, fg, fb);
         _snprintf(line, sizeof(line), "%s  P%d", rec->time, rec->active + 1);
         line[sizeof(line) - 1] = 0;
         DrawTxt(scr, GetSmallFont(), line,
-            BATTLE_DD_LIST_X + 6, iy, BATTLE_DD_LIST_W - 12, BATTLE_DD_ITEM_H,
+            BATTLE_DD_LIST_X + 6, iy, BATTLE_DD_LIST_W - 12, row_h,
             i == s_battle_dd_sel ? (INT32)eTextColor::GOLD
                                  : (INT32)eTextColor::YELLOW,
             eTextAlignment::MIDDLE_LEFT);
@@ -889,9 +894,9 @@ static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h)
 {
     if (out_x) *out_x = SUMMON_DD_X;
-    if (out_y) *out_y = SUMMON_SPELL_Y + SUMMON_DD_H + item * SUMMON_DD_ITEM_H;
+    if (out_y) *out_y = SUMMON_SPELL_Y + SUMMON_DD_H + item * SmallFontRowHeight_(SUMMON_DD_ITEM_H);
     if (out_w) *out_w = SUMMON_DD_W;
-    if (out_h) *out_h = SUMMON_DD_ITEM_H;
+    if (out_h) *out_h = SmallFontRowHeight_(SUMMON_DD_ITEM_H);
 }
 
 // 条件组合下拉列表项矩形（和/或，两项）。
@@ -900,9 +905,9 @@ static void GetSummonCondDdItemRect_(int item, int* out_x, int* out_y,
 {
     if (out_x) *out_x = SUMMON_CB_DD_X;
     if (out_y) *out_y = SUMMON_ROW2_Y + SUMMON_DD_H
-        + item * SUMMON_CB_DD_ITEM_H;
+        + item * SmallFontRowHeight_(SUMMON_CB_DD_ITEM_H);
     if (out_w) *out_w = SUMMON_CB_DD_W;
-    if (out_h) *out_h = SUMMON_CB_DD_ITEM_H;
+    if (out_h) *out_h = SmallFontRowHeight_(SUMMON_CB_DD_ITEM_H);
 }
 
 static void GetSummonActDdItemRect_(int item, int* out_x, int* out_y,
@@ -910,9 +915,9 @@ static void GetSummonActDdItemRect_(int item, int* out_x, int* out_y,
 {
     if (out_x) *out_x = SUMMON_ACT_DD_X;
     if (out_y) *out_y = SUMMON_ACT_DD_Y + SUMMON_ACT_DD_H
-        + item * SUMMON_ACT_DD_ITEM_H;
+        + item * SmallFontRowHeight_(SUMMON_ACT_DD_ITEM_H);
     if (out_w) *out_w = SUMMON_ACT_DD_W;
-    if (out_h) *out_h = SUMMON_ACT_DD_ITEM_H;
+    if (out_h) *out_h = SmallFontRowHeight_(SUMMON_ACT_DD_ITEM_H);
 }
 
 // 阈值数字框（收起=居中显示草稿值；编辑=左对齐+光标，与停止回合框同款）。
@@ -1338,20 +1343,23 @@ static void DrawPanelToBuffer_()
         if (s_status_dd_open >= 0) {
             int x = 0, y = 0;
             StatusSlotRect_(s_status_dd_open, &x, &y);
-            for (int i = 0; i < s_status_dd_count; ++i) {
-                const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
+            const int first = StatusDropdownFirstRow_();
+            const int rows = StatusDropdownVisibleRows_();
+            for (int v = 0; v < rows; ++v) {
+                const int i = first + v;
+                const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
                 BYTE bg_r = 68, bg_g = 42, bg_b = 18;
                 BYTE fr = 166, fg = 112, fb = 40;
                 if (i == s_status_dd_hover) {
                     bg_r = 184; bg_g = 136; bg_b = 48;
                     fr = 246; fg = 214; fb = 116;
                 }
-                Fill(scr, x, iy, STATUS_DD_W, STATUS_ITEM_H, bg_r, bg_g, bg_b);
-                scr->DrawFrame(x, iy, STATUS_DD_W, STATUS_ITEM_H, fr, fg, fb);
+                Fill(scr, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H), bg_r, bg_g, bg_b);
+                scr->DrawFrame(x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H), fr, fg, fb);
                 char label[96] = {};
                 DrawTxt(scr, GetSmallFont(),
                     StatusSpellLabel_(s_status_dd_ids[i], label, sizeof(label)),
-                    x + 6, iy, STATUS_DD_W - 12, STATUS_ITEM_H,
+                    x + 6, iy, STATUS_DD_W - 12, SmallFontRowHeight_(STATUS_ITEM_H),
                     (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
             }
         }

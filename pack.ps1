@@ -11,7 +11,7 @@ Add-Type -AssemblyName System.Text.Encoding.CodePages -ErrorAction SilentlyConti
 [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
 
 if (-not $Source) {
-    $Source = 'D:\Heroes3\Heroes3_2026.10.07\_HD3_Data\Packs\打铁助手'
+    $Source = 'D:\Heroes3\Heroes3_2026.10.07\_HD3_Data\Packs\热血插件'
 }
 if (-not $OutputDir) {
     $OutputDir = Join-Path $PSScriptRoot 'Release'
@@ -34,15 +34,26 @@ function Get-PackVersion {
     return 'v' + ($parts[0..1] -join '.')
 }
 
-function Test-PackExcluded {
-    param([string]$RelativePath)
-    $name = [System.IO.Path]::GetFileName($RelativePath)
-    if ($name -eq 'H3Auto.user.ini') { return $true }
-    if ($name -like 'H3Auto.profiles*.ini') { return $true }
-    if ($name -like '*.log') { return $true }
-    if ($name -like 'H3Auto_logs_*.7z') { return $true }
-    if ($name -match '^[0-9A-Fa-f]{16}\.json$') { return $true }
-    return $false
+# 部署目录（热血插件）与 H3RndNew 共用，混有其他插件的文件；
+# 不能整目录排除法打包，改为显式清单只取本插件需要的文件：
+# DLL 取已部署目录（包内 DLL 与 Release、部署现场三方一致），
+# 配置、说明与文案素材取仓库源目录（部署目录中的说明文件可能被其他插件覆盖）。
+$files = @(
+    @{ Local = Join-Path $sourcePath 'H3Auto.dll';           Entry = '热血插件/H3Auto.dll' },
+    @{ Local = Join-Path $PSScriptRoot 'H3Auto.default.ini'; Entry = '热血插件/H3Auto.default.ini' },
+    @{ Local = Join-Path $PSScriptRoot '使用说明.txt';       Entry = '热血插件/使用说明.txt' }
+)
+$langSrc = Join-Path $PSScriptRoot 'lang'
+if (Test-Path -LiteralPath $langSrc) {
+    foreach ($item in Get-ChildItem -LiteralPath $langSrc -Filter *.ini -File) {
+        $files += @{ Local = $item.FullName; Entry = '热血插件/lang/' + $item.Name }
+    }
+}
+$imgSrc = Join-Path $PSScriptRoot 'img'
+if (Test-Path -LiteralPath $imgSrc) {
+    foreach ($item in Get-ChildItem -LiteralPath $imgSrc -Filter *.* -File) {
+        $files += @{ Local = $item.FullName; Entry = '热血插件/img/' + $item.Name }
+    }
 }
 
 $version = Get-PackVersion
@@ -53,24 +64,18 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 
 $included = 0
-$excluded = 0
 $zip = [System.IO.Compression.ZipFile]::Open(
     $zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
-    $prefix = $sourcePath.TrimEnd('\') + '\'
-    Get-ChildItem -LiteralPath $sourcePath -Recurse -File -Force | ForEach-Object {
-        $relative = $_.FullName.Substring($prefix.Length)
-        if (Test-PackExcluded $relative) {
-            $script:excluded++
-            Write-Host "排除 $relative"
-            return
+    foreach ($file in $files) {
+        if (-not (Test-Path -LiteralPath $file.Local)) {
+            throw "打包文件缺失: $($file.Local)"
         }
-        $entryName = ('打铁助手\' + $relative) -replace '\\', '/'
         [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-            $zip, $_.FullName, $entryName,
+            $zip, $file.Local, $file.Entry,
             [System.IO.Compression.CompressionLevel]::Optimal)
-        $script:included++
-        Write-Host "加入 $relative"
+        $included++
+        Write-Host "加入 $($file.Entry)"
     }
 } finally {
     $zip.Dispose()
@@ -81,4 +86,4 @@ if ($included -eq 0) {
     throw '没有可打包的文件。'
 }
 
-Write-Host "已打包 $included 个文件，排除 $excluded 个: $zipPath"
+Write-Host "已打包 $included 个文件: $zipPath"

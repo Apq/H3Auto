@@ -1,6 +1,7 @@
 #include "../modules/PolicyCore.hpp"
 #include "../modules/CrashGuardCore.hpp"
 #include "../modules/PanelInputCore.hpp"
+#include "../modules/TextLayoutCore.hpp"
 
 #include <cstdlib>
 #include <initializer_list>
@@ -31,6 +32,50 @@ void CheckActions(int creature, bool ranged, bool artillery, bool firstAid,
     int i = 0;
     for (AutoActionKind action : expected)
         Check(actual[i++] == action, name);
+}
+
+void TestTextLayout()
+{
+    const TextVerticalRect center = FitTextVerticalRect(85, 14, 16, 5);
+    Check(center.y == 84 && center.height == 16, "small center box admits taller font");
+    const TextVerticalRect top = FitTextVerticalRect(85, 11, 16, 0);
+    Check(top.y == 85 && top.height == 16, "top text preserves origin");
+    const TextVerticalRect bottom = FitTextVerticalRect(85, 11, 16, 10);
+    Check(bottom.y == 80 && bottom.height == 16, "bottom text preserves lower edge");
+    const TextVerticalRect ample = FitTextVerticalRect(85, 24, 16, 5);
+    Check(ample.y == 85 && ample.height == 24, "roomy text box stays unchanged");
+    const TextVerticalRect disabled = FitTextVerticalRect(85, 0, 16, 5);
+    Check(disabled.y == 85 && disabled.height == 0, "zero box stays disabled");
+    Check(FontAwareRowHeight(14, 16) == 16, "list pitch admits font height");
+    Check(FontAwareRowHeight(22, 16) == 22, "existing roomy pitch stays unchanged");
+    Check(FontAwareRowHeight(14, 24, 2) == 26, "font aware pitch includes padding");
+    Check(VisibleTextRows(500, 16, 30) == 30, "all records fit at current font height");
+    Check(VisibleTextRows(500, 24, 30) == 20, "taller rows respect list viewport");
+    Check(VisibleTextRows(500, 0, 30) == 0, "invalid pitch cannot divide by zero");
+    Check(VisibleTextRows(0, 16, 30) == 0, "empty viewport has no rows");
+    for (int font_h : { 16, 24 }) {
+        for (int design_h : { 14, 18, 20 }) {
+            const int row_h = FontAwareRowHeight(design_h, font_h);
+            const TextVerticalRect rect = FitTextVerticalRect(100, row_h, font_h, 5);
+            Check(rect.y == 100 && rect.height == row_h,
+                "list text stays entirely inside its background and hit row");
+        }
+        const int label_h = FontAwareRowHeight(11, font_h);
+        const int portrait_h = MetadataPortraitHeight(110, label_h, 5, 64);
+        const int count_y = 110 - 4 - 2 * label_h - 1;
+        Check(5 + portrait_h + 2 <= count_y,
+            "metadata rows remain below portrait frame");
+        Check(count_y >= 0 && count_y + 2 * label_h + 1 == 106,
+            "metadata rows fit card without overlap");
+    }
+    Check(MetadataPortraitHeight(110, 16, 5, 64) == 64,
+        "current small font preserves portrait dimensions");
+    Check(MetadataPortraitHeight(110, 24, 5, 64) == 50,
+        "taller font reserves both metadata lines");
+    Check(VisibleTextRows(548 - 208 - 4, 24, 16) == 14,
+        "status tall-font viewport is bounded to fourteen rows");
+    Check(VisibleTextRows(548 - 208 - 4, 18, 16) == 16,
+        "status default-font viewport includes all candidates");
 }
 
 void TestPanelItemOwnership()
@@ -1282,6 +1327,7 @@ void TestCrashGuardCore()
 
 int main()
 {
+    TestTextLayout();
     TestPanelItemOwnership();
     TestPanelAdmission();
     TestBattleFingerprint();

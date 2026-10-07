@@ -190,7 +190,7 @@ static BattleInputBlocker s_input_blocker = {};
 // ========================================================================
 
 static H3Font* GetPanelFont() { return H3Font::Load("bigfont.fnt"); }
-static H3Font* GetSmallFont() { return H3Font::Load("smalfont.fnt"); }
+static H3Font* GetSmallFont() { return H3SmallFont::Get(); }
 
 static bool IsGameWindowForeground_()
 {
@@ -788,6 +788,23 @@ static int  s_status_dd_open = -1;
 static int  s_status_dd_hover = -1;
 static int  s_status_dd_ids[81] = {};
 static int  s_status_dd_count = 0;
+static int  s_status_dd_first = 0;
+
+static int StatusDropdownVisibleRows_()
+{
+    int x = 0, y = 0;
+    StatusSlotRect_(s_status_dd_open, &x, &y);
+    return H3AutoPolicy::VisibleTextRows(PANEL_H - y - STATUS_DD_H - 4,
+        SmallFontRowHeight_(STATUS_ITEM_H), s_status_dd_count);
+}
+
+static int StatusDropdownFirstRow_()
+{
+    const int last = s_status_dd_count - StatusDropdownVisibleRows_();
+    if (s_status_dd_first < 0) s_status_dd_first = 0;
+    if (s_status_dd_first > last) s_status_dd_first = last;
+    return s_status_dd_first;
+}
 // 队数/血量阈值数字录入：与停止回合同款（预填当前值、光标可移动）。
 enum SummonNumEditWhich { SUMMON_EDIT_NONE = 0, SUMMON_EDIT_COUNT, SUMMON_EDIT_HP };
 static int  s_summon_edit_which = SUMMON_EDIT_NONE;
@@ -937,8 +954,12 @@ static void DrawCheckbox_(H3LoadedPcx16* scr, int x, int y, bool checked,
         Fill(scr, x + 6, y + 4, 2, 2, 235, 205, 116);
         Fill(scr, x + 7, y + 3, 2, 2, 235, 205, 116);
     }
-    DrawTxt(scr, GetSmallFont(), label,
-        x + box + 4, y - 1, text_w, 14,
+    H3Font* font = GetSmallFont();
+    if (!font) return;
+    // Use the loaded font's line height; newer Chinese fonts exceed 14 pixels.
+    const int text_h = font->height;
+    DrawTxt(scr, font, label,
+        x + box + 4, y + (box - text_h) / 2, text_w, text_h,
         (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
 }
 
@@ -1166,6 +1187,36 @@ static unsigned long long s_battle_loaded_fp = 0; // 该指纹本会话已载入
 static bool s_battle_dd_open = false;
 static int  s_battle_dd_hover = -1;      // 列表 hover（降序下标）
 static int  s_battle_dd_sel = -1;        // 当前选中条（降序下标，0=最新）
+static int s_battle_dd_first = 0;
+
+static int BattleDropdownRowHeight_()
+{
+    return SmallFontRowHeight_(BATTLE_DD_ITEM_H);
+}
+
+static int BattleDropdownVisibleRows_()
+{
+    return H3AutoPolicy::VisibleTextRows(PANEL_H - BATTLE_DD_LIST_Y - 4,
+        BattleDropdownRowHeight_(), s_battle_record_count);
+}
+
+static int BattleDropdownFirstRow_()
+{
+    const int last = s_battle_record_count - BattleDropdownVisibleRows_();
+    if (s_battle_dd_first > last) s_battle_dd_first = last;
+    if (s_battle_dd_first < 0) s_battle_dd_first = 0;
+    return s_battle_dd_first;
+}
+
+static int BattleDropdownHit_(int x, int y)
+{
+    const int row_h = BattleDropdownRowHeight_();
+    const int rows = BattleDropdownVisibleRows_();
+    if (x < BATTLE_DD_LIST_X || x >= BATTLE_DD_LIST_X + BATTLE_DD_LIST_W
+        || y < BATTLE_DD_LIST_Y || y >= BATTLE_DD_LIST_Y + rows * row_h)
+        return -1;
+    return BattleDropdownFirstRow_() + (y - BATTLE_DD_LIST_Y) / row_h;
+}
 // 选中项记忆（进程内、与战斗指纹关联）：「确定」时记下当前选中档的
 // 时间戳；下次打开同指纹面板按时间戳找回选中项（新档插到末尾不影响
 // 旧时间戳）。换战斗指纹不命中 → 默认最新。只两个量，不落盘。
@@ -1639,15 +1690,7 @@ static bool UpdateDropdownHover_(int px, int py)
     }
     // 本场存档下拉同款：钩子即时更新悬停行（时间降序下标）。
     if (s_battle_dd_open) {
-        int new_battle_hover = -1;
-        for (int i = 0; i < s_battle_record_count; ++i) {
-            const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
-            if (PointInRect_(px, py, BATTLE_DD_LIST_X, iy,
-                    BATTLE_DD_LIST_W, BATTLE_DD_ITEM_H)) {
-                new_battle_hover = i;
-                break;
-            }
-        }
+        const int new_battle_hover = BattleDropdownHit_(px, py);
         if (new_battle_hover != s_battle_dd_hover) {
             s_battle_dd_hover = new_battle_hover;
             changed = true;
@@ -1707,9 +1750,12 @@ static bool UpdateDropdownHover_(int px, int py)
     if (s_status_dd_open >= 0) {
         int x = 0, y = 0, hover = -1;
         StatusSlotRect_(s_status_dd_open, &x, &y);
-        for (int i = 0; i < s_status_dd_count; ++i) {
-            const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
-            if (PointInRect_(px, py, x, iy, STATUS_DD_W, STATUS_ITEM_H)) {
+        const int first = StatusDropdownFirstRow_();
+        const int rows = StatusDropdownVisibleRows_();
+        for (int v = 0; v < rows; ++v) {
+            const int i = first + v;
+            const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
+            if (PointInRect_(px, py, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H))) {
                 hover = i;
                 break;
             }
@@ -1985,24 +2031,21 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         if (raw_command == 4)
             return;
         if (raw_command == 8 || raw_command == 16) {
-            for (int i = 0; i < s_battle_record_count; ++i) {
-                const int iy = BATTLE_DD_LIST_Y + i * BATTLE_DD_ITEM_H;
-                if (PointInRect_(px, py, BATTLE_DD_LIST_X, iy,
-                        BATTLE_DD_LIST_W, BATTLE_DD_ITEM_H)) {
-                    const BattleStoreRecord* rec = BattleRecordAt_(i);
-                    if (rec) {
-                        LoadBattleRecordIntoDrafts_(*rec);
-                        s_battle_dd_sel = i;
-                        s_battle_loaded_fp = GetBattleFingerprint();
-                        SetStatusText_(T("panel.status_battle_loaded"), 4000);
-                        LogInfo("[Panel] 载入本场存档 %s（方案%d，未确定不生效）",
-                            rec->time, rec->active + 1);
-                    }
-                    s_battle_dd_open = false;
-                    s_battle_dd_hover = -1;
-                    DrawPanelToBuffer_();
-                    return;
+            const int hit = BattleDropdownHit_(px, py);
+            if (hit >= 0) {
+                const BattleStoreRecord* rec = BattleRecordAt_(hit);
+                if (rec) {
+                    LoadBattleRecordIntoDrafts_(*rec);
+                    s_battle_dd_sel = hit;
+                    s_battle_loaded_fp = GetBattleFingerprint();
+                    SetStatusText_(T("panel.status_battle_loaded"), 4000);
+                    LogInfo("[Panel] 载入本场存档 %s（方案%d，未确定不生效）",
+                        rec->time, rec->active + 1);
                 }
+                s_battle_dd_open = false;
+                s_battle_dd_hover = -1;
+                DrawPanelToBuffer_();
+                return;
             }
             if (PointInRect_(px, py, BATTLE_DD_X, BATTLE_DD_Y,
                     BATTLE_DD_W, BATTLE_DD_H)) {
@@ -2218,9 +2261,12 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 s_p.draft_status[s_p.selected_profile];
             int x = 0, y = 0;
             StatusSlotRect_(s_status_dd_open, &x, &y);
-            for (int i = 0; i < s_status_dd_count; ++i) {
-                const int iy = y + STATUS_DD_H + i * STATUS_ITEM_H;
-                if (!PointInRect_(px, py, x, iy, STATUS_DD_W, STATUS_ITEM_H))
+            const int first = StatusDropdownFirstRow_();
+            const int rows = StatusDropdownVisibleRows_();
+            for (int v = 0; v < rows; ++v) {
+                const int i = first + v;
+                const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
+                if (!PointInRect_(px, py, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H)))
                     continue;
                 if (s_status_dd_open < status.slot_count)
                     status.slots[s_status_dd_open] = s_status_dd_ids[i];
@@ -2357,6 +2403,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 handled = true;
                 if (BuildStatusCandidates_(status, i) > 0) {
                     s_status_dd_open = i;
+                    s_status_dd_first = 0;
                     s_status_dd_hover = -1;
                 } else {
                     SetStatusText_(T("panel.status_empty"), 3000);
@@ -2374,6 +2421,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         const int picked = s_status_dd_ids[0];
                         status.slots[status.slot_count++] = picked;
                         s_status_dd_open = status.slot_count - 1;
+                        s_status_dd_first = 0;
                         s_status_dd_hover = -1;
                         LogInfo("[Panel] 保持状态追加 spell=%d (方案%d)",
                             picked, s_p.selected_profile + 1);
@@ -2646,6 +2694,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 if (s_battle_record_count > 0) {
                     s_battle_dd_open = !s_battle_dd_open;
                     s_battle_dd_hover = -1;
+                    s_battle_dd_first = s_battle_dd_sel > 0 ? s_battle_dd_sel : 0;
+                    BattleDropdownFirstRow_();
                     LogDebug("[Panel] 本场存档下拉 %s（%d 条）",
                         s_battle_dd_open ? "展开" : "收起",
                         s_battle_record_count);

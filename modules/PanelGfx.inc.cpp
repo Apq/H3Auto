@@ -3,12 +3,19 @@
 // 离屏合成与后缓冲输出。在 H3Auto.cpp 中排在 SettingsDlg.inc.cpp 之前，
 // 供 SettingsDlg 与 PanelDraw 共用。
 #include "PanelLayout.hpp"
+#include "TextLayoutCore.hpp"
 
 #define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
 #define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 static void LogWarn(const char* fmt, ...);
+
+static int SmallFontRowHeight_(int design_height)
+{
+    const H3Font* font = H3SmallFont::Get();
+    return H3AutoPolicy::FontAwareRowHeight(design_height, font ? font->height : 0);
+}
 
 // 与 H3BattleValueInfo 远程对比框相同：先离屏合成，再一次性写入 backbuffer。
 static H3LoadedPcx16* s_panel_composite = nullptr;
@@ -55,6 +62,10 @@ static void DrawTxt(H3LoadedPcx16* scr, H3Font* fnt, const char* text,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
 {
     if (!fnt || !text || w <= 0 || h <= 0) return;
+    const H3AutoPolicy::TextVerticalRect rect = H3AutoPolicy::FitTextVerticalRect(
+        y, h, fnt->height, static_cast<unsigned>(align));
+    y = rect.y;
+    h = rect.height;
     char gbk[512] = {};
     scr->TextDraw(fnt, ToGbk_(text, gbk, sizeof(gbk)),
         x, y, w, h, (eTextColor)color, align);

@@ -105,7 +105,7 @@ static const int CC_COMBO_W  = CC_COL2_W; // 行动下拉用第二小列宽
 static const int CC_COL_W    = CC_COL3_W; // 旧“内容列宽”=第三列
 static const int CC_ROW1_Y   = CC_TOP_Y;
 
-static const int CC_DROPDOWN_ITEM_H = 18;
+static int CellDropdownRowHeight_() { return SmallFontRowHeight_(18); }
 
 // 标签（由 SettingsDlg 注入）
 extern const char* g_action_labels[AA_COUNT];
@@ -557,7 +557,7 @@ static bool CellControl_GetExpandRectForCtrl(CellControl* ctrl,
     out_rc->left   = cell_panel_x + CellControl_GetExpandListLeftX(ctrl);
     out_rc->top    = cell_panel_y + CellControl_GetExpandListTopY(ctrl);
     out_rc->right  = out_rc->left + CellControl_GetExpandListWidth(ctrl);
-    out_rc->bottom = out_rc->top + item_count * CC_DROPDOWN_ITEM_H;
+    out_rc->bottom = out_rc->top + item_count * CellDropdownRowHeight_();
     return true;
 }
 
@@ -647,6 +647,10 @@ static void CellControl_DrawText(H3LoadedPcx16* scr, H3Font* fnt,
     eTextAlignment align = eTextAlignment::MIDDLE_CENTER)
 {
     if (!fnt || !text || w <= 0 || h <= 0) return;
+    const H3AutoPolicy::TextVerticalRect rect = H3AutoPolicy::FitTextVerticalRect(
+        y, h, fnt->height, static_cast<unsigned>(align));
+    y = rect.y;
+    h = rect.height;
 
     bool ascii = true;
     for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
@@ -766,6 +770,34 @@ static void CellControl_DrawCreatureIcon(CellControl* ctrl, H3LoadedPcx16* scr)
         s_cc_icon_frame_load_failed, false);
     if (frameImg)
         DrawTransparentPcx_(frameImg, scr, CC_ICON_X - 1, CC_ICON_Y - 1);
+
+    const int portrait_h = H3AutoPolicy::MetadataPortraitHeight(CC_CELL_H,
+        SmallFontRowHeight_(CC_LABEL_H), CC_ICON_Y, CC_ICON_H);
+    if (portrait_h < CC_ICON_H) {
+        const int target_h = portrait_h > 0 ? portrait_h + 2 : 0;
+        const int target_w = CC_ICON_FRAME_W * target_h / CC_ICON_FRAME_H;
+        const int bytes = H3BitMode::Get() == 4 ? 4 : 2;
+        const int left = CC_ICON_X - 1;
+        const int top = CC_ICON_Y - 1;
+        // Downsample in place: each source pixel is at or after its destination.
+        for (int yy = 0; yy < target_h; ++yy) {
+            const int sy = top + yy * CC_ICON_FRAME_H / target_h;
+            for (int xx = 0; xx < target_w; ++xx) {
+                const int sx = left + xx * CC_ICON_FRAME_W / target_w;
+                BYTE* dst = scr->buffer + (top + yy) * scr->scanlineSize + (left + xx) * bytes;
+                const BYTE* src = scr->buffer + sy * scr->scanlineSize + sx * bytes;
+                for (int b = 0; b < bytes; ++b) dst[b] = src[b];
+            }
+        }
+        for (int yy = 0; yy < CC_ICON_FRAME_H; ++yy) {
+            for (int xx = 0; xx < CC_ICON_FRAME_W; ++xx) {
+                if (yy < target_h && xx < target_w) continue;
+                BYTE* pixel = scr->buffer + (top + yy) * scr->scanlineSize + (left + xx) * bytes;
+                if (bytes == 4) *reinterpret_cast<DWORD*>(pixel) = 0xFF00FFFFu;
+                else *reinterpret_cast<WORD*>(pixel) = 0x7FDF;
+            }
+        }
+    }
 }
 
 // ========================================================================
@@ -1028,13 +1060,14 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     // 放在图标列下方/旁侧左缘，避免宽列 + TextDraw 看起来像右对齐。
     const int meta_x = CC_ICON_X;
     const int meta_w = CC_ICON_W;
-    const int pos_y   = CC_CELL_H - CC_LABEL_H - 4; // 位置：贴格子下边缘
-    const int count_y = pos_y - CC_LABEL_H - 1;     // 数量：位置上方
+    const int label_h = H3AutoPolicy::FontAwareRowHeight(CC_LABEL_H, fntS->height);
+    const int pos_y = CC_CELL_H - label_h - 4;
+    const int count_y = pos_y - label_h - 1;
 
     char pos_buf[8] = {};
     CellControl_FormatPosition(pos_buf, sizeof(pos_buf), ctrl->data.position);
     CellControl_DrawText(scr, fntS, pos_buf,
-        meta_x, pos_y, meta_w, CC_LABEL_H,
+        meta_x, pos_y, meta_w, label_h,
         (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::HLEFT);
 
     char count_buf[16] = {};
@@ -1043,7 +1076,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     else
         strncpy(count_buf, "--", sizeof(count_buf) - 1);
     CellControl_DrawText(scr, fntS, count_buf,
-        meta_x, count_y, meta_w, CC_LABEL_H,
+        meta_x, count_y, meta_w, label_h,
         (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_RIGHT);
 
     ctrl->dirty = false;
@@ -1060,9 +1093,9 @@ static void CellControl_DrawDropdownItem(H3LoadedPcx16* scr, H3Font* fnt,
     int list_top_y, int list_left_x, int item_w_override = -1)
 {
     int item_x = cell_panel_x + list_left_x;
-    int item_y = cell_panel_y + list_top_y + item_index * CC_DROPDOWN_ITEM_H;
+    int item_y = cell_panel_y + list_top_y + item_index * CellDropdownRowHeight_();
     int item_w = (item_w_override > 0) ? item_w_override : CC_COL_W;
-    int item_h = CC_DROPDOWN_ITEM_H;
+    int item_h = CellDropdownRowHeight_();
 
     BYTE bg_r, bg_g, bg_b, frame_r, frame_g, frame_b;
     INT32 text_color;
@@ -1203,7 +1236,7 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
         char buf[8] = {};
         CellControl_FormatPosition(buf, sizeof(buf), hexes[i]);
         const int item_x = list_x;
-        const int item_y = list_top + v * CC_DROPDOWN_ITEM_H;
+        const int item_y = list_top + v * CellDropdownRowHeight_();
         const bool is_sel = (hexes[i] == cur_hex);
         const bool is_hov = (i == hover_idx);
         BYTE bg_r,bg_g,bg_b,fr,fg,fb; INT32 tc;
@@ -1216,16 +1249,16 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
             else if (is_sel) { bg_r=136;bg_g=88;bg_b=24; fr=232;fg=184;fb=76; tc=(INT32)eTextColor::WHITE; }
             else { bg_r=68;bg_g=42;bg_b=18; fr=166;fg=112;fb=40; tc=(INT32)eTextColor::YELLOW; }
         }
-        Fill(scr, item_x, item_y, list_w, CC_DROPDOWN_ITEM_H, bg_r, bg_g, bg_b);
-        scr->DrawFrame(item_x, item_y, list_w, CC_DROPDOWN_ITEM_H, fr, fg, fb);
+        Fill(scr, item_x, item_y, list_w, CellDropdownRowHeight_(), bg_r, bg_g, bg_b);
+        scr->DrawFrame(item_x, item_y, list_w, CellDropdownRowHeight_(), fr, fg, fb);
         CellControl_DrawText(scr, fntS, buf,
-            item_x + 4, item_y, list_w - 20, CC_DROPDOWN_ITEM_H,
+            item_x + 4, item_y, list_w - 20, CellDropdownRowHeight_(),
             tc, eTextAlignment::MIDDLE_LEFT);
         // 滚动指示：首/末可见项画箭头
         if (v == 0 && scroll > 0)
             CellControl_DrawArrow(scr, item_x + list_w - 12, item_y + 2, false);
         if (v == vis - 1 && scroll < max_scroll)
-            CellControl_DrawArrow(scr, item_x + list_w - 12, item_y + CC_DROPDOWN_ITEM_H - 6, true);
+            CellControl_DrawArrow(scr, item_x + list_w - 12, item_y + CellDropdownRowHeight_() - 6, true);
     }
 }
 
@@ -1505,7 +1538,7 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
             const int list_top = CellControl_GetExpandListTopY(ctrl);
             const int rel_y = local_y - list_top;
             if (rel_y >= 0 && n > 0) {
-                const int idx = rel_y / CC_DROPDOWN_ITEM_H;
+                const int idx = rel_y / CellDropdownRowHeight_();
                 if (idx >= 0 && idx < n)
                     return CELL_HIT_DROP;
             }
@@ -1617,7 +1650,7 @@ static int CellControl_HitExpandVisibleIndex(CellControl* ctrl, int local_x, int
     const int list_top = CellControl_GetExpandListTopY(ctrl);
     const int rel_y = local_y - list_top;
     if (rel_y < 0) return -1;
-    const int idx = rel_y / CC_DROPDOWN_ITEM_H;
+    const int idx = rel_y / CellDropdownRowHeight_();
     if (idx < 0 || idx >= n) return -1;
     return idx;
 }

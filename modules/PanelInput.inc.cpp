@@ -590,6 +590,22 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     }
     if (panel_was_active && raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL)) {
         const int wheel_delta = static_cast<int>(msg.subtype);
+        if (s_battle_dd_open) {
+            if (wheel_delta < 0) ++s_battle_dd_first;
+            else if (wheel_delta > 0) --s_battle_dd_first;
+            BattleDropdownFirstRow_();
+            s_battle_dd_hover = -1;
+            DrawPanelToBuffer_();
+            return msg.StopProcessing();
+        }
+        if (s_status_dd_open >= 0) {
+            if (wheel_delta < 0) ++s_status_dd_first;
+            else if (wheel_delta > 0) --s_status_dd_first;
+            StatusDropdownFirstRow_();
+            s_status_dd_hover = -1;
+            DrawPanelToBuffer_();
+            return msg.StopProcessing();
+        }
         // 近战站立/攻击下拉展开时，滚轮优先滚动下拉列表
         bool scrolled_dropdown = false;
         for (int i = 0; i < CELL_COUNT; ++i) {
