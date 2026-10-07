@@ -86,7 +86,16 @@ static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
         int total = 0;
         WIN32_FIND_DATAW fd;
         Utf8ToWide_(dir, wdir, kPathCap_ / 2);
-        _snwprintf(pattern, kPathCap_ / 2 - 1, L"%s\\H3Auto_*.log", wdir);
+        // 收集模式与日志器同源（g_log_base = DLL 文件名去扩展名）：与其他插件
+        // 同目录也只匹配自己的日志；DLL 被改名后依旧正确。基名缺失才退回
+        // 写死前缀（等价于未改名的默认部署）。
+        wchar_t wbase[64] = {};
+        if (g_log_base[0])
+            Utf8ToWide_(g_log_base, wbase, (int)(sizeof(wbase) / sizeof(wbase[0])));
+        if (wbase[0])
+            _snwprintf(pattern, kPathCap_ / 2 - 1, L"%s\\%s_*.log", wdir, wbase);
+        else
+            _snwprintf(pattern, kPathCap_ / 2 - 1, L"%s\\H3Auto_*.log", wdir);
         pattern[kPathCap_ / 2 - 1] = 0;
         HANDLE h = FindFirstFileW(pattern, &fd);
         if (h != INVALID_HANDLE_VALUE) {
