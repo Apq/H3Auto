@@ -67,6 +67,11 @@
     <ClInclude Include="modules\PolicyCore.hpp" />
     <ClInclude Include="modules\BattleState.hpp" />
     <ClInclude Include="modules\ForceField.hpp" />
+    <ClInclude Include="modules\AttackMagic.inc.cpp" />
+    <ClInclude Include="modules\BattleStoreJsonCore.inc.hpp" />
+    <ClInclude Include="modules\MagicChannelUi.inc.cpp" />
+    <ClInclude Include="modules\MagicChannelDraw.inc.cpp" />
+    <ClInclude Include="modules\MagicChannelInputCore.hpp" />
     <ClInclude Include="modules\ForceField.inc.cpp" />
     <ClInclude Include="modules\CrashGuardCore.hpp" />
     <ClInclude Include="modules\IniUtf8.inc.cpp" />

@@ -53,7 +53,7 @@ static struct Panel {
     int hover_cell;   // 下拉展开时鼠标悬停的格子索引，-1=无
     int hover_idx;    // 下拉展开时鼠标悬停的项索引，-1=无
     int active_page;  // 当前 Tab 页：PAGE_ARMY / PAGE_PROFILE
-    CellControl cells[CELL_COUNT]; // 仅保存当前可见的最多 3 行控件
+    CellControl cells[CELL_COUNT]; // 仅保存当前可见的最多 VISIBLE_ROWS 行控件
 } s_p = {};
 
 static bool s_panel_redraw_in_progress = false;
@@ -63,10 +63,8 @@ static bool s_panel_hidden_for_pick = false;
 
 // 面板打开时安装 WH_KEYBOARD 钩子，立即响应 ESC/Enter，不依赖游戏帧率
 static void CommitAndCloseSettingsPanel_();
-static void EndSpellPick_();
-static bool CommitSpellSlotPick_(int slot_value);
 static void DrawPanelToBuffer_();
-// 循环施法录入状态需在键盘钩子前声明。
+// 帮助与数字阈值录入状态需在键盘钩子前声明。
 static bool s_help_modal_open = false;
 static bool s_help_log_dd_open = false;
 static DWORD s_help_link_flash_tick = 0; // 复制开源地址成功时刻，地址行闪绿 1.2s
@@ -109,8 +107,6 @@ static void SetStatusText_(const char* rich_text, DWORD hold_ms)
 
 static HHOOK s_kb_hook = nullptr;
 static HHOOK s_mouse_hook = nullptr;
-static int s_spell_pick_cell = -1;
-static int s_spell_pick_slot = -1;
 static int s_melee_pick_cell = -1;
 static int s_melee_pick_pair = -1;
 static int s_melee_pick_phase = 0;
@@ -121,6 +117,10 @@ static int s_move_pick_wp = -1;
 static bool s_forcefield_pick = false;
 static int s_forcefield_pick_slot = -1;
 static void EndForceFieldPick_();
+static int s_attack_pick_row = -1;
+static int s_attack_pick_position = -1;
+static void EndAttackMagicPick_();
+static void CloseAttackMagicUi_();
 
 // ===== 保活通道下拉（方案级）与数字键拦截 =====
 
@@ -130,9 +130,6 @@ static void CancelStopTurnsEdit_();
 
 
 // 面板打开时安装 WH_MOUSE 钩子，鼠标移动立即刷新下拉悬停高亮，不依赖游戏帧率
-static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void DrawSpellKeyModal_(H3LoadedPcx16* scr);
 
 static const UINT s_right_click_dialog_vtable = 0x0063DB40;
 // 真正的战斗窗口。0x0063A5E4 是战斗底下仍保留的冒险地图窗口。
@@ -217,8 +214,11 @@ static bool IsGameMouseInputActive_()
     return PtInRect(&client, cursor) != FALSE;
 }
 
+static void CancelAttackMagicGesture_();
+
 static void CancelPanelTransientInput_()
 {
+    CancelAttackMagicGesture_();
     s_p.pressed_button = 0;
     s_p.pressed_profile = -1;
     s_p.scroll_button_pressed = 0;
@@ -335,7 +335,7 @@ static void SetPanelScrollRow_(int row)
     if (row > max_row) row = max_row;
     if (row == s_p.scroll_row) return;
 
-    // 滚动前保存当前可见 3 行的草稿；滚动后按新 first_item 重新绑定。
+    // 滚动前保存当前可见行（VISIBLE_ROWS）的草稿；滚动后按新 first_item 重新绑定。
     SaveCurrentCellsToDraft_();
     s_p.scroll_row = row;
     RebindVisibleCells_();
@@ -632,7 +632,7 @@ static INT Hook_BltComplete_Inner_(LoHook* h, HookContext* c)
         if (s_p.active && s_panel_hidden_for_pick)
             DrawMeleePickMarker_();
     } else {
-        // 循环施法是两阶段状态机：必须每帧观察 heroCasted/法力变化，
+        // 部队动作提交与观察均由当前动作管线处理，
         // 再决定推进游标并提交部队主动作，不能只依赖偶发战斗消息。
         __try {
             TryAutoExecuteActiveStack(false);
@@ -898,6 +898,7 @@ static void CloseSummonDropdowns_()
     s_summon_act_dd_hover = -1;
     s_status_dd_open = -1;
     s_status_dd_hover = -1;
+    CloseAttackMagicUi_();
 }
 
 // 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速；
@@ -1062,6 +1063,9 @@ static void HidePanelForPick_()
     }
 }
 
+static bool s_battle_dd_open = false; // 顶层存档浮层，攻击UI需先判断
+#include "MagicChannelUi.inc.cpp"
+
 // ========================================================================
 // 第七部分：面板控制
 // ========================================================================
@@ -1108,7 +1112,7 @@ static void SaveCurrentCellsToDraft_()
     }
 }
 
-// 根据 scroll_row 把全量部队快照重新绑定到可见 3 行。
+// 根据 scroll_row 把全量部队快照重新绑定到可见 VISIBLE_ROWS 行。
 static void RebindVisibleCells_()
 {
     const int profile = s_p.selected_profile;
@@ -1131,7 +1135,6 @@ static void RebindVisibleCells_()
             ctrl->hover_item = -1;
             ctrl->melee_pair_pick_request = 0;
             ctrl->move_path_pick_request = 0;
-            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
         }
     }
@@ -1184,7 +1187,6 @@ void ResetPanelDrafts()
 static BattleStoreRecord s_battle_records[BATTLE_DD_MAX_ITEMS]; // ~300KB .bss
 static int  s_battle_record_count = 0;   // 文件序（升序：末尾=最新）
 static unsigned long long s_battle_loaded_fp = 0; // 该指纹本会话已载入
-static bool s_battle_dd_open = false;
 static int  s_battle_dd_hover = -1;      // 列表 hover（降序下标）
 static int  s_battle_dd_sel = -1;        // 当前选中条（降序下标，0=最新）
 static int s_battle_dd_first = 0;
@@ -1341,6 +1343,8 @@ void OpenSettingsPanel_()
     s_p.saved_cursor_frame = mouse ? mouse->GetFrame() : 0;
     s_panel_modal_suspended = false;
     s_panel_hidden_for_pick = false;
+    s_attack_pick_row = -1;
+    s_attack_pick_position = -1;
     s_forcefield_pick = false;
     s_forcefield_pick_slot = -1;
     s_pick_wait_button_release = false;
@@ -1350,8 +1354,6 @@ void OpenSettingsPanel_()
     s_melee_pick_stand_hex = -1;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
-    s_spell_pick_cell = -1;
-    s_spell_pick_slot = -1;
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
@@ -1436,7 +1438,7 @@ void OpenSettingsPanel_()
                 if (IsConfigurablePanelStack_(mgr->stacks[side][i], hero))
                     continue;
                 const AutoStackRule& d = s_p.draft_rules[p][i];
-                if (d.action != AA_MANUAL || d.spellSlotCount > 0) ++cleared;
+                if (d.action != AA_MANUAL) ++cleared;
                 s_p.draft_rules[p][i] = H3AutoPolicy::MakeDefaultRule();
             }
         }
@@ -1525,13 +1527,13 @@ void CloseSettingsPanel()
     s_melee_pick_pair = -1;
     s_melee_pick_stand_hex = -1;
     s_panel_hidden_for_pick = false;
+    s_attack_pick_row = -1;
+    s_attack_pick_position = -1;
     s_forcefield_pick = false;
     s_forcefield_pick_slot = -1;
     s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
-    s_spell_pick_cell = -1;
-    s_spell_pick_slot = -1;
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
@@ -1655,7 +1657,6 @@ static bool HandleExpandedDropdownClick_(int px, int py, int cell_msg)
 // 返回 true 表示重绘了。
 static bool UpdateDropdownHover_(int px, int py)
 {
-    if (s_spell_pick_cell >= 0) return false;
     const int first_item = s_p.scroll_row * COLS;
     int new_hover_cell = -1, new_hover_idx = -1;
     for (int i = 0; i < CELL_COUNT; ++i) {
@@ -1682,7 +1683,7 @@ static bool UpdateDropdownHover_(int px, int py)
         new_hover_idx = idx;
         break;
     }
-    bool changed = false;
+    bool changed = UpdateAttackMagicHover_(px, py);
     if (new_hover_cell != s_p.hover_cell || new_hover_idx != s_p.hover_idx) {
         s_p.hover_cell = new_hover_cell;
         s_p.hover_idx = new_hover_idx;
@@ -1883,6 +1884,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         }
         return;
     }
+
+    if (HandleAttackMagicMouse_(raw_command, px, py)) return;
 
     // 停止回合录入中：点框外提交；点框内（按下）把光标定位到最近字符边界。
     if (s_stop_turns_editing && (raw_command == 8 || raw_command == 16)) {
@@ -2166,18 +2169,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
-    // 快捷键录入模态框打开时：吞掉所有底层点击，仅允许点取消。
-    if (s_spell_pick_cell >= 0) {
-        if (raw_command == 16) {
-            int bx = 0, by = 0, bw = 0, bh = 0;
-            GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
-            if (PointInRect_(px, py, bx, by, bw, bh))
-                EndSpellPick_();
-        }
-        return;
-    }
 
-    // 右键松开：循环施法 / 循环移动 / 循环近战 已有槽位直接删除。
+
+    // 右键松开：循环移动 / 循环近战已有槽位直接删除。
     // （召唤页没有卡片，右键直接吞掉。）
     if (raw_command == 64
         || raw_command == static_cast<int>(eMsgCommand::RBUTTON_UP)) {
@@ -2597,25 +2591,6 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 i, s_move_pick_wp);
                             ctrl->move_path_pick_request = 0;
                         }
-                        // 循环施法：已有快捷键可覆盖，末尾「＋」追加。
-                        // 弹出模态框，只等按 1-9/0（含小键盘）；不再点选快捷施法栏。
-                        if (ctrl->spell_pick_request != 0) {
-                            // 切换到另一个槽时，清掉旧槽高亮。
-                            if (s_spell_pick_cell >= 0 && s_spell_pick_cell < CELL_COUNT
-                                && s_spell_pick_cell != i)
-                                s_p.cells[s_spell_pick_cell].spell_pick_request = 0;
-                            s_spell_pick_slot = ctrl->spell_pick_request - 1;
-                            s_spell_pick_cell = i;
-                            s_help_modal_open = false;
-                            // 收起所有下拉，避免模态框下方还有展开层。
-                            for (int k = 0; k < CELL_COUNT; ++k) {
-                                s_p.cells[k].expanded = CEX_NONE;
-                                s_p.cells[k].dirty = true;
-                            }
-                            // 保留 spell_pick_request 做槽位高亮；数字键提交后再清。
-                            LogInfo("[Panel] 弹出循环施法快捷键模态框 cell=%d slot=%d",
-                                i, s_spell_pick_slot);
-                        }
                         // 循环近战：已有组合可覆盖重设，末尾「＋」追加。
                         // 单次隐藏面板后连续选站立格、相邻攻击格。
                         if (ctrl->melee_pair_pick_request != 0) {
@@ -2741,7 +2716,6 @@ void HandlePanelInput_()
     static bool previous_down_down = false;
     static bool previous_page_up_down = false;
     static bool previous_page_down_down = false;
-    static bool previous_digit_down[10] = {};
 
     const bool up_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
     const bool down_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
@@ -2757,34 +2731,11 @@ void HandlePanelInput_()
         previous_down_down = down_down;
         previous_page_up_down = page_up_down;
         previous_page_down_down = page_down_down;
-        for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;
         return;
     }
 
-    // 循环施法模态框：只支持直接按 1-9/0（含小键盘）；ESC 取消。
-    // 底层滚动键在模态框打开时不处理。
-    if (s_spell_pick_cell >= 0) {
-        for (int d = 0; d <= 9; ++d) {
-            const int vk_main = (d == 0) ? '0' : ('0' + d);
-            const int vk_num = (d == 0) ? VK_NUMPAD0 : (VK_NUMPAD0 + d);
-            const bool down = ((GetAsyncKeyState(vk_main) & 0x8000) != 0)
-                || ((GetAsyncKeyState(vk_num) & 0x8000) != 0);
-            if (down && !previous_digit_down[d]) {
-                if (CommitSpellSlotPick_(d))
-                    break;
-            }
-            previous_digit_down[d] = down;
-        }
-        if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
-            EndSpellPick_();
-        previous_up_down = up_down;
-        previous_down_down = down_down;
-        previous_page_up_down = page_up_down;
-        previous_page_down_down = page_down_down;
-        return;
-    }
 
-    for (int d = 0; d < 10; ++d) previous_digit_down[d] = false;
+
 
     const int old_row = s_p.scroll_row;
     if (up_down && !previous_up_down) SetPanelScrollRow_(s_p.scroll_row - 1);

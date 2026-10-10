@@ -1,5 +1,5 @@
 // PanelInput.inc.cpp - 设置面板的输入捕获层：WH_KEYBOARD/WH_MOUSE 钩子、
-// HD 悬停屏蔽、BattleUI 输入屏障、三种战场拾取（移动路径/法术槽/近战）。
+// HD 悬停屏蔽、BattleUI 输入屏障、战场拾取（移动路径/近战/力盾/攻击位置）。
 // 在 H3Auto.cpp 中排在 SettingsDlg.inc.cpp 之后：面板状态与工具函数
 // 来自 SettingsDlg，反向被调用的函数经 PanelInput.hpp 声明。
 
@@ -38,7 +38,7 @@ static bool UpdateDropdownHover_(int px, int py);  // 前向声明（钩子先�
 // 循环移动路径点拾取：与循环近战同交互，但每次只点 1 格。
 // s_move_pick_cell 为卡片索引，s_move_pick_wp 为路径点槽 0..5。
 static void EndMovePathPick_();
-// 循环施法录入：弹出模态框，仅按 1-9/0 记录同一数字。
+// 战场格回填共享入口。
 static void DoPickCapture_(int hex, bool right_click);
 
 
@@ -57,6 +57,7 @@ static int DigitFromVk_(WPARAM vk)
 
 static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
 {
+    __try {
     // 只要设置面板还在（含 s_panel_hidden_for_pick），就拦截相关键。
     // 不再判断 s_panel_modal_suspended：隐藏拾取时也要挡住快捷施法。
     if (code == HC_ACTION && s_p.active && !(lParam & 0x80000000)) // keydown only
@@ -69,7 +70,7 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 CancelSummonNumEdit_();
                 DrawPanelToBuffer_();
             } else if (s_summon_spell_dd_open || s_summon_cond_dd_open
-                || s_summon_act_dd_open || s_status_dd_open >= 0) {
+                || s_summon_act_dd_open || s_status_dd_open >= 0 || s_attack_dd_row >= 0) {
                 CloseSummonDropdowns_();
                 DrawPanelToBuffer_();
             } else if (s_stop_turns_editing) {
@@ -84,8 +85,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
             } else if (PanelAnyProtectCountEditing_()) {
                 PanelCancelAllProtectCountEdits_();
                 DrawPanelToBuffer_();
-            } else if (s_spell_pick_cell >= 0)
-                EndSpellPick_();
+            } else if (s_attack_pick_row >= 0)
+                EndAttackMagicPick_();
             else if (s_forcefield_pick)
                 EndForceFieldPick_();
             else if (!s_panel_hidden_for_pick) {
@@ -109,9 +110,9 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         }
         // 帮助/快捷键模态或召唤下拉展开时：Enter 不提交设置面板，仅吞掉。
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
-            && s_spell_pick_cell < 0 && !s_help_modal_open
+            && !s_help_modal_open
             && !s_summon_spell_dd_open && !s_summon_cond_dd_open
-            && !s_summon_act_dd_open && s_status_dd_open < 0) {
+            && !s_summon_act_dd_open && s_status_dd_open < 0 && s_attack_dd_row < 0) {
             SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
@@ -415,15 +416,10 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 || IsDigitKey_(wParam))
                 return 1;
         }
-        if (IsDigitKey_(wParam)) {
-            // 快捷施法槽位：钩子先手；停止回合录入与槽位兜底都在轮询。
-            if (s_spell_pick_cell >= 0) {
-                const int d = DigitFromVk_(wParam);
-                if (d >= 0) CommitSpellSlotPick_(d);
-            }
-            return 1;  // 始终吞掉 0-9，防止原版快捷施法捕获
-        }
+        if (IsDigitKey_(wParam))
+            return 1; // 面板期间仍吞掉 0-9，避免原版快捷施法穿透
     }
+    } __except (GuardCrashFilter_(GHID_PANEL_KB, GetExceptionInformation())) {}
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
@@ -440,7 +436,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         // 会导致悬停高亮函数根本不被调用（绘制侧的高亮分支是好的，只是
         // hover 值永远停在 -1）。
         bool any_expanded = s_summon_spell_dd_open || s_summon_cond_dd_open
-            || s_summon_act_dd_open || s_battle_dd_open || s_status_dd_open >= 0;
+            || s_summon_act_dd_open || s_battle_dd_open || s_status_dd_open >= 0 || s_attack_dd_row >= 0;
         for (int i = 0; i < CELL_COUNT; ++i) {
             if (s_p.cells[i].expanded != CEX_NONE) {
                 any_expanded = true;
@@ -471,9 +467,7 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
             }
         }
     }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogError("[Panel] 鼠标钩子异常 code=0x%08X", GetExceptionCode());
-    }
+    } __except (GuardCrashFilter_(GHID_PANEL_MOUSE, GetExceptionInformation())) {}
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
@@ -517,12 +511,13 @@ static int ResolvePickHexAtScreen_(H3CombatManager* mgr, int abs_x, int abs_y, i
 
 static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
 {
+    __try {
     // 战场拾取期间：屏障 item 会收到战场点击。此时不派发给战场（靠
     // StopProcessing 吞掉，部队绝不行动）。hex 直接从消息中的游戏逻辑坐标
     // 用 SquareAtCoordinates(0x464380) 转换，不依赖 mouseCoord 也不恢复 hover，
     // 因此拾取期间游戏不会显示任何与待行动兵种相关的悬停高亮，只有我
     // 们自己的蓝色格子标示。左键松开=确认，右键=取消。
-    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0 || s_forcefield_pick)) {
+    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0 || s_forcefield_pick || s_attack_pick_row >= 0)) {
         const int raw = static_cast<int>(msg.command);
         // 只用松开确认；LCLICK_OUTSIDE/RCLICK_OUTSIDE 与 UP 会在同一次点击里连发，
         // 只处理 UP 即可，无需按时间或格号去重。
@@ -606,6 +601,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
             DrawPanelToBuffer_();
             return msg.StopProcessing();
         }
+        if (AttackMagicWheel_(wheel_delta)) return msg.StopProcessing();
         // 近战站立/攻击下拉展开时，滚轮优先滚动下拉列表
         bool scrolled_dropdown = false;
         for (int i = 0; i < CELL_COUNT; ++i) {
@@ -628,7 +624,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
                 DrawPanelToBuffer_();
         }
     }
-    // 右键松开：用于循环施法/移动/近战已有槽位删除。
+    // 右键松开：用于循环移动/近战已有槽位删除。
     // 预翻译包里 RBUTTON_UP 的原始 command 通常为 64。
     if (panel_was_active
         && (raw_command == 4 || raw_command == 8 || raw_command == 16
@@ -641,6 +637,9 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
             static_cast<int>(msg.position.x), static_cast<int>(msg.position.y));
     }
     return panel_was_active ? msg.StopProcessing() : 0;
+    } __except (GuardCrashFilter_(GHID_PANEL_ITEM, GetExceptionInformation())) {
+        return msg.StopProcessing();
+    }
 }
 
 static void ForcePanelDefaultCursor_()
@@ -903,46 +902,6 @@ static void EndMovePathPick_()
     LogInfo("[Panel] 结束循环移动拾取 cell=%d wp=%d", old_cell, old_wp);
 }
 
-// 结束循环施法录入：面板始终保持打开，仅清掉“待按数字键”状态。
-static void EndSpellPick_()
-{
-    if (s_spell_pick_cell < 0) return;
-    const int old_cell = s_spell_pick_cell;
-    const int old_slot = s_spell_pick_slot;
-    s_spell_pick_cell = -1;
-    s_spell_pick_slot = -1;
-    if (old_cell >= 0 && old_cell < CELL_COUNT)
-        s_p.cells[old_cell].spell_pick_request = 0;
-    DrawPanelToBuffer_();
-    LogInfo("[Panel] 结束循环施法录入 cell=%d slot=%d", old_cell, old_slot);
-}
-
-// 写入一个快捷施法数字（1-9/0）到当前拾取槽；成功返回 true。
-static bool CommitSpellSlotPick_(int slot_value)
-{
-    if (s_spell_pick_cell < 0 || s_spell_pick_cell >= CELL_COUNT) return false;
-    if (!(slot_value == 0 || (slot_value >= 1 && slot_value <= 9))) return false;
-    if (s_spell_pick_slot < 0 || s_spell_pick_slot >= SPELL_SLOT_CAPACITY) return false;
-
-    CellControl* ctrl = &s_p.cells[s_spell_pick_cell];
-    if (!ctrl->has_data) return false;
-
-    AutoStackRule& rule = ctrl->data.rule;
-    const int slot_index = s_spell_pick_slot;
-    const bool append = slot_index == rule.spellSlotCount;
-    if (!(slot_index < rule.spellSlotCount || append)) return false;
-
-    rule.spellSlots[slot_index] = static_cast<int8_t>(slot_value);
-    if (append && rule.spellSlotCount < SPELL_SLOT_CAPACITY)
-        ++rule.spellSlotCount;
-    CellControl_NormalizeSpellSlots(&rule);
-    ctrl->dirty = true;
-    LogInfo("[Panel] spell slot saved cell=%d idx=%d key=%d count=%d",
-        s_spell_pick_cell, slot_index, slot_value, (int)rule.spellSlotCount);
-    EndSpellPick_();
-    return true;
-}
-
 // 结束近战选格：恢复面板输入/绘制（屏障始终保留，无需重装）。
 static void EndMeleePick_()
 {
@@ -976,8 +935,33 @@ static void EndForceFieldPick_()
     DrawPanelToBuffer_();
 }
 
+static void EndAttackMagicPick_()
+{
+    s_attack_pick_row = -1;
+    s_attack_pick_position = -1;
+    s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
+    RefreshBattleAfterPick_();
+    ForcePanelModalDepth_(true);
+    DrawPanelToBuffer_();
+}
+
 static void DoPickCapture_(int hex, bool right_click)
 {
+    if (s_attack_pick_row >= 0) {
+        if (right_click) { EndAttackMagicPick_(); return; }
+        StatusProfileFields& status = s_p.draft_status[s_p.selected_profile];
+        if (!CellControl_HexValid(hex) || s_attack_pick_row >= status.attack_count) return;
+        AttackMagicRule& rule = status.attacks[s_attack_pick_row];
+        const int position = s_attack_pick_position;
+        if (position < 0 || position > rule.position_count) return;
+        if (position == rule.position_count) H3AutoPolicy::AddAttackMagicPosition(&rule, hex);
+        else rule.positions[position] = hex;
+        LogInfo("[AttackMagic] position picked profile=%d row=%d slot=%d hex=%d",
+            s_p.selected_profile + 1, s_attack_pick_row, position, hex);
+        EndAttackMagicPick_();
+        return;
+    }
     if (s_forcefield_pick) {
         if (right_click) {
             EndForceFieldPick_();
@@ -1089,7 +1073,7 @@ static void UpdatePanelModalSuspension_()
     // 手动挂起（s_panel_modal_suspended=true）以让出战场点击。此时不能让
     // 本函数按“无系统模态”把挂起状态重置回 false，否则会立刻重装输入拦截、
     // 吃掉战场点击，导致拾取永远收不到坐标、反复重进选格模式。
-    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0 || s_forcefield_pick) return;
+    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0 || s_forcefield_pick || s_attack_pick_row >= 0) return;
     const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
     // The same counter also rises while the game is inactive. Only an in-game
     // modal dialog should hide the panel; clicking outside must leave it intact.

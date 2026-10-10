@@ -16,8 +16,6 @@ static H3BaseDlg* FindDialogByVtable_(UINT target_vtable);
 static bool InstallBattleInputBlocker_();
 static void RemoveBattleInputBlocker_();
 static void ForcePanelModalDepth_(bool on);
-static void EndSpellPick_();
-static bool CommitSpellSlotPick_(int slot_value);
 static void DoPickCapture_(int hex, bool right_click);
 static void UpdatePanelModalSuspension_();
 static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui);

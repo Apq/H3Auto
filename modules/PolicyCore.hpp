@@ -53,23 +53,17 @@ static constexpr int CREATURE_ARROW_TOWER = 0x95;
 
 static constexpr int MELEE_PAIR_CAPACITY = 10;
 static constexpr int MOVE_WAYPOINT_CAPACITY = 16;
-static constexpr int SPELL_SLOT_CAPACITY = 10;
 
 // ---- 召唤通道常量（保活通道 = 兵力不足时召唤）----
 static constexpr int SUMMON_ELEMENT_COUNT = 4;   // 固定顺序：气/水/火/土（与法术下拉一致）
 static constexpr int kSummonSpellIds[SUMMON_ELEMENT_COUNT] = {69, 68, 66, 67};   // 气/水/火/土
 static constexpr int kSummonCreatureIds[SUMMON_ELEMENT_COUNT] = {112, 115, 114, 113};
 // 自动停止第二条件（敌方魔力停手）默认阈值：约「最多再放一次」低阶法术的量。
-// 随方案可调（0..32767，随 H3AP9 方案存档）。
+// 随方案可调（0..32767，随战斗 JSON 方案存档）。
 static constexpr int kSummonStopManaDefault = 6; // 敌方魔力阈值默认（0..32767 可调）
 // 战场六格坐标（15×11，索引 = y*15+x；实参语义与原版距离对拍见实施文档 §5）。
 static constexpr int BATTLEFIELD_COLS = 15;
 static constexpr int BATTLEFIELD_HEXES = 165;
-
-inline bool IsQuickSpellDigit(int digit)
-{
-    return digit == 0 || (digit >= 1 && digit <= 9);
-}
 
 struct AutoTargetRule {
     AutoTargetKind kind;
@@ -97,10 +91,6 @@ struct AutoStackRule {
     AutoActionKind action;
     AutoTargetRule target;
     bool allowDefendFallback;
-    bool quickCastFirst;
-    int8_t spellSlot;
-    int8_t spellSlots[SPELL_SLOT_CAPACITY];
-    int8_t spellSlotCount;
 
     // 保活方式三选一（默认不保活）；法术自动选：亡灵用聚灵、活体用复活。
     uint8_t         protectMode;         // ProtectMode：0=按剩余数量；1=损失量大于恢复量；2=不保活
@@ -127,11 +117,6 @@ inline AutoStackRule MakeDefaultRule()
     r.target.moveWaypointCount = 0;
     r.target.meleePairCount = 0;
     r.allowDefendFallback = false;
-    r.quickCastFirst = false;
-    r.spellSlot = 1;
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        r.spellSlots[i] = -1;
-    r.spellSlotCount = 0;
     r.protectMode = PM_NONE;
     r.protectCountBelow = 2;
     return r;
@@ -178,21 +163,159 @@ static constexpr int kStatusRefreshTurns = 1;
 static constexpr int kStatusRefreshTurnsMax = 9;
 static constexpr int kStatusSlotCapacity = 8;
 
-// 保持状态是方案级设置，不挂在单支部队上。
-// slots 存已选法术 id；0 表示空槽。slow 单独开关，只在专家群体时生效。
-// refresh_turns：补状态阈值，剩余回合 ≤ 它才补（1..kStatusRefreshTurnsMax）。
+// 方案级智能攻击。target_mode 语义按法术类别强制归一：
+// 单体（15/16/17/18/19/57）→ 0=远程飞兵速度优先、1=随机；
+// 范围（20/21/22/23）→ 2=固定落点，配 positions[0]（唯一落点，
+// 2026-10-11 用户裁定：点“+”到战场选一个位置，不循环）；
+// 全体（24/25/26）→ -1=无目标控件，positions 清空。
+static constexpr int kAttackMagicCapacity = 8;
+static constexpr int kAttackMagicPositionCapacity = 1; // 范围法术只选一个落点
+// 英雄可用的直接伤害法术。15..23 需敌人或中心落点；24 DEATH_RIPPLE/
+// 25 DESTROY_UNDEAD/26 ARMAGEDDON 为全场伤害，原版按法术 id 全场
+// 结算，不需要目标格（用户要求一并列出）。
+// 火墙13需完整空段规则暂不纳入；57（泰坦之箭）同列。运行时资格用
+// HasSpell（learnedSpells|availableSpell，穿戴装备赋予也算，2026-10-11
+// 用户裁定），学校技能等级不构成资格；此处白名单只约束法术 id。
+static constexpr int kAttackMagicSpellIds[] = {15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 57};
+
+// 攻击法术类别：0 单体指定、1 范围中心、2 全场。-1 = 空行/非白名单。
+inline int AttackMagicKind(int spell_id)
+{
+    if (spell_id == 24 || spell_id == 25 || spell_id == 26) return 2;
+    if (spell_id == 20 || spell_id == 21 || spell_id == 22 || spell_id == 23) return 1;
+    if (spell_id >= 15 && spell_id <= 19) return 0;
+    if (spell_id == 57) return 0;
+    return -1;
+}
+
+struct AttackMagicRule {
+    int spell_id; // -1 = 空行，不参与执行
+    int target_mode;
+    int positions[kAttackMagicPositionCapacity]; // 范围法术唯一落点；空 -1
+    int position_count;                        // 范围法术 0..1，其它类别 0
+};
+
+inline bool IsAttackMagicSpellId(int spell_id)
+{
+    for (int id : kAttackMagicSpellIds)
+        if (id == spell_id) return true;
+    return false;
+}
+
+inline AttackMagicRule MakeDefaultAttackMagicRule()
+{
+    AttackMagicRule rule = {};
+    rule.spell_id = -1;
+    for (int i = 0; i < kAttackMagicPositionCapacity; ++i)
+        rule.positions[i] = -1;
+    return rule;
+}
+
+inline void NormalizeAttackMagicRule(AttackMagicRule* rule)
+{
+    if (!rule) return;
+    if (!IsAttackMagicSpellId(rule->spell_id)) rule->spell_id = -1;
+    int requested = rule->position_count;
+    if (requested < 0) requested = 0;
+    if (requested > kAttackMagicPositionCapacity) requested = kAttackMagicPositionCapacity;
+    int count = 0;
+    for (int i = 0; i < requested; ++i) {
+        const int hex = rule->positions[i];
+        // SoD 的真实索引为 0..186；左右边缘列由游戏侧按目标语义过滤。
+        if (hex >= 0 && hex <= 186) rule->positions[count++] = hex;
+    }
+    for (int i = count; i < kAttackMagicPositionCapacity; ++i) rule->positions[i] = -1;
+    rule->position_count = count;
+    // target_mode 按法术类别强制归一：单体只有 0/1 两个目标策略且不带
+    // 落点，范围固定落点（唯一，容量 1），全体无目标控件（-1）且不带
+    // 落点；空行回到默认 0。落点是范围法术的专属数据，其余类别一律清空。
+    const int kind = AttackMagicKind(rule->spell_id);
+    if (kind == 1) {
+        rule->target_mode = 2;
+    } else {
+        if (kind == 2) rule->target_mode = -1;
+        else if (kind == 0) rule->target_mode = rule->target_mode == 1 ? 1 : 0;
+        else rule->target_mode = 0; // 空行
+        for (int i = 0; i < kAttackMagicPositionCapacity; ++i) rule->positions[i] = -1;
+        rule->position_count = 0;
+    }
+}
+
+// 保持状态与攻击列表均为方案级。slots 空槽 0；slow 为专家群体减速开关。
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
     int slot_count;
     int slow;
     int refresh_turns;
+    AttackMagicRule attacks[kAttackMagicCapacity];
+    int attack_count;
 };
 
 inline StatusProfileFields MakeDefaultStatusFields()
 {
     StatusProfileFields fields = {};
     fields.refresh_turns = kStatusRefreshTurns;
+    for (int i = 0; i < kAttackMagicCapacity; ++i)
+        fields.attacks[i] = MakeDefaultAttackMagicRule();
     return fields;
+}
+
+inline void NormalizeStatusFields(StatusProfileFields* fields)
+{
+    if (!fields) return;
+    fields->slow = fields->slow ? 1 : 0;
+    if (fields->refresh_turns < 1 || fields->refresh_turns > kStatusRefreshTurnsMax)
+        fields->refresh_turns = kStatusRefreshTurns;
+    int requested = fields->slot_count;
+    if (requested < 0) requested = 0;
+    if (requested > kStatusSlotCapacity) requested = kStatusSlotCapacity;
+    int count = 0;
+    for (int i = 0; i < requested; ++i)
+        if (fields->slots[i] > 0 && fields->slots[i] < 81)
+            fields->slots[count++] = fields->slots[i];
+    for (int i = count; i < kStatusSlotCapacity; ++i) fields->slots[i] = 0;
+    fields->slot_count = count;
+    if (fields->attack_count < 0) fields->attack_count = 0;
+    if (fields->attack_count > kAttackMagicCapacity) fields->attack_count = kAttackMagicCapacity;
+    for (int i = 0; i < fields->attack_count; ++i) NormalizeAttackMagicRule(&fields->attacks[i]);
+    for (int i = fields->attack_count; i < kAttackMagicCapacity; ++i)
+        fields->attacks[i] = MakeDefaultAttackMagicRule();
+}
+
+inline bool AddAttackMagicRule(StatusProfileFields* fields)
+{
+    if (!fields) return false;
+    NormalizeStatusFields(fields);
+    if (fields->attack_count >= kAttackMagicCapacity) return false;
+    fields->attacks[fields->attack_count++] = MakeDefaultAttackMagicRule();
+    return true;
+}
+
+inline void RemoveAttackMagicRule(StatusProfileFields* fields, int index)
+{
+    if (!fields) return;
+    NormalizeStatusFields(fields);
+    if (index < 0 || index >= fields->attack_count) return;
+    for (int i = index; i + 1 < fields->attack_count; ++i) fields->attacks[i] = fields->attacks[i + 1];
+    fields->attacks[--fields->attack_count] = MakeDefaultAttackMagicRule();
+}
+
+inline bool AddAttackMagicPosition(AttackMagicRule* rule, int position)
+{
+    if (!rule || position < 0 || position > 186) return false;
+    NormalizeAttackMagicRule(rule);
+    if (rule->position_count >= kAttackMagicPositionCapacity) return false;
+    rule->positions[rule->position_count++] = position;
+    return true;
+}
+
+inline void RemoveAttackMagicPosition(AttackMagicRule* rule, int index)
+{
+    if (!rule) return;
+    NormalizeAttackMagicRule(rule);
+    if (index < 0 || index >= rule->position_count) return;
+    for (int i = index; i + 1 < rule->position_count; ++i) rule->positions[i] = rule->positions[i + 1];
+    rule->positions[--rule->position_count] = -1;
 }
 
 struct StatusMaintainChoice {
@@ -945,11 +1068,6 @@ inline void NormalizeSummonRule(AutoStackRule* rule)
     rule->target = DefaultTargetForAction(AA_MANUAL);
     rule->allowDefendFallback =
         (rule->action == AA_RANDOM_MOVE) && rule->allowDefendFallback;
-    rule->quickCastFirst = false;
-    rule->spellSlot = 1;
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        rule->spellSlots[i] = -1;
-    rule->spellSlotCount = 0;
     rule->protectMode = PM_NONE;   // 召唤物共享规则不走保活
     rule->protectCountBelow = 2;
 }
@@ -1003,15 +1121,9 @@ inline int SelectTargetIndex(const TargetCandidate* candidates, int count,
 // 方案存档：一套方案一个 JSON 对象，字段分开存，数组按实际数量存。
 // 不再使用 H3AP<N> 数字串。旧数字串一律拒绝，视为没有存档。
 static constexpr int PROFILE_STORE_SLOTS = 21;
-// 保留纯函数整数编解码供旧的独立方案文件代码编译；战斗 JSON 不再调用它。
-static constexpr int PROFILE_STORE_RULE_FIELDS =
-    6 + MOVE_WAYPOINT_CAPACITY + 1 + 2 * MELEE_PAIR_CAPACITY + 1 + 3
-    + SPELL_SLOT_CAPACITY + 3;
-static constexpr int PROFILE_STORE_INTS = PROFILE_STORE_SLOTS * 2 + 1 + 7
-    + (PROFILE_STORE_SLOTS + 1) * PROFILE_STORE_RULE_FIELDS;
 static constexpr int DEFAULT_STOP_TURNS = 4;
 
-// 方案级召唤配置（随 H3AP9 方案存档）。保活与召唤同一条施法通道：
+// 方案级召唤配置（随战斗 JSON 方案存档）。保活与召唤同一条施法通道：
 // 保活优先，无人可救且 enabled 时才走召唤。
 struct SummonProfileFields {
     int enabled;          // 是否启用自动召唤（0/1，默认 0）：复活无人可救时的兜底
@@ -1039,7 +1151,7 @@ inline SummonProfileFields MakeDefaultSummonFields()
     return fields;
 }
 
-// 力盾只随战斗 JSON 存档，不进入 H3AP9 独立方案文本。
+// 力盾随战斗 JSON 存档。
 struct ForceFieldProfileFields {
     int anchor_hex[2];
 };
@@ -1230,266 +1342,6 @@ inline void BuildArchiveSlotMapByRounds(const int* arch_type,
     }
 }
 
-inline void EncodeRuleInts(const AutoStackRule& rule, int* out)
-{
-    int n = 0;
-    out[n++] = static_cast<int>(rule.action);
-    out[n++] = static_cast<int>(rule.target.kind);
-    out[n++] = static_cast<int>(rule.target.side);
-    out[n++] = static_cast<int>(rule.target.selector);
-    out[n++] = rule.target.meleeStandHex;
-    out[n++] = rule.target.meleeAttackHex;
-    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
-        out[n++] = rule.target.moveWaypoints[i];
-    out[n++] = rule.target.moveWaypointCount;
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
-        out[n++] = rule.target.meleeStandHexes[i];
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
-        out[n++] = rule.target.meleeAttackHexes[i];
-    out[n++] = rule.target.meleePairCount;
-    out[n++] = rule.allowDefendFallback ? 1 : 0;
-    out[n++] = rule.quickCastFirst ? 1 : 0;
-    out[n++] = rule.spellSlot;
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        out[n++] = rule.spellSlots[i];
-    out[n++] = rule.spellSlotCount;
-    out[n++] = rule.protectMode;
-    out[n++] = rule.protectCountBelow;
-}
-
-inline bool DecodeRuleInts(const int* in, AutoStackRule* rule)
-{
-    if (!in || !rule) return false;
-    AutoStackRule r = MakeDefaultRule();
-    int n = 0;
-    r.action = static_cast<AutoActionKind>(in[n++]);
-    r.target.kind = static_cast<AutoTargetKind>(in[n++]);
-    r.target.side = static_cast<AutoTargetSide>(in[n++]);
-    r.target.selector = static_cast<AutoTargetSelector>(in[n++]);
-    r.target.meleeStandHex = static_cast<int16_t>(in[n++]);
-    r.target.meleeAttackHex = static_cast<int16_t>(in[n++]);
-    for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
-        r.target.moveWaypoints[i] = static_cast<int16_t>(in[n++]);
-    r.target.moveWaypointCount = static_cast<int8_t>(in[n++]);
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
-        r.target.meleeStandHexes[i] = static_cast<int16_t>(in[n++]);
-    for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i)
-        r.target.meleeAttackHexes[i] = static_cast<int16_t>(in[n++]);
-    r.target.meleePairCount = static_cast<int8_t>(in[n++]);
-    r.allowDefendFallback = in[n++] != 0;
-    r.quickCastFirst = in[n++] != 0;
-    r.spellSlot = static_cast<int8_t>(in[n++]);
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        r.spellSlots[i] = static_cast<int8_t>(in[n++]);
-    r.spellSlotCount = static_cast<int8_t>(in[n++]);
-    // 第 59 个整数是保活方式（ProtectMode，三选一；越界按不保活）。
-    r.protectMode = (in[n] == (int)PM_COUNT_BELOW
-            || in[n] == (int)PM_LOSS_GT_RESTORE)
-        ? static_cast<ProtectMode>(in[n]) : PM_NONE;
-    ++n;
-    r.protectCountBelow = in[n++];
-    if (r.protectCountBelow < 0) r.protectCountBelow = 0;
-    if (n != PROFILE_STORE_RULE_FIELDS) return false;
-    if (r.action < AA_MANUAL || r.action >= AA_COUNT) return false;
-    if (r.target.kind < AT_NONE || r.target.kind >= AT_COUNT) return false;
-    if (r.target.side < ATS_OWN || r.target.side >= ATS_COUNT) return false;
-    if (r.target.selector < SEL_RANDOM || r.target.selector >= SEL_COUNT) return false;
-    *rule = r;
-    return true;
-}
-
-// 文本 ↔ 整数数组。Encode 返回写入字符数（不含结尾 0），缓冲不足返回 -1。
-// Decode 只接受以 "H3AP9 " 开头且整数个数恰好匹配的文本；
-// 旧版存档（H3AP8 及更早）一律拒绝，重新配置即可。
-inline int EncodeProfileStoreText(const int army_types[PROFILE_STORE_SLOTS],
-    const int army_counts[PROFILE_STORE_SLOTS],
-    const AutoStackRule rules[PROFILE_STORE_SLOTS],
-    uint16_t stop_turns,
-    const SummonProfileFields& summon,
-    char* buffer, int buffer_size)
-{
-    if (!army_types || !army_counts || !rules
-        || !buffer || buffer_size <= 0)
-        return -1;
-    int written = 0;
-    auto append = [&](const char* s) -> bool {
-        for (int i = 0; s[i]; ++i) {
-            if (written + 1 >= buffer_size) return false;
-            buffer[written++] = s[i];
-        }
-        return true;
-    };
-    if (!append("H3AP9")) return -1;
-    int* ints = new int[PROFILE_STORE_INTS];
-    int n = 0;
-    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-        ints[n++] = army_types[s];
-        ints[n++] = army_counts[s];
-    }
-    ints[n++] = summon.enabled ? 1 : 0;
-    int turns = stop_turns;
-    if (turns < 0) turns = 0;
-    if (turns > 999) turns = 999;
-    ints[n++] = turns;
-    ints[n++] = summon.count_th;
-    ints[n++] = summon.hp_th;
-    ints[n++] = summon.spell_pick;
-    ints[n++] = (summon.cond_combine == SUMMON_COMBINE_OR)
-        ? SUMMON_COMBINE_OR : SUMMON_COMBINE_AND;
-    ints[n++] = summon.stop_enemy_mana ? 1 : 0;
-    int mana_th = summon.stop_mana_th;
-    if (mana_th < 0) mana_th = 0;
-    if (mana_th > 32767) mana_th = 32767;
-    ints[n++] = mana_th;
-    bool ok = true;
-    if (ok) {
-        __try {
-            EncodeRuleInts(summon.summon_rule, ints + n);
-        } __except (1) {
-            delete[] ints;
-            return -200000;
-        }
-        n += PROFILE_STORE_RULE_FIELDS;
-    }
-    for (int s = 0; ok && s < PROFILE_STORE_SLOTS; ++s) {
-        __try {
-            EncodeRuleInts(rules[s], ints + n);
-        } __except (1) {
-            delete[] ints;
-            return -100000 - s;
-        }
-        n += PROFILE_STORE_RULE_FIELDS;
-    }
-    for (int i = 0; ok && i < n; ++i) {
-        char num[16];
-        int v = ints[i];
-        int len = 0;
-        if (v < 0) { num[len++] = '-'; v = -v; }
-        char digits[12];
-        int dlen = 0;
-        do { digits[dlen++] = static_cast<char>('0' + v % 10); v /= 10; }
-        while (v > 0);
-        while (dlen > 0) num[len++] = digits[--dlen];
-        num[len] = 0;
-        if (!append(" ") || !append(num)) ok = false;
-    }
-    delete[] ints;
-    if (!ok) return -1;
-    buffer[written] = 0;
-    return written;
-}
-
-inline bool DecodeProfileStoreText(const char* text,
-    int army_types[PROFILE_STORE_SLOTS],
-    int army_counts[PROFILE_STORE_SLOTS],
-    AutoStackRule rules[PROFILE_STORE_SLOTS],
-    uint16_t* stop_turns,
-    SummonProfileFields* summon)
-{
-    if (!text || !army_types || !army_counts || !rules
-        || !stop_turns || !summon) return false;
-    // 只认 H3AP9（PROFILE_STORE_INTS，每规则 60 整数含保活方式、
-    // 召唤 7 整数含启用位与条件组合）。
-    // 旧版存档（H3AP8 及更早）不兼容，直接拒绝，用户重新配置即可。
-    static const char magic[6] = "H3AP9";
-    for (int i = 0; i < 5; ++i)
-        if (text[i] != magic[i]) return false;
-    const int expected = PROFILE_STORE_INTS;
-    const char* p = text + 5;
-
-    int* ints = new int[PROFILE_STORE_INTS];
-    int count = 0;
-    bool bad = false;
-    while (*p && !bad) {
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
-        if (!*p) break;
-        if (count >= expected) { bad = true; break; }
-        int sign = 1;
-        if (*p == '-') { sign = -1; ++p; }
-        if (*p < '0' || *p > '9') { bad = true; break; }
-        int v = 0;
-        while (*p >= '0' && *p <= '9') {
-            v = v * 10 + (*p - '0');
-            ++p;
-        }
-        ints[count++] = sign * v;
-    }
-    if (bad || count != expected) {
-        // 含更旧格式（H3AP5 1304 整数 / H3AP2 6247 / 3575/3580 交错坏档），
-        // 一律拒绝。
-        delete[] ints;
-        return false;
-    }
-
-    uint16_t decoded_stop = 0;
-    SummonProfileFields decoded_summon = {};
-    int decoded_army_types[PROFILE_STORE_SLOTS] = {};
-    int decoded_army_counts[PROFILE_STORE_SLOTS] = {};
-    AutoStackRule decoded[PROFILE_STORE_SLOTS] = {};
-    int n = 0;
-    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-        decoded_army_types[s] = ints[n];
-        decoded_army_counts[s] = ints[n + 1];
-        if (ints[n] < -1 || ints[n + 1] < 0) { delete[] ints; return false; }
-        n += 2;
-    }
-    // 召唤启用位：0=不召唤（只保活复活），1=启用兜底召唤。
-    if (ints[n] < 0 || ints[n] > 1) {
-        delete[] ints;
-        return false;
-    }
-    decoded_summon.enabled = ints[n++];
-    if (ints[n] < 0 || ints[n] > 999) { delete[] ints; return false; }
-    decoded_stop = static_cast<uint16_t>(ints[n++]);
-    decoded_summon.count_th = ints[n++];
-    decoded_summon.hp_th = ints[n++];
-    decoded_summon.spell_pick = ints[n++];
-    decoded_summon.cond_combine = ints[n++];
-    decoded_summon.stop_enemy_mana = ints[n++];
-    decoded_summon.stop_mana_th = ints[n++];
-    if (decoded_summon.count_th < 2
-        || decoded_summon.count_th > PROFILE_STORE_SLOTS) {
-        delete[] ints; return false;
-    }
-    if (decoded_summon.hp_th < 0) { delete[] ints; return false; }
-    if (decoded_summon.spell_pick < 0
-        || decoded_summon.spell_pick > SUMMON_ELEMENT_COUNT) {
-        delete[] ints; return false;
-    }
-    if (decoded_summon.cond_combine != SUMMON_COMBINE_AND
-        && decoded_summon.cond_combine != SUMMON_COMBINE_OR) {
-        delete[] ints; return false;
-    }
-    if (decoded_summon.stop_enemy_mana < 0
-        || decoded_summon.stop_enemy_mana > 1) {
-        delete[] ints; return false;
-    }
-    if (decoded_summon.stop_mana_th < 0
-        || decoded_summon.stop_mana_th > 32767) {
-        delete[] ints; return false;
-    }
-    if (!DecodeRuleInts(ints + n, &decoded_summon.summon_rule)) {
-        delete[] ints; return false;
-    }
-    NormalizeSummonRule(&decoded_summon.summon_rule);
-    n += PROFILE_STORE_RULE_FIELDS;
-    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-        if (!DecodeRuleInts(ints + n, &decoded[s])) {
-            delete[] ints; return false;
-        }
-        n += PROFILE_STORE_RULE_FIELDS;
-    }
-    delete[] ints;
-    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s) {
-        army_types[s] = decoded_army_types[s];
-        army_counts[s] = decoded_army_counts[s];
-        rules[s] = decoded[s];
-    }
-    *stop_turns = decoded_stop;
-    *summon = decoded_summon;
-    return true;
-}
-
 inline int GetAllowedSelectors(AutoActionKind action, AutoTargetKind /*kind*/,
     AutoTargetSelector out_selectors[SEL_COUNT])
 {
@@ -1510,48 +1362,6 @@ inline int GetAllowedSelectors(AutoActionKind action, AutoTargetKind /*kind*/,
     return n;
 }
 
-inline void NormalizeSpellSlots(AutoStackRule* rule)
-{
-    if (!rule) return;
-    auto valid = [](int slot) {
-        return slot == 0 || (slot >= 1 && slot <= 9);
-    };
-
-    int8_t compact[SPELL_SLOT_CAPACITY] = {};
-    int count = 0;
-    int requested = rule->spellSlotCount;
-    if (requested < 0) requested = 0;
-    if (requested > SPELL_SLOT_CAPACITY) requested = SPELL_SLOT_CAPACITY;
-    for (int i = 0; i < requested; ++i) {
-        const int slot = rule->spellSlots[i];
-        if (valid(slot)) compact[count++] = static_cast<int8_t>(slot);
-    }
-    if (count == 0 && rule->quickCastFirst && valid(rule->spellSlot)) {
-        compact[0] = rule->spellSlot;
-        count = 1;
-    }
-    for (int i = 0; i < SPELL_SLOT_CAPACITY; ++i)
-        rule->spellSlots[i] = i < count ? compact[i] : static_cast<int8_t>(-1);
-    rule->spellSlotCount = static_cast<int8_t>(count);
-    rule->quickCastFirst = count > 0;
-    rule->spellSlot = count > 0 ? rule->spellSlots[0] : 1;
-}
-
-// 删除一个已有施法槽并压紧。删除最后一项时清除旧版兼容镜像，
-// 防止 NormalizeSpellSlots 把旧 quickCastFirst + spellSlot 重新迁移回来。
-inline bool RemoveSpellSlot(AutoStackRule* rule, int index)
-{
-    if (!rule || index < 0 || index >= rule->spellSlotCount) return false;
-    for (int i = index; i + 1 < rule->spellSlotCount; ++i)
-        rule->spellSlots[i] = rule->spellSlots[i + 1];
-    rule->spellSlots[rule->spellSlotCount - 1] = -1;
-    --rule->spellSlotCount;
-    if (rule->spellSlotCount == 0)
-        rule->quickCastFirst = false;
-    NormalizeSpellSlots(rule);
-    return true;
-}
-
 // 纯策略部分的规范化；近战槽位/移动坐标的几何校验仍由 CellControl 负责。
 inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged,
     bool has_artillery, bool has_first_aid)
@@ -1568,7 +1378,6 @@ inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged
         if (allowed[i] == rule->action) action_ok = true;
     if (!action_ok) rule->action = n > 0 ? allowed[0] : AA_MANUAL;
 
-    NormalizeSpellSlots(rule);
     if (!ActionNeedsTarget(rule->action)) {
         rule->target = DefaultTargetForAction(AA_MANUAL);
         rule->allowDefendFallback = false;
@@ -1660,7 +1469,6 @@ using H3AutoPolicy::SEL_WOUND_VALUE;
 using H3AutoPolicy::SEL_COUNT;
 using H3AutoPolicy::MELEE_PAIR_CAPACITY;
 using H3AutoPolicy::MOVE_WAYPOINT_CAPACITY;
-using H3AutoPolicy::SPELL_SLOT_CAPACITY;
 using H3AutoPolicy::AT_COUNT;
 using H3AutoPolicy::ATS_COUNT;
 using H3AutoPolicy::ProtectMode;
@@ -1676,3 +1484,15 @@ using H3AutoPolicy::MakeDefaultStatusFields;
 using H3AutoPolicy::kStatusSlotCapacity;
 using H3AutoPolicy::kBuffSpellIds;
 using H3AutoPolicy::IsMassBuffSpell;
+using H3AutoPolicy::kAttackMagicCapacity;
+using H3AutoPolicy::kAttackMagicPositionCapacity;
+using H3AutoPolicy::kAttackMagicSpellIds;
+using H3AutoPolicy::AttackMagicRule;
+using H3AutoPolicy::MakeDefaultAttackMagicRule;
+using H3AutoPolicy::NormalizeAttackMagicRule;
+using H3AutoPolicy::NormalizeStatusFields;
+using H3AutoPolicy::AddAttackMagicRule;
+using H3AutoPolicy::RemoveAttackMagicRule;
+using H3AutoPolicy::AddAttackMagicPosition;
+using H3AutoPolicy::RemoveAttackMagicPosition;
+using H3AutoPolicy::IsAttackMagicSpellId;

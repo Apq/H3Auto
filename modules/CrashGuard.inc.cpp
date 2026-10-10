@@ -43,6 +43,9 @@ enum {
     GHID_SHOULD_AUTO,    // 0x4744D0 HiHook 接管判定
     GHID_ACTION_EXEC,    // 0x4786B0 HiHook 动作执行
     GHID_KB,             // WH_KEYBOARD 战斗热键回调
+    GHID_PANEL_KB,       // 面板 WH_KEYBOARD
+    GHID_PANEL_MOUSE,    // 面板 WH_MOUSE
+    GHID_PANEL_ITEM,     // 面板输入屏障
     GHID_COUNT
 };
 
@@ -54,6 +57,9 @@ static const char* GuardHookName_(int id)
     case GHID_SHOULD_AUTO: return "ShouldAuto";
     case GHID_ACTION_EXEC: return "ActionExec";
     case GHID_KB:          return "KbHook";
+    case GHID_PANEL_KB:    return "PanelKb";
+    case GHID_PANEL_MOUSE: return "PanelMouse";
+    case GHID_PANEL_ITEM:  return "PanelItem";
     default:               return "?";
     }
 }

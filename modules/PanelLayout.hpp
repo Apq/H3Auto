@@ -5,11 +5,10 @@ static const int PANEL_W    = 680;
 // 底部状态栏 +26，背景图 HA_bg.pcx 同步为 680×548（底部 y=508 前插 20px 木纹带，底框原样下移）。
 static const int PANEL_H    = 548;
 static const int COLS       = 1;   // 一行一格（单列宽格）
-static const int VISIBLE_ROWS = 3; // 金框内刚好 3 行
+static const int VISIBLE_ROWS = 4; // 停止行底103→下分隔线456之间放4行
 static const int CELL_W     = 511; // 内容区 129..660(=帮助按钮右缘636+24)，滚动条前留4px
-// 卡片高度 110 不变：金框 514×342，底边 y=414，表格上方不再放设置行。
-// SCROLL_H = CELL_H + 2*(CELL_H-2) = 110 + 2*108 = 326。
-static const int CELL_H     = 110;
+// 移除施法行后卡片高88，其余信息上移22px，头像原坐标保持。
+static const int CELL_H     = 88;
 static const int CELL_STEP_X = CELL_W - 2;
 static const int CELL_STEP_Y = CELL_H - 2;
 // 内容区边界（原金框范围；框已不画，卡片与保活行以此对齐）。
@@ -18,11 +17,11 @@ static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 129;  // 左界左移 10
 static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
 static const int GRID_X      = GRID_FRAME_X; // 卡片贴内容区左缘
-static const int GRID_Y      = 117;
+static const int GRID_Y      = 105;  // 停止行(STOP_ROW_Y 85+18)下方2px；4行底451=内容区底
 static const int SCROLL_W    = 16;
 static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - SCROLL_W; // 贴内容区右缘
 static const int SCROLL_Y    = GRID_Y;
-static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 326
+static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 346（4行）
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 64;
@@ -70,12 +69,13 @@ static const int BATTLE_DD_MAX_ITEMS = 30;
 enum {
     PAGE_ARMY    = 0,   // 部队：21 槽卡片表
     PAGE_SUMMON  = 1,   // 召唤：召唤通道参数（法术/阈值）+ 召唤物共享行动规则
-    PAGE_STATUS  = 2,   // 保持状态：友方增益列表 + 敌方减速
-    PAGE_COUNT   = 3,
+    PAGE_STATUS  = 2,   // 保持状态：力盾落点 + 友方增益列表 + 敌方减速
+    PAGE_ATTACK  = 3,   // 攻击魔法：智能攻击配置（两大列行布局）
+    PAGE_COUNT   = 4,
 };
-static const int TAB_VISIBLE_COUNT = 3;
+static const int TAB_VISIBLE_COUNT = 4;
 static const int kTabOrder[TAB_VISIBLE_COUNT] = {
-    PAGE_ARMY, PAGE_SUMMON, PAGE_STATUS,
+    PAGE_ARMY, PAGE_SUMMON, PAGE_STATUS, PAGE_ATTACK,
 };
 static const int FF_ROW_Y = 108;
 static const int FF_LABEL_W = 80;
@@ -209,7 +209,7 @@ static const int STATUS_GAP = 6;
 static const int STATUS_DD_W =
     (GRID_FRAME_W - (STATUS_COLS - 1) * STATUS_GAP) / STATUS_COLS;
 static const int STATUS_DD_H = 18;
-static const int STATUS_ROW_H = STATUS_DD_H + 6;
+static const int STATUS_ROW_H = STATUS_DD_H + 8;
 static const int STATUS_ADD_W = STATUS_DD_W;
 static const int STATUS_ADD_H = STATUS_DD_H;
 static const int STATUS_ITEM_H = 18;
@@ -231,6 +231,23 @@ static const int STATUS_TH_MAX_DIGITS = 1; // 1..9
 // 槽位区第一行（阈值行下方）。
 static const int STATUS_ROW0_Y =
     STATUS_TH_ROW_Y + STATUS_TH_ROW_H + 10;
+
+// 阈值下固定预留五行（每行4个状态槽），保持状态页布局上限。
+static const int MAGIC_LIST_BOTTOM = 448;
+// 攻击魔法页（PAGE_ATTACK）独立布局：没有力盾行/状态槽，说明行从停止
+// 行下方开始；标题与列表为独立常量，不再由状态槽位置推导。
+static const int ATT_NOTE_Y = 105;               // 说明行（停止行底103+2）
+static const int ATT_HEADER_Y = ATT_NOTE_Y + 26; // 标题行
+static const int ATT_LIST_Y = ATT_HEADER_Y + 26; // 首个视觉行上缘
+// 智能攻击区两列布局：每个视觉行排两大列，每大列内部两小列
+// （法术列 + 条件控件列），合计占满面板内容区的 4 个小列位。
+static const int MAGIC_ATT_COL_W = 261;                       // 单个大列宽
+static const int MAGIC_ATT_COL_GAP =
+    GRID_FRAME_W - MAGIC_ATT_COL_W * 2;                        // 大列间距
+static const int MAGIC_ATT_SPELL_W = 135;                     // 小列：法术下拉
+static const int MAGIC_ATT_CTRL_W =
+    MAGIC_ATT_COL_W - MAGIC_ATT_SPELL_W - 6;                   // 小列：目标/位置
+static const int MAGIC_ATT_SUB_GAP = 6;                        // 大列内小列间距
 
 // 召唤页说明/启用文案已外置（UiTexts panel.summon_enable 等）。
 

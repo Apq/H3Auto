@@ -4,6 +4,8 @@
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 #include "ForceField.hpp"
+static void ResetAttackMagicRuntime_();
+static bool TryAttackMagicCast_(_BattleMgr_* mgr);
 
 extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
@@ -46,12 +48,13 @@ static ControlMode g_control = CM_MANUAL;
 static ControlMode g_oneshot_return = CM_MANUAL;
 
 // ===== 单位管线子状态（重构步骤 §1.2；锚定 g_pipeline_stack 活动单位）=====
-// 取代旧 spell_waiting/spell_wait_stack/spell_done_stack/last_handled_stack 四标志。
+// PS_SPELL_* 仅兼容 ForceField/BattleState 的既有清理接口。
+// 循环快捷施法已删除，本模块没有进入 PS_SPELL_POSTED 的生产路径。
 enum PipelineStage {
-    PS_IDLE,         // 当前单位无未完成管线
-    PS_SPELL_POSTED, // 已投递快捷施法键，等待结果（超时数据在 g_auto_state.spell_wait_*）
-    PS_SPELL_DONE,   // 本单位本回合施法阶段已结束，不再投键
-    PS_HANDLED,      // 本单位本回合已处理（已下命令或交回玩家），不再重复处理
+    PS_IDLE,
+    PS_SPELL_POSTED, // 兼容保留的清理态，不投递数字键、不等待快捷施法
+    PS_SPELL_DONE,   // ClearSpellWait_ 的兼容终态
+    PS_HANDLED,     // 本单位本回合已处理（已下命令或交回玩家）
 };
 static PipelineStage g_pipeline_stage = PS_IDLE;
 static void* g_pipeline_stack = nullptr; // 管线锚定的活动单位
@@ -106,12 +109,6 @@ bool PanelOpen_()
 // g_pipeline_stage + g_pipeline_stack；此处只留超时观测与单次接管数据。
 static struct {
     void* action_wake_stack;    // 已投递唤醒消息、等待在 0x4746B0 提交主动作的单位
-    int   spell_wait_slot;      // 对应 army_slot
-    int   spell_wait_key;       // 已投递的快捷键 0..9
-    int   spell_wait_frames;    // 已等待帧数
-    DWORD spell_wait_started;   // GetTickCount，避免高频 BltComplete 把调用次数误当帧数
-    int   spell_mana_before;    // 投递前法力
-    int   spell_casted_before;  // 投递前 hero_casted[side]
 
     // 战斗级人工接管：只改执行权，不改 5 套方案/游标。
     // 控制权模式在 g_control（CM_AUTO/CM_MANUAL/CM_ONESHOT_WAIT/CM_ONESHOT_LOCKED）。
@@ -143,7 +140,6 @@ struct StackTrackEntry {
     // 本场运行游标：配置只保存序列，进度只存在跟踪表。
     int   move_cursor;
     int   melee_cursor;
-    int   spell_cursor;
 };
 static StackTrackEntry g_stack_track[21] = {};
 static int  g_track_side = -1;
@@ -261,7 +257,6 @@ static void BindStackTrackingFromBattle_()
 
     int bound = 0;
     int configured_action = 0;
-    int configured_spell = 0;
     for (int i = 0; i < 21; ++i) {
         _BattleStack_* s = &mgr->stack[side][i];
         // 本场从未上场的空槽跳过。
@@ -282,7 +277,7 @@ static void BindStackTrackingFromBattle_()
         t.alive = s->count_current > 0;
         t.move_cursor = 0;
         t.melee_cursor = 0;
-        t.spell_cursor = 0;
+
         // 绑定时刻已在场的召唤物（重开面板再勾号的场景）：
         // 召唤启用时直接套用共享规则。
         if (g_summon[g_active_profile].enabled
@@ -293,22 +288,16 @@ static void BindStackTrackingFromBattle_()
         ++bound;
         if (g_active_rules[i].action != AA_MANUAL)
             ++configured_action;
-        if (g_active_rules[i].spellSlotCount > 0)
-            ++configured_spell;
-
-        LogDebug("[Track] bind attempt=%d slot=%d source=%d idkind=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d spells=%d first=%d",
+        LogDebug("[Track] bind attempt=%d slot=%d source=%d idkind=%d cid=0x%X hex=%d alive=%d count=%d/%d action=%d",
             t.attempt_id, i, s->source_army_slot, (int)t.identity.kind,
             t.creature_id, t.hex, t.alive ? 1 : 0,
-            t.count_alive, t.count_start, (int)g_active_rules[i].action,
-            (int)g_active_rules[i].spellSlotCount,
-            (g_active_rules[i].spellSlotCount > 0)
-                ? (int)g_active_rules[i].spellSlots[0] : -1);
+            t.count_alive, t.count_start, (int)g_active_rules[i].action);
     }
 
     g_track_side = side;
     g_track_active = bound > 0;
-    LogDebug("[Track] bound side=%d stacks=%d actions=%d spells=%d",
-        side, bound, configured_action, configured_spell);
+    LogDebug("[Track] bound side=%d stacks=%d actions=%d",
+        side, bound, configured_action);
 }
 
 // 刷新跟踪表：存活、位置、数量；身份变化则标记死亡并解除可用。
@@ -384,7 +373,7 @@ static void UpdateStackTracking_()
             t.alive = true;
             t.move_cursor = 0;
             t.melee_cursor = 0;
-            t.spell_cursor = 0;
+
             g_active_rules[i] = g_summon[g_active_profile].summon_rule;
             g_track_active = true;
             LogInfo("[Summon] 补绑召唤物 slot=%d cid=0x%X hex=%d count=%d action=%d",
@@ -767,12 +756,6 @@ void ResetAutoState()
     g_pipeline_stack = nullptr;
     g_pipeline_action_landed = false;
     g_pipeline_morale_extra = false;
-    g_auto_state.spell_wait_slot = -1;
-    g_auto_state.spell_wait_key = -1;
-    g_auto_state.spell_wait_frames = 0;
-    g_auto_state.spell_wait_started = 0;
-    g_auto_state.spell_mana_before = 0;
-    g_auto_state.spell_casted_before = 0;
     // F9 全手动是用户对"本场谁执行"的显式选择；取消重打/重绑不清，
     // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
     // 只清单次接管与施法等待等运行时数据。
@@ -781,6 +764,7 @@ void ResetAutoState()
     g_enemy_hp_value[0] = 0;
     g_enemy_hp_value[1] = 0;
     ResetForceFieldRuntime_();
+    ResetAttackMagicRuntime_();
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
     g_status_norecipient_logged = 0;
@@ -919,17 +903,10 @@ unsigned long long GetBattleFingerprint()
 
 static void ClearSpellWait_()
 {
-    // 撤销投递：本回合已投过键的 done 语义保留（POSTED→DONE 不回 IDLE，
-    // 且锚定单位保留以拦截同回合重投）；管线整体清零由 ResetAutoState /
-    // 接管清单位负责。
+    // ForceField/BattleState 仍调用此接口清理残留阶段；不包含任何数字键
+    // 投递或等待数据。管线锚点由 ResetAutoState / 单次接管整体清理。
     if (g_pipeline_stage == PS_SPELL_POSTED)
         g_pipeline_stage = PS_SPELL_DONE;
-    g_auto_state.spell_wait_slot = -1;
-    g_auto_state.spell_wait_key = -1;
-    g_auto_state.spell_wait_frames = 0;
-    g_auto_state.spell_wait_started = 0;
-    g_auto_state.spell_mana_before = 0;
-    g_auto_state.spell_casted_before = 0;
 }
 
 // BltComplete 只负责推进施法状态，不能直接写部队动作：它不在 0x473A00
@@ -958,109 +935,8 @@ static void RequestUnitActionWake_(_BattleStack_* self)
     }
 }
 
-// 把 1-9/0 映射到 H3 战斗消息键码：H3VK_1=2 ... H3VK_9=10, H3VK_0=11。
-static int DigitToH3Vk_(int digit)
-{
-    if (digit >= 1 && digit <= 9) return digit + 1; // 1->2 ... 9->10
-    if (digit == 0) return 11; // H3VK_0
-    return -1;
-}
-
-// SoD_SP 快捷施法槽：1->0 ... 9->8, 0->9。
-static int DigitToQuickSpellSlot_(int digit)
-{
-    if (digit >= 1 && digit <= 9) return digit - 1;
-    if (digit == 0) return 9;
-    return -1;
-}
-
 static int GetHeroMana_(_BattleMgr_* mgr, int side);
 static int GetHeroCasted_(_BattleMgr_* mgr, int side);
-
-// 快捷施法实现在 SoD_SP.dll，不在原版 0x4746B0。
-// 证据：SoD_SP HiHook 0x473A00 → RVA 0x6B40；数字键 KEY_DOWN 会把
-// H3VK_1..0 转成槽位 0..9，再调用 RVA 0x8FE0。这里向游戏窗口投递
-// 带真实扫描码的 WM_KEYDOWN/UP，让游戏输入泵在正常时机生成 H3Msg。
-static bool TriggerQuickSpellDigit_(int digit)
-{
-    const int slot = DigitToQuickSpellSlot_(digit);
-    const int h3vk = DigitToH3Vk_(digit);
-    if (slot < 0 || h3vk < 0) return false;
-
-    HMODULE sod_sp = GetModuleHandleA("SoD_SP.dll");
-    if (!sod_sp)
-        sod_sp = GetModuleHandleA("SoD_SP");
-    if (!sod_sp) {
-        LogError("[Spell] SoD_SP.dll not loaded; cannot cast quickspell digit=%d",
-            digit);
-        return false;
-    }
-
-    _BattleMgr_* mgr = o_BattleMgr;
-    if (!mgr) return false;
-
-    // SoD_SP 1.19.4.2：每槽 12 字节 {spellId, targetHex, targetStackPtr}。
-    // 先记录并拒绝空槽；否则内部 RVA 0x8FE0 只会静默返回。
-    int spell_id = -1;
-    int target_hex = -1;
-    void* target_stack = nullptr;
-    int spell_flags = -1;
-    __try {
-        BYTE* entry = reinterpret_cast<BYTE*>(sod_sp) + 0x64918 + slot * 12;
-        spell_id = *reinterpret_cast<int*>(entry + 0);
-        target_hex = *reinterpret_cast<int*>(entry + 4);
-        target_stack = *reinterpret_cast<void**>(entry + 8);
-        if (spell_id >= 0 && spell_id < 70) {
-            BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
-            if (spell_table)
-                spell_flags = spell_table[spell_id * 0x88 + 0x0C];
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogError("[Spell] cannot inspect SoD_SP quickspell slot=%d base=%p",
-            slot, (void*)sod_sp);
-    }
-
-    const int side = mgr->current_active_side;
-    int is_human = -1;
-    int tactics = -1;
-    __try {
-        BYTE* raw = reinterpret_cast<BYTE*>(mgr);
-        is_human = (side >= 0 && side <= 1) ? raw[0x54A6 + side] : -1;
-        tactics = raw[0x13D68];
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    LogDebug("[Spell] request digit=%d slot=%d spell=%d targetHex=%d targetStack=%p flags=0x%X side=%d human=%d tactics=%d hero=%p casted=%d mana=%d action=%d",
-        digit, slot, spell_id, target_hex, target_stack, spell_flags,
-        side, is_human, tactics,
-        (side >= 0 && side <= 1) ? mgr->hero[side] : nullptr,
-        GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side), mgr->action);
-
-    if (spell_id < 0 || spell_id >= 70 || (spell_flags & 1) == 0)
-        LogWarn("[Spell] SoD_SP slot appears empty/invalid; still posting digit for other hooks slot=%d spell=%d flags=0x%X",
-            slot, spell_id, spell_flags);
-
-    HWND hwnd = *reinterpret_cast<HWND*>(0x699650);
-    if (!hwnd) {
-        LogError("[Spell] game window unavailable digit=%d spell=%d", digit, spell_id);
-        return false;
-    }
-
-    const WPARAM win_vk = static_cast<WPARAM>('0' + digit);
-    const LPARAM key_down = 1 | (static_cast<LPARAM>(h3vk) << 16);
-    const LPARAM key_up = key_down | (static_cast<LPARAM>(1) << 30)
-        | (static_cast<LPARAM>(1) << 31);
-    __try {
-        const BOOL down_ok = PostMessageA(hwnd, WM_KEYDOWN, win_vk, key_down);
-        const BOOL up_ok = PostMessageA(hwnd, WM_KEYUP, win_vk, key_up);
-        LogDebug("[Spell] posted quick key digit=%d h3vk=%d spell=%d hwnd=%p down=%d up=%d",
-            digit, h3vk, spell_id, hwnd, down_ok ? 1 : 0, up_ok ? 1 : 0);
-        if (!down_ok || !up_ok)
-            return false;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogError("[Spell] posting quick key crashed digit=%d spell=%d", digit, spell_id);
-        return false;
-    }
-}
 
 static int GetHeroMana_(_BattleMgr_* mgr, int side)
 {
@@ -1074,8 +950,8 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
 // 每次把控制权交给玩家时判一次：遍历己方部队（按队保活方式，默认不保活），
 // 每队按自己的保活方式（剩余数量 ≤ 阈值 / 损失量大于恢复量）判定够格，
 // 够格者中取血量最低一支，按其亡灵/活体自动选聚灵(39)/复活(38)，
-// 直接 CastSpell 施放。英雄本回合已施法跳过；不占快捷施法、
-// 不推进任何部队的循环施法游标。复活无人可救且召唤启用（enabled）
+// 直接 CastSpell 施放。英雄本回合已施法跳过；保活与魔法通道共享施法门，
+// 不改变部队动作管线。复活无人可救且召唤启用（enabled）
 // 时走召唤兜底（SummonChannel_）。
 
 // 设置面板提交后调用：当前/下一回合重新判定（事件型判定无需作废标记，
@@ -1864,31 +1740,6 @@ static int GetHeroCasted_(_BattleMgr_* mgr, int side)
     return mgr->hero_casted[side] ? 1 : 0;
 }
 
-// 从配置序列 + 运行游标取本回合快捷键；无序列返回 -1。
-static int PeekSpellKey_(const AutoStackRule& rule, const StackTrackEntry& runtime)
-{
-    int n = rule.spellSlotCount;
-    if (n <= 0) return -1;
-    if (n > SPELL_SLOT_CAPACITY) n = SPELL_SLOT_CAPACITY;
-    int cur = runtime.spell_cursor;
-    if (cur < 0 || cur >= n) cur = 0;
-    const int key = rule.spellSlots[cur];
-    if (key == 0 || (key >= 1 && key <= 9)) return key;
-    return -1;
-}
-
-static void AdvanceSpellCursor_(StackTrackEntry& runtime, int count)
-{
-    if (count <= 0) {
-        runtime.spell_cursor = 0;
-        return;
-    }
-    if (count > SPELL_SLOT_CAPACITY) count = SPELL_SLOT_CAPACITY;
-    int cur = runtime.spell_cursor;
-    if (cur < 0 || cur >= count) cur = 0;
-    runtime.spell_cursor = (cur + 1) % count;
-}
-
 int GetAliveStacks(_BattleStack_* out_stacks[], int max_count, int side)
 {
     int n = 0;
@@ -1982,6 +1833,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (st.refresh_turns < 1
                 || st.refresh_turns > H3AutoPolicy::kStatusRefreshTurnsMax)
             st.refresh_turns = H3AutoPolicy::kStatusRefreshTurns;
+        H3AutoPolicy::NormalizeStatusFields(&st);
         g_status[p] = st;
         ForceFieldProfileFields ff = forcefield
             ? forcefield[p] : H3AutoPolicy::MakeDefaultForceFieldFields();
@@ -1990,26 +1842,18 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     }
     g_active_profile = active_profile;
     ResetForceFieldRuntime_();
+    ResetAttackMagicRuntime_();
 
     // 身份按本场现编（含召唤物：本场内可执行，重打重排自动丢弃其规则）。
     const int side = ResolveHumanSide_(o_BattleMgr);
     BuildStableIdentitiesFromBattle_(o_BattleMgr, side, g_rule_identities);
     memcpy(g_active_rules, g_profiles[g_active_profile], sizeof(g_active_rules));
     if (g_battle_attempt_id <= 0) g_battle_attempt_id = 1;
-    int spell_rules = 0;
     int action_rules = 0;
-    for (int i = 0; i < 21; ++i) {
+    for (int i = 0; i < 21; ++i)
         if (g_active_rules[i].action != AA_MANUAL) ++action_rules;
-        if (g_active_rules[i].spellSlotCount > 0) {
-            ++spell_rules;
-            LogInfo("[Auto] commit slot=%d action=%d spells=%d first=%d",
-                i, (int)g_active_rules[i].action,
-                (int)g_active_rules[i].spellSlotCount,
-                (int)g_active_rules[i].spellSlots[0]);
-        }
-    }
-    LogInfo("[Auto] 5 profiles committed; active profile=%d actions=%d spells=%d",
-        g_active_profile + 1, action_rules, spell_rules);
+    LogInfo("[Auto] 5 profiles committed; active profile=%d actions=%d",
+        g_active_profile + 1, action_rules);
     // 生效方案召唤/停止参数留痕（测试核对：默认勾选+阈值 6+召唤物默认防御）。
     {
         const SummonProfileFields& sf = g_summon[g_active_profile];
@@ -2471,7 +2315,7 @@ static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoSta
     return true;
 }
 
-// 提交部队主动作（不含循环施法阶段）。
+// 提交部队主动作。
 static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule, StackTrackEntry& runtime)
 {
@@ -2513,7 +2357,7 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
 
     switch (rule.action) {
     case AA_MANUAL:
-        // 仅配置了循环施法时：施法阶段结束后把主动作交回玩家。
+        // 手动主动作始终留给玩家。
         return false;
     case AA_DEFEND:
         return SubmitDefend_(mgr, self);
@@ -2540,7 +2384,7 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
 }
 
 // 尝试按规则提交主动动作；成功返回 true。
-// 含循环施法两阶段：先投递快捷键，等待施法结束/超时后再提交部队动作。
+// 主动作只由战斗消息入口提交，帧回调仅请求唤醒。
 static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 {
     if (!mgr) return false;
@@ -2602,92 +2446,13 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (idx < 0 || idx >= 21) return false;
     const AutoStackRule& rule = g_active_rules[idx];
     StackTrackEntry& runtime = g_stack_track[idx];
-    const int side = self->def_group_ix;
-    const int spell_key = PeekSpellKey_(rule, runtime);
-    const bool want_spell = spell_key >= 0;
-    const bool want_action = rule.action != AA_MANUAL;
-    // 分发快照：定位“该动不动/走错分支”类问题（排查期 info，确认后降 debug）。
-    LogDebug("[Auto] dispatch slot=%d cid=0x%X action=%d selector=%d fallback=%d spells=%d cursor=%d key=%d stage=%d",
+    LogDebug("[Auto] dispatch slot=%d cid=0x%X action=%d selector=%d fallback=%d stage=%d",
         idx, self->creature_id, (int)rule.action, (int)rule.target.selector,
-        rule.allowDefendFallback ? 1 : 0, rule.spellSlotCount,
-        runtime.spell_cursor, spell_key, (int)g_pipeline_stage);
-
-    // 既无施法序列、又无主动作：不介入。
-    if (!want_spell && !want_action)
+        rule.allowDefendFallback ? 1 : 0, (int)g_pipeline_stage);
+    if (rule.action == AA_MANUAL)
         return false;
 
-    // —— 阶段 1：投递快捷施法键 ——
-    if (want_spell && g_pipeline_stage != PS_SPELL_POSTED
-        && !(g_pipeline_stage == PS_SPELL_DONE && g_pipeline_stack == self)) {
-        // 本英雄本回合已施过法：跳过施法，直接进入部队动作。
-        // 正常业务流（游戏一回合一施，含玩家先手施过），info 留痕即可。
-        if (GetHeroCasted_(mgr, side) != 0) {
-            LogInfo("[Spell] already cast this turn side=%d; skip quick key=%d",
-                side, spell_key);
-            // 英雄每回合只能施法一次；本部队没有实际尝试，不消费循环槽位。
-            g_pipeline_stage = PS_SPELL_DONE;
-            g_pipeline_stack = self;
-        } else {
-            g_auto_state.spell_mana_before = GetHeroMana_(mgr, side);
-            g_auto_state.spell_casted_before = GetHeroCasted_(mgr, side);
-            g_auto_state.spell_wait_started = GetTickCount();
-            if (!TriggerQuickSpellDigit_(spell_key)) {
-                LogWarn("[Spell] trigger failed digit=%d; fallthrough to unit action",
-                    spell_key);
-                AdvanceSpellCursor_(runtime, rule.spellSlotCount);
-                g_pipeline_stage = PS_SPELL_DONE;
-                g_pipeline_stack = self;
-            } else {
-                g_pipeline_stage = PS_SPELL_POSTED;
-                g_pipeline_stack = self;
-                g_auto_state.spell_wait_slot = idx;
-                g_auto_state.spell_wait_key = spell_key;
-                g_auto_state.spell_wait_frames = 0;
-                LogDebug("[Spell] wait start slot=%d key=%d mana=%d casted=%d",
-                    idx, spell_key, g_auto_state.spell_mana_before,
-                    g_auto_state.spell_casted_before);
-                return false; // 本帧只投键，不提交部队动作
-            }
-        }
-    }
-
-    // —— 阶段 2：等待施法结果 ——
-    if (g_pipeline_stage == PS_SPELL_POSTED && g_pipeline_stack == self) {
-        ++g_auto_state.spell_wait_frames;
-        const DWORD elapsed = GetTickCount() - g_auto_state.spell_wait_started;
-        const int mana_now = GetHeroMana_(mgr, side);
-        const int casted_now = GetHeroCasted_(mgr, side);
-        const bool cast_done =
-            (casted_now != 0 && g_auto_state.spell_casted_before == 0)
-            || (mana_now >= 0 && g_auto_state.spell_mana_before >= 0
-                && mana_now < g_auto_state.spell_mana_before);
-        // BltComplete 在本环境中一毫秒内可触发多次，必须按真实时间超时。
-        const bool timed_out = elapsed >= 2000;
-        if (!cast_done && !timed_out)
-            return false; // 继续等
-
-        LogDebug("[Spell] wait end slot=%d key=%d calls=%d elapsed=%lu cast_done=%d timed_out=%d mana %d->%d casted %d->%d",
-            idx, g_auto_state.spell_wait_key, g_auto_state.spell_wait_frames,
-            (unsigned long)elapsed,
-            cast_done ? 1 : 0, timed_out ? 1 : 0,
-            g_auto_state.spell_mana_before, mana_now,
-            g_auto_state.spell_casted_before, casted_now);
-
-        // 无论成功/失败/超时都推进游标，避免同一键卡死整场。
-        AdvanceSpellCursor_(runtime, rule.spellSlotCount);
-        ClearSpellWait_(); // POSTED→DONE，锚定保留
-        // 施法动画/选择目标期间 action 可能被占用；若仍非 0 则下帧再提交主动作。
-        if (mgr->action != 0)
-            return false;
-    }
-
-    // —— 阶段 3：提交部队主动作 ——
-    if (!want_action) {
-        // 仅循环施法、主动作为手动：施法流程结束后交回玩家。
-        g_pipeline_stage = PS_HANDLED;
-        g_pipeline_stack = self;
-        return false;
-    }
+    // 提交部队主动作；唤醒、身份、士气和生命周期保护沿用原管线。
 
     if (!allow_unit_action) {
         RequestUnitActionWake_(self);
@@ -2810,22 +2575,9 @@ int DecideTakeover(_BattleMgr_* mgr)
         return CD_HAND_TO_AI;
 
     default:
-        // 普通部队：无特殊 AI 分支。
-        // - 有非手动主动作 → 代发动作
-        // - 主动作手动但配置了循环施法 → 仍进入执行路径（仅做施法阶段）
-        // - 都没有 → 留给玩家
+        // 普通部队：仅非手动主动作进入代发路径，其余留给玩家。
         if (rule.action != AA_MANUAL)
             return CD_EXECUTE_H3AUTO;
-        if (rule.spellSlotCount > 0) {
-            static void* s_last_spell_takeover = nullptr;
-            if (s_last_spell_takeover != stack) {
-                s_last_spell_takeover = stack;
-                LogDebug("[Spell] takeover slot=%d spells=%d first=%d",
-                    idx, (int)rule.spellSlotCount,
-                    (int)rule.spellSlots[0]);
-            }
-            return CD_EXECUTE_H3AUTO;
-        }
         return CD_KEEP_ORIGINAL;
     }
 }
@@ -2889,6 +2641,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
         TryAutoStop_(This);
+        if (!TryAttackMagicCast_(This)) return 0;
         // 统一使用 current_mon_side/index 对应的 CurrentTurnStack_：自动模式下
         // active_stack 经常为空，若把复位放在 active_stack 判空内，士气额外行动
         // 和“场上只剩一支部队”的新回合都会漏判，PS_HANDLED 会一直挡住提交。

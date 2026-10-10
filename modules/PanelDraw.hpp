@@ -12,7 +12,6 @@ static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_
 static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetHelpPackBtnRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void StatusSlotRect_(int index, int* x, int* y);
 static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
@@ -20,6 +19,8 @@ static void GetSummonCondDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
 static void GetSummonActDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
-static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void DrawSpellKeyModal_(H3LoadedPcx16* scr);
 static void DrawPanelToBuffer_();
+
+static void DrawAttackMagicPage_(H3LoadedPcx16* scr);
+static void DrawAttackMagicDropdown_(H3LoadedPcx16* scr);
+static const char* StatusSpellName_(int spell_id, char* out, int out_size);

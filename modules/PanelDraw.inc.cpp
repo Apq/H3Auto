@@ -536,7 +536,7 @@ static const char* PanelTipAt_(int px, int py)
             && py >= ty && py < ty + TAB_ITEM_H)
             return T(page == PAGE_ARMY ? "tips.tab_army"
                 : page == PAGE_SUMMON ? "tips.tab_summon"
-                : page == PAGE_STATUS ? "tips.tab_status" : "tips.tab_tactics");
+                : page == PAGE_STATUS ? "tips.tab_status" : "tips.tab_attack");
     }
     // 非部队页：只有方案级控件与共通按钮的 tip。
     if (s_p.active_page != PAGE_ARMY) {
@@ -611,6 +611,9 @@ static const char* PanelTipAt_(int px, int py)
             && PointInRect_(px, py, GRID_FRAME_X, FF_ROW_Y,
                 FF_LABEL_W + 6 + 2 * (FF_SLOT_W + FF_SLOT_GAP), FF_SLOT_H))
             return T("tips.forcefield_pick");
+        if (s_p.active_page == PAGE_ATTACK
+            && py >= AttackMagicHeaderY_() && py < MAGIC_LIST_BOTTOM)
+            return T("magic.tip");
         // 保持状态页专属控件 tips（阈值行）。
         if (s_p.active_page == PAGE_STATUS
             && px >= GRID_FRAME_X
@@ -636,11 +639,6 @@ static const char* PanelTipAt_(int px, int py)
         const int hov = (s_p.hover_cell == i) ? s_p.hover_idx : -1;
         if (const char* tip = CellControl_TipForHit(hit, ctrl, hov))
             return tip;
-        // 标签「行动前循环快捷施法:」本身不在槽位命中区内，整行都给施法说明。
-        if (py >= cRc.top + CC_SPELL_Y && py < cRc.top + CC_SPELL_Y + CC_ROW_H
-            && px >= cRc.left + CC_COL2_X && px < cRc.left + CC_COL3_RIGHT)
-            return CellControl_TipForHit(
-                static_cast<CellHitArea>(CELL_HIT_SPELL_BASE), ctrl);
     }
     struct TipRect { int x, y, w, h; const char* text; };
     static const TipRect kTips[] = {
@@ -680,15 +678,7 @@ static const char* PanelTipAt_(int px, int py)
     return nullptr;
 }
 
-static void GetSpellKeyModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
-{
-    const int w = 360;
-    const int h = 164;
-    if (out_x) *out_x = (PANEL_W - w) / 2;
-    if (out_y) *out_y = (PANEL_H - h) / 2;
-    if (out_w) *out_w = w;
-    if (out_h) *out_h = h;
-}
+
 
 // 多级导航：左侧 Tab 条 + 金框色分隔竖线（方案行以下、确定/取消以上）。
 // 选中项亮底金框金字，未选暗底暗框（与卡片按钮暖色体系一致）。
@@ -699,6 +689,7 @@ static void DrawTabBar_(H3LoadedPcx16* scr)
         "panel.tab_army",
         "panel.tab_summon",
         "panel.tab_status",
+        "panel.tab_attack",
     };
     H3Font* small_font = GetSmallFont();
     for (int i = 0; i < TAB_VISIBLE_COUNT; ++i) {
@@ -833,60 +824,9 @@ static void DrawStopRow_(H3LoadedPcx16* scr)
     }
 }
 
-static void GetSpellKeyModalCancelRect_(int* out_x, int* out_y, int* out_w, int* out_h)
-{
-    int x = 0, y = 0, w = 0, h = 0;
-    GetSpellKeyModalRect_(&x, &y, &w, &h);
-    const int bw = 84;
-    const int bh = 26;
-    if (out_x) *out_x = x + (w - bw) / 2;
-    if (out_y) *out_y = y + h - bh - 16;
-    if (out_w) *out_w = bw;
-    if (out_h) *out_h = bh;
-}
 
-static void DrawSpellKeyModal_(H3LoadedPcx16* scr)
-{
-    // 循环施法录入（s_spell_pick_cell）模态框。
-    if (!scr || s_spell_pick_cell < 0) return;
-    int x = 0, y = 0, w = 0, h = 0;
-    GetSpellKeyModalRect_(&x, &y, &w, &h);
 
-    // 先遮暗整个设置面板，形成明确模态层。
-    for (int yy = 0; yy < PANEL_H; yy += 2)
-        Fill(scr, 0, yy, PANEL_W, 1, 22, 18, 14);
 
-    // 模态框本体：深色底 + 双层金框。
-    Fill(scr, x, y, w, h, 52, 35, 20);
-    scr->DrawFrame(x, y, w, h, (BYTE)232, (BYTE)196, (BYTE)96);
-    scr->DrawFrame(x + 2, y + 2, w - 4, h - 4, (BYTE)112, (BYTE)82, (BYTE)36);
-
-    H3Font* title_font = GetPanelFont();
-    H3Font* small_font = GetSmallFont();
-    char slot_text[64] = {};
-    DrawTxt(scr, title_font, T("cell.spell_modal_title"),
-        x + 16, y + 14, w - 32, 28,
-        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
-    _snprintf(slot_text, sizeof(slot_text), T("cell.spell_modal_slot"),
-        s_spell_pick_slot + 1);
-    DrawTxt(scr, small_font, slot_text,
-        x + 16, y + 48, w - 32, 20,
-        (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-    DrawTxt(scr, small_font, T("cell.spell_modal_hint1"),
-        x + 16, y + 72, w - 32, 20,
-        (INT32)eTextColor::LIGHT_GREEN, eTextAlignment::MIDDLE_CENTER);
-    DrawTxt(scr, small_font, T("cell.spell_modal_hint2"),
-        x + 16, y + 94, w - 32, 18,
-        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_CENTER);
-
-    int bx = 0, by = 0, bw = 0, bh = 0;
-    GetSpellKeyModalCancelRect_(&bx, &by, &bw, &bh);
-    Fill(scr, bx, by, bw, bh, 74, 50, 27);
-    scr->DrawFrame(bx, by, bw, bh, (BYTE)196, (BYTE)154, (BYTE)68);
-    DrawTxt(scr, small_font, T("cell.spell_modal_cancel"),
-        bx, by, bw, bh, (INT32)eTextColor::WHITE,
-        eTextAlignment::MIDDLE_CENTER);
-}
 
 // ===== 召唤页（PAGE_SUMMON）：设置行 + 说明行 + 召唤物行动卡 =====
 
@@ -1091,7 +1031,7 @@ static void StatusSlotRect_(int index, int* x, int* y)
     const int col = index % STATUS_COLS;
     const int row = index / STATUS_COLS;
     if (x) *x = GRID_FRAME_X + col * (STATUS_DD_W + STATUS_GAP);
-    if (y) *y = STATUS_ROW0_Y + row * STATUS_ROW_H;
+    if (y) *y = STATUS_ROW0_Y + row * (SmallFontRowHeight_(STATUS_DD_H) + 8);
 }
 
 static const char* StatusSpellLabel_(int spell_id, char* buf, int cap)
@@ -1184,6 +1124,8 @@ static void DrawStatusPage_(H3LoadedPcx16* scr)
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 }
+
+#include "MagicChannelDraw.inc.cpp"
 
 // 展开的下拉列表（每项底色+边框，与保活/卡片下拉同主题）。
 static void DrawSummonDropdownLists_(H3LoadedPcx16* scr)
@@ -1363,6 +1305,9 @@ static void DrawPanelToBuffer_()
                     (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
             }
         }
+    } else if (s_p.active_page == PAGE_ATTACK) {
+        DrawAttackMagicPage_(scr);
+        DrawAttackMagicDropdown_(scr);
     }
 
     DrawPanelButtons_(scr);
@@ -1404,10 +1349,9 @@ static void DrawPanelToBuffer_()
     // 召唤/本场存档展开列表（盖住表格上缘，画在最后）。
     DrawSummonDropdownLists_(scr);
     DrawBattleDropdownList_(scr);
+    DrawAttackMagicDropdown_(scr);
 
     // 模态层最后绘制，盖住整张设置面板。
-    if (s_spell_pick_cell >= 0)
-        DrawSpellKeyModal_(scr);
     if (s_help_modal_open)
         DrawHelpModal_(scr);
 

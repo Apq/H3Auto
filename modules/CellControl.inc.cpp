@@ -40,8 +40,8 @@ struct CellData
 // ========================================================================
 
 static const int CC_CELL_W    = 511; // 内容区 129..640(右缘660=帮助按钮右缘)
-// 卡片恢复旧版高度 110：表格上方不再放整行设置，保活行移入卡片底部。
-static const int CC_CELL_H    = 110;
+// 删除循环施法行后卡片减高 22px；头像左上角坐标不变。
+static const int CC_CELL_H    = 88;
 
 // 图标贴左上角。卡片金边约 2px，再留 3px 空隙 → 内容起点约 5。
 // 金框资源比图标大 2px 且画在 icon-1，最终外缘大约在 4，视觉上有边距。
@@ -54,9 +54,7 @@ static const int CC_ICON_FRAME_H = 66;
 
 static const int CC_LABEL_H  = 11;
 
-// 一行一格（宽格 464×99）横排布局：
-//   图标列（位置左下/数量右下） | 第二小列（「循环施法:」+ 行动/降级）
-//   | 第三小列（循环施法槽 + 选择器/近战/移动，吃掉剩余宽度）
+// 头像列固定；右侧第二列为行动/降级，第三列为目标或循环路径。
 // 第二小列左缘贴图标金框右缘，留 4px 间距。
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
 static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68
@@ -65,11 +63,10 @@ static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈206
 static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
 static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈358
 static const int CC_ROW_H    = 22;
-// 顶部循环施法行；行动/目标两行居中，底部加保活行，适配 110 高。
-static const int CC_SPELL_Y  = 5;
-static const int CC_TOP_Y    = 30;  // 中行（行动/选择器/路径槽）
-static const int CC_BOT_Y    = 54;  // 下行（降级/阵营/路径槽）
-static const int CC_PROTECT_Y = 78; // 底部行：保活方式（§8.7）
+// 删除顶部施法行：行动/目标、降级/路径、保活三行统一上移 22px。
+static const int CC_TOP_Y    = 8;
+static const int CC_BOT_Y    = 32;
+static const int CC_PROTECT_Y = 56;
 static const int CC_CHECKBOX_H = 14;
 
 // 保活行布局：三选一，默认不保活。「保活:」标签 + 方式下拉
@@ -85,11 +82,6 @@ static const int CC_PROTECT_CNT_BOX_X = CC_PROTECT_CNT_LBL_X + CC_PROTECT_CNT_LB
 static const int CC_PROTECT_CNT_BOX_W = 92;  // 容纳 10 位（2147483647）
 static const int CC_PROTECT_CNT_BOX_H = 16;
 static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
-// 循环施法：标签占第二小列；槽位从第三小列起。
-// 单数字槽固定小宽，按第三列宽度能摆几个就是几个（当前 10）。
-static const int CC_SPELL_LABEL_W = CC_COL2_W;
-static const int CC_SPELL_SLOT_GAP = 3;
-static const int CC_SPELL_SLOT_W = 22; // 刚好显示一位数字（10 槽一排放进 290 宽）
 // 循环移动/近战槽：按文本宽度定槽宽，再反算每行/总容量（两行）。
 static const int CC_PATH_SLOT_GAP = 3;
 static const int CC_MOVE_SLOT_W = 32;  // A01（8 槽/行放进 290 宽）
@@ -125,7 +117,6 @@ enum CellExpandKind {
     CEX_SELECTOR,
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
-    CEX_SPELL,    // 保留枚举；循环施法改为数字键录入，不再展开下拉
     CEX_PROTECT,  // 保活方式（剩余数量 / 损失量大于恢复量）
 };
 
@@ -152,9 +143,6 @@ struct CellControl
     // 循环移动路径点拾取请求：0=无，1..MOVE_WAYPOINT_CAPACITY=要新增/重设的路径点索引+1。
     // 与循环近战一致：每次只进战场点 1 格，返回后覆盖/追加对应槽。
     int              move_path_pick_request;
-    // 循环施法录入请求：0=无，1..SPELL_SLOT_CAPACITY=待按数字键的槽索引+1。
-    // 面板保持打开，仅支持按 1-9/0 写入同一数字（不再点选快捷施法栏）。
-    int              spell_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 
@@ -262,12 +250,6 @@ static bool CellControl_HexAdjacent(int a, int b)
     return false;
 }
 
-// 规范化循环施法序列：压紧有效快捷键、迁移旧单槽、同步兼容镜像。
-static void CellControl_NormalizeSpellSlots(AutoStackRule* rule)
-{
-    H3AutoPolicy::NormalizeSpellSlots(rule);
-}
-
 // 规范化循环近战序列：压紧有效组合、迁移旧的单组字段、同步兼容镜像。
 static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
 {
@@ -309,12 +291,6 @@ static void CellControl_NormalizeMeleePairs(AutoTargetRule* target)
         target->meleeStandHex = target->meleeStandHexes[0];
         target->meleeAttackHex = target->meleeAttackHexes[0];
     }
-}
-
-// 删除循环施法序列中的第 index 项并压紧。
-static bool CellControl_RemoveSpellSlot(AutoStackRule* rule, int index)
-{
-    return H3AutoPolicy::RemoveSpellSlot(rule, index);
 }
 
 // 删除循环移动路径点中的第 index 项并压紧。
@@ -454,7 +430,6 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->hover_item = -1;
     ctrl->melee_pair_pick_request = 0;
     ctrl->move_path_pick_request = 0;
-    ctrl->spell_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -488,7 +463,6 @@ static void CellControl_SetData(CellControl* ctrl, const CellData* data)
     CellControl_EnsureMeleeDefaults(ctrl);
     ctrl->expanded = CEX_NONE;
     ctrl->hover_item = -1;
-    ctrl->spell_pick_request = 0;
     ctrl->dd_scroll = 0;
     ctrl->dirty = true;
 }
@@ -521,18 +495,17 @@ static int CellControl_GetExpandListLeftX(CellControl* ctrl)
     }
 }
 
-// 展开列表宽度：行动=第二列，循环施法=槽宽，其余=第三列
+// 展开列表宽度：行动=第二列，保活=专用宽度，其余=第三列
 static int CellControl_GetExpandListWidth(CellControl* ctrl)
 {
     if (!ctrl) return CC_COL3_W;
-    if (ctrl->expanded == CEX_SPELL) return CC_SPELL_SLOT_W;
     if (ctrl->expanded == CEX_ACTION) return CC_COL2_W;
     if (ctrl->expanded == CEX_PROTECT) return CC_PROTECT_DD_W;
     return CC_COL3_W;
 }
 
 // 当前展开列表的局部 Y（列表顶部，相对格子）= 其所在行下边缘。
-// 循环施法=顶行；行动/选择器=中行；攻击=下行。
+// 行动/选择器=上行；近战站立/攻击依控件所处行展开。
 static int CellControl_GetExpandListTopY(CellControl* ctrl)
 {
     if (!ctrl) return CC_TOP_Y + CC_ROW_H;
@@ -542,7 +515,6 @@ static int CellControl_GetExpandListTopY(CellControl* ctrl)
     case CEX_STAND:    return CC_TOP_Y + CC_ROW_H;
     case CEX_ATTACK:   return CC_BOT_Y + CC_ROW_H;
     case CEX_PROTECT:  return CC_PROTECT_Y + CC_ROW_H;
-    case CEX_SPELL:    return CC_SPELL_Y + CC_ROW_H;
     default:           return CC_TOP_Y + CC_ROW_H;
     }
 }
@@ -956,39 +928,6 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 
-    // ---- 顶部：行动前循环快捷施法（标签 + 单行最多 SPELL_SLOT_CAPACITY 个快捷键槽）----
-    {
-        CellControl_DrawText(scr, fntS, T("cell.pre_cast_label"),
-            CC_COL2_X, CC_SPELL_Y, CC_SPELL_LABEL_W, CC_ROW_H,
-            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-
-        const int count = rule.spellSlotCount;
-        for (int index = 0; index < SPELL_SLOT_CAPACITY; ++index) {
-            const bool existing = index < count;
-            const bool add_slot = index == count && count < SPELL_SLOT_CAPACITY;
-            if (!existing && !add_slot) continue;
-
-            const int x = CC_COL3_X
-                + index * (CC_SPELL_SLOT_W + CC_SPELL_SLOT_GAP);
-            const bool requested = ctrl->spell_pick_request == index + 1;
-            CellControl_DrawButtonBg(scr, x, CC_SPELL_Y, CC_SPELL_SLOT_W, CC_ROW_H,
-                requested, false);
-            if (add_slot) {
-                CellControl_DrawPlusButton(scr,
-                    x + (CC_SPELL_SLOT_W - 16) / 2,
-                    CC_SPELL_Y + (CC_ROW_H - 16) / 2,
-                    16, requested);
-            } else {
-                char slot_buf[8] = {};
-                _snprintf(slot_buf, sizeof(slot_buf), "%d",
-                    (int)rule.spellSlots[index]);
-                CellControl_DrawText(scr, fntS, slot_buf,
-                    x + 2, CC_SPELL_Y, CC_SPELL_SLOT_W - 4, CC_ROW_H,
-                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
-            }
-        }
-    }
-
     // ---- 底部行：保活（三选一，默认不保活）。「保活:」+ 方式下拉 + 「剩≤[N]」 ----
     {
         const bool count_mode =
@@ -1262,57 +1201,6 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
     }
 }
 
-// 魔法槽位标签：索引 0..9 → "1".."9","0"
-static const char* CellControl_SpellSlotLabel(int idx)
-{
-    static const char* k[10] = { "1","2","3","4","5","6","7","8","9","0" };
-    return (idx >= 0 && idx < 10) ? k[idx] : "1";
-}
-
-// 魔法槽位值(1-9,0) → 下拉索引(0..9)
-static int CellControl_SpellSlotToIndex(int slot)
-{
-    if (slot == 0) return 9;
-    if (slot >= 1 && slot <= 9) return slot - 1;
-    return 0;
-}
-// 下拉索引(0..9) → 魔法槽位值(1-9,0)
-static int CellControl_IndexToSpellSlot(int idx)
-{
-    if (idx == 9) return 0;
-    if (idx >= 0 && idx < 9) return idx + 1;
-    return 1;
-}
-
-// 展开循环施法快捷键列表（10 项：1-9,0），从对应槽位下方展开
-static void CellControl_DrawSpellDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
-    int cell_panel_x, int cell_panel_y, int hover_idx)
-{
-    if (!ctrl || ctrl->expanded != CEX_SPELL || !scr) return;
-    H3Font* fntS = GetSmallFont();
-    if (!fntS) return;
-
-    int slot_index = 0; // 旧下拉路径已废弃
-    if (slot_index < 0) slot_index = 0;
-    if (slot_index >= SPELL_SLOT_CAPACITY) slot_index = SPELL_SLOT_CAPACITY - 1;
-
-    int current_slot = -1;
-    if (slot_index < ctrl->data.rule.spellSlotCount)
-        current_slot = ctrl->data.rule.spellSlots[slot_index];
-    const int cur = (current_slot >= 0)
-        ? CellControl_SpellSlotToIndex(current_slot) : -1;
-
-    const int list_left = CellControl_GetExpandListLeftX(ctrl);
-    const int list_top = CellControl_GetExpandListTopY(ctrl);
-    const int item_w = CellControl_GetExpandListWidth(ctrl);
-    for (int i = 0; i < 10; ++i) {
-        CellControl_DrawDropdownItem(scr, fntS, CellControl_SpellSlotLabel(i), i,
-            cell_panel_x, cell_panel_y,
-            i == cur, i == hover_idx, false,
-            list_top, list_left, item_w);
-    }
-}
-
 // 展开保活方式列表（三选一：不保活 / 按剩余数量 / 损失量大于恢复量）
 static void CellControl_DrawProtectDropdownTo(CellControl* ctrl,
     H3LoadedPcx16* scr, int cell_panel_x, int cell_panel_y, int hover_idx)
@@ -1349,9 +1237,6 @@ static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
     switch (ctrl->expanded) {
     case CEX_ACTION:
         CellControl_DrawActionDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
-        break;
-    case CEX_SPELL:
-        CellControl_DrawSpellDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
         break;
     case CEX_SELECTOR:
         CellControl_DrawSelectorDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
@@ -1392,8 +1277,6 @@ static int CellControl_GetExpandedItemCount(CellControl* ctrl)
         const int n = CellControl_BuildMeleeHexList(ctrl, hexes);
         return (n < CC_DD_MAX_VISIBLE) ? n : CC_DD_MAX_VISIBLE;
     }
-    case CEX_SPELL:
-        return 10;  // 魔法槽位 1-9,0
     case CEX_PROTECT:
         return (int)H3AutoPolicy::PM_COUNT;
     default:
@@ -1418,7 +1301,6 @@ enum CellHitArea
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
-    CELL_HIT_SPELL_BASE      = 300,
 };
 
 // 保活方式的单行提示。收起时用当前选中项，展开时用悬停项。
@@ -1508,8 +1390,6 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
     default:
         break;
     }
-    if (hit >= CELL_HIT_SPELL_BASE && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY)
-        return T("tips.cell_spell");
     if (hit >= CELL_HIT_MOVE_WP_BASE && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY)
         return T("tips.cell_move");
     if (hit >= CELL_HIT_MELEE_PAIR_BASE && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY)
@@ -1604,21 +1484,6 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
             return CELL_HIT_CHECKBOX;
     }
 
-    // 顶部循环施法槽位：已有槽可展开重设，末尾「＋」追加。
-    {
-        const int count = ctrl->data.rule.spellSlotCount;
-        for (int index = 0; index < SPELL_SLOT_CAPACITY; ++index) {
-            const bool existing = index < count;
-            const bool add_slot = index == count && count < SPELL_SLOT_CAPACITY;
-            if (!existing && !add_slot) continue;
-            const int x = CC_COL3_X
-                + index * (CC_SPELL_SLOT_W + CC_SPELL_SLOT_GAP);
-            if (local_x >= x && local_x < x + CC_SPELL_SLOT_W
-                && local_y >= CC_SPELL_Y && local_y < CC_SPELL_Y + CC_ROW_H)
-                return static_cast<CellHitArea>(CELL_HIT_SPELL_BASE + index);
-        }
-    }
-
     // 底部保活行：方式下拉收起态可点开；「剩≤」数字框仅按剩余数量方式可点。
     if (ctrl->expanded != CEX_PROTECT
         && local_y >= CC_PROTECT_Y && local_y < CC_PROTECT_Y + CC_ROW_H
@@ -1701,7 +1566,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->expanded = (ctrl->expanded == CEX_ACTION) ? CEX_NONE : CEX_ACTION;
             ctrl->action_pressed = true;
             ctrl->hover_item = -1;
-            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
@@ -1709,14 +1573,12 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->expanded = (ctrl->expanded == CEX_SELECTOR) ? CEX_NONE : CEX_SELECTOR;
             ctrl->selector_pressed = true;
             ctrl->hover_item = -1;
-            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
         if (hit == CELL_HIT_CHECKBOX) {
             ctrl->data.rule.allowDefendFallback = !ctrl->data.rule.allowDefendFallback;
             ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
             return true;
         }
@@ -1751,19 +1613,8 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY) {
             // 组合设置始终连续拾取：先站立格，再相邻攻击格。
             ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = 0;
             ctrl->melee_pair_pick_request =
                 static_cast<int>(hit - CELL_HIT_MELEE_PAIR_BASE) + 1;
-            ctrl->dirty = true;
-            return true;
-        }
-        if (hit >= CELL_HIT_SPELL_BASE
-            && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {
-            // 面板保持打开，等待直接按 1-9/0 写入该槽。
-            ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request =
-                (hit - CELL_HIT_SPELL_BASE) + 1; // 1..SPELL_SLOT_CAPACITY
-            ctrl->hover_item = -1;
             ctrl->dirty = true;
             return true;
         }
@@ -1771,7 +1622,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY) {
             // 路径点设置：隐藏面板后进战场点 1 格；可覆盖已有或末尾追加。
             ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = 0;
             ctrl->move_path_pick_request =
                 (hit - CELL_HIT_MOVE_WP_BASE) + 1; // 1..MOVE_WAYPOINT_CAPACITY
             ctrl->dirty = true;
@@ -1782,7 +1632,6 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
 
         if (ctrl->expanded != CEX_NONE) {
             ctrl->expanded = CEX_NONE;
-            ctrl->spell_pick_request = 0;
             ctrl->dirty = true;
         }
     }
@@ -1791,20 +1640,9 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
     // msg_type 5 = 面板层转发的右键松开。
     if (msg_type == 5) {
         ctrl->expanded = CEX_NONE;
-        ctrl->spell_pick_request = 0;
         ctrl->move_path_pick_request = 0;
         ctrl->melee_pair_pick_request = 0;
 
-        if (hit >= CELL_HIT_SPELL_BASE
-            && hit < CELL_HIT_SPELL_BASE + SPELL_SLOT_CAPACITY) {
-            const int index = hit - CELL_HIT_SPELL_BASE;
-            if (index < ctrl->data.rule.spellSlotCount
-                && CellControl_RemoveSpellSlot(&ctrl->data.rule, index)) {
-                ctrl->dirty = true;
-                return true;
-            }
-            return true; // 右键在「＋」上也消费，避免穿透
-        }
         if (hit >= CELL_HIT_MOVE_WP_BASE
             && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY) {
             const int index = hit - CELL_HIT_MOVE_WP_BASE;

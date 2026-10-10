@@ -37,9 +37,9 @@
 
 | 地址        | 类型     | 用途                        |
 | --------- | ------ | ------------------------- |
-| `0x600430` | LoHook | BltComplete：面板绘制 / 施法等待推进 / 热键轮询 / 状态机事件源（UI 出现·消失·P 键消费） |
+| `0x600430` | LoHook | BltComplete：面板绘制 / 原生施法面板交互 / 热键轮询 / 状态机事件源（UI 出现·消失·P 键消费） |
 | `0x4746B0` | LoHook | 战斗消息入口：面板输入屏蔽 / 提交部队主动作 |
-| `0x4744D0` | HiHook | 是否自动执行判定（`HH_ShouldAutoExecute`，仅 `orig==0` 时介入）：施法通道判定（保活/保持状态/召唤）/ 战争机器交回 AI / 人工接管门 / 管线残留清理 |
+| `0x4744D0` | HiHook | 是否自动执行判定（`HH_ShouldAutoExecute`，仅 `orig==0` 时介入）：施法通道判定（力盾/保活/保持状态/召唤/智能攻击）/ 战争机器交回 AI / 人工接管门 / 管线残留清理 |
 | `0x4786B0` | HiHook | 原版动作执行入口（单次接管完成确认） |
 | WH_KEYBOARD | 线程钩子 | 常驻键盘钩子：F9/J/P 热键与数字录入捕获（keydown 边沿） |
 | WH_MOUSE | 线程钩子 | 面板鼠标：下拉悬停 / 屏蔽战斗 hover |
@@ -47,7 +47,7 @@
 | `0x493FC0` | 调用     | 战场重绘（撤销临时格子标示 / 屏蔽 hover 后重绘） |
 | `0x0063D46C` | 虚表   | 原版 CPResult 结果窗（生命周期检测；另 `0x0063D528` 战斗窗、`0x0063DB40` 右键说明框） |
 | `0x7802` / `0x1FB` | 控件 id | 结果窗确定 / HD 取消重打 |
-| `0x5A0140` | 调用     | `H3CombatManager::CastSpell`（保活/保持状态/召唤三通道施法核心） |
+| `0x5A0140` | 调用     | `H3CombatManager::CastSpell`（保活/状态/召唤/攻击直接施法核心） |
 | `0x475DC0` | 调用     | 原版移动目标判定（刷新 `accessibleSquares2`，循环移动可达性校验） |
 | `0x46A080` | 调用     | 隐藏战斗判定（快速战斗/AI 对打/回放，执行链入口守卫） |
 | `0x699650` | 全局     | 游戏窗口 HWND（热键前台判定 / 键盘钩子线程 / 唤醒消息投递） |
@@ -69,7 +69,7 @@ H3Auto/
 ├── H3Auto.rc / resource.h   # 版本信息
 ├── build_and_deploy.bat     # 编译 + 部署（统一入口；build.ps1 存在但不要单独用）
 ├── deploy.ps1               # 部署脚本（被统一入口调用）
-├── README.md / 设计文档.md   # 项目入口与分册索引
+├── README.md / docs/设计文档.md   # 项目入口与分册索引
 ├── docs/                    # 功能设计、维护说明与历史实施记录
 ├── 使用说明.txt / LICENSE
 ├── lang/zh-CN.ini           # 界面文案（i18n，UTF-8 BOM；缺文件/缺键回落代码内置默认表）
@@ -77,7 +77,7 @@ H3Auto/
 ├── third_party/nlohmann/json.hpp  # 战斗存档 JSON（§17）
 ├── img/
 │   ├── HA_bg.pcx            # 面板背景 680×548
-│   ├── HA_cell.pcx          # 卡片背景 511×110（随卡片尺寸重生）
+│   ├── HA_cell.pcx          # 卡片背景 511×88（随卡片尺寸重生）
 │   ├── HA_grid_frame.pcx    # 网格金框（金框线已不画，图保留备用）
 │   ├── HA_icon_frame.pcx    # 图标金框（60×66）
 │   ├── HA_ok_normal/pressed.pcx / HA_cancel_normal/pressed.pcx / HA_button_frame.pcx
@@ -91,9 +91,11 @@ H3Auto/
 │   ├── PolicyCoreTests.vcxproj
 │   └── build-tests.ps1
 └── modules/
-    ├── PolicyCore.hpp       # 纯策略核心（枚举/结构/身份/编解码/选择器；生产与单测共用）
+    ├── PolicyCore.hpp       # 纯策略核心（枚举/结构/身份/选择器/智能攻击配置；生产与单测共用）
     ├── IniUtf8.inc.cpp      # UTF-8 ini 读写器
     ├── ConfigLog.inc.cpp    # 配置 / 日志分级 / 战斗存档库（§17）
+    ├── BattleStoreJsonCore.inc.hpp # 生产/测试共用严格JSON v5编解码
+    ├── MagicChannelInputCore.hpp # 原生列表滚轮/鼠标手势纯逻辑
     ├── CrashGuardCore.hpp   # 崩溃防御纯逻辑（异常码命名/噪音过滤/历史环/SoD 指纹；单测覆盖）
     ├── CrashGuard.inc.cpp   # 崩溃自记录 + 钩子铠甲 + 自熔断 + 版本门卫（§18）
     ├── UiTexts.inc.cpp      # 界面文案外置（T() / LoadUiTexts）
@@ -104,6 +106,9 @@ H3Auto/
     ├── BattleState.hpp / .inc.cpp  # 战场状态机（SetPhase_ 唯一出口）
     ├── AutoExecute.inc.cpp  # 接管判定 / 动作提交 / 目标选择 / 保活 / 自动停止
     ├── ForceField.hpp / .inc.cpp # 两落点力盾配置与保持
+    ├── AttackMagic.inc.cpp # 目标择点/直接攻击施法
+    ├── MagicChannelUi.inc.cpp # 攻击行/下拉/滚轮/位置编辑
+    ├── MagicChannelDraw.inc.cpp # 状态5行预留/攻击列表/浮层绘制
     ├── TextLayoutCore.hpp   # 实际行高文字矩形纯几何核心
     ├── SettingsDlg.inc.cpp  # 设置面板 / 网格 / 滚动条 / 战场拾取
     ├── CellControl.inc.cpp  # 卡片控件绘制 / 命中 / 下拉几何
@@ -120,8 +125,10 @@ H3Auto/
 
 ```text
 IniUtf8 → ConfigLog → CrashGuard → UiTexts → LogPack → Compat → PanelGfx
-→ AutoExecute → ForceField → BattleState → CellControl → SettingsDlg
+→ AutoExecute → ForceField → AttackMagic → BattleState → CellControl → SettingsDlg
 → PanelInput → PanelDraw → Entry
 ```
 
 包含顺序以入口文件为准，LZMA C 源独立参与编译；依赖及构建配置见[工程配置](<../H3Auto.vcxproj>)。
+
+MagicChannelUi在SettingsDlg上下文包含，MagicChannelDraw在PanelDraw上下文包含，共享同一翻译单元静态状态；详见[接口考证](<../../H3Note/H3Auto智能攻击施法接口考证.md>)。

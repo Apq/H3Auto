@@ -1,9 +1,12 @@
 #include "../modules/PolicyCore.hpp"
 #include "../modules/CrashGuardCore.hpp"
 #include "../modules/PanelInputCore.hpp"
+#include "../modules/MagicChannelInputCore.hpp"
 #include "../modules/TextLayoutCore.hpp"
+#include "../modules/BattleStoreJsonCore.inc.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <iostream>
 #include <string>
@@ -697,41 +700,171 @@ void TestFailedActionPlayerHandoffEligibility()
         "tent handoff requires first aid");
 }
 
-void TestLegacySpellSlotCompatibility()
+void TestAttackMagicFields()
 {
-    AutoStackRule oldRule = MakeDefaultRule();
-    oldRule.quickCastFirst = true;
-    oldRule.spellSlot = 7;
-    oldRule.spellSlotCount = 0;
-    NormalizeRule(&oldRule, 1, false, false, false);
-    Check(oldRule.spellSlotCount == 1 && oldRule.spellSlots[0] == 7,
-        "legacy spell slot migrates");
-    Check(oldRule.quickCastFirst && oldRule.spellSlot == 7,
-        "legacy spell mirrors synchronize");
+    const AttackMagicRule def = MakeDefaultAttackMagicRule();
+    Check(def.spell_id == -1 && def.target_mode == 0 && def.position_count == 0,
+        "attack default is empty with ranged/flying/speed priority");
+    for (int hex : def.positions) Check(hex == -1, "empty attack positions are minus one");
+    StatusProfileFields status = MakeDefaultStatusFields();
+    Check(status.attack_count == 0 && status.refresh_turns == 1,
+        "default status has no attacks and retains refresh threshold");
+    for (const AttackMagicRule& rule : status.attacks)
+        Check(rule.spell_id == -1 && rule.position_count == 0,
+            "all unused attack rows are canonical defaults");
+    for (int id : kAttackMagicSpellIds) Check(IsAttackMagicSpellId(id), "listed attack spell accepted");
+    for (int id : {-1, 0, 13, 14, 27, 54, 80, 2147483647})
+        Check(!IsAttackMagicSpellId(id), "unlisted spell excluded");
+    Check(!AddAttackMagicRule(nullptr), "null status cannot append");
+    Check(AddAttackMagicRule(&status), "append attack row");
+    Check(status.attack_count == 1 && status.attacks[0].spell_id == -1,
+        "append preserves configurable empty row");
+    status.attacks[0].spell_id = 22; // 范围法术
+    status.attacks[0].target_mode = 2;
+    Check(AddAttackMagicPosition(&status.attacks[0], 0), "position lower bound accepted");
+    Check(!AddAttackMagicPosition(&status.attacks[0], 186)
+        && status.attacks[0].position_count == 1,
+        "second position rejected, area spell allows only one anchor");
+    Check(AddAttackMagicPosition(&status.attacks[0], 170) == false
+        && status.attacks[0].positions[0] == 0,
+        "anchor slot occupied after first pick");
+    RemoveAttackMagicPosition(&status.attacks[0], 0);
+    Check(status.attacks[0].position_count == 0 && status.attacks[0].positions[0] == -1,
+        "anchor removal returns to empty slot");
+    RemoveAttackMagicPosition(&status.attacks[0], -1);
+    RemoveAttackMagicPosition(&status.attacks[0], 1);
+    Check(status.attacks[0].position_count == 0, "invalid deletion leaves anchor unchanged");
+    Check(AddAttackMagicRule(&status) && AddAttackMagicRule(&status), "append two additional rows");
+    status.attacks[1].spell_id = 16;
+    status.attacks[2].spell_id = 20;
+    status.attacks[2].target_mode = 1; // 范围法术：删行归一为固定落点
+    Check(AddAttackMagicPosition(&status.attacks[2], 186), "anchor upper bound accepted");
+    Check(!AddAttackMagicPosition(&status.attacks[2], -1)
+        && !AddAttackMagicPosition(&status.attacks[2], 187), "invalid anchors rejected");
+    RemoveAttackMagicRule(&status, 1);
+    Check(status.attack_count == 2 && status.attacks[0].spell_id == 22
+        && status.attacks[1].spell_id == 20 && status.attacks[1].target_mode == 2
+        && status.attacks[2].spell_id == -1, "row deletion compacts complete records");
+    RemoveAttackMagicRule(&status, 0);
+    RemoveAttackMagicRule(&status, 0);
+    Check(status.attack_count == 0 && status.attacks[0].spell_id == -1,
+        "deleting all rows remains empty after normalization");
+    for (int i = 0; i < kAttackMagicCapacity; ++i)
+        Check(AddAttackMagicRule(&status), "append up to row capacity");
+    Check(!AddAttackMagicRule(&status) && status.attack_count == kAttackMagicCapacity,
+        "ninth attack row rejected");
+    // 落点容量只对范围法术有意义（空行没有落点入口，归一时清空）。
+    AttackMagicRule full = MakeDefaultAttackMagicRule();
+    full.spell_id = 22; // 范围法术：归一后保留唯一落点
+    Check(AddAttackMagicPosition(&full, 50), "append up to anchor capacity");
+    Check(!AddAttackMagicPosition(&full, 51)
+        && full.position_count == kAttackMagicPositionCapacity,
+        "second anchor rejected, only one fixed position allowed");
+    RemoveAttackMagicPosition(&full, 0);
+    Check(full.position_count == 0 && full.positions[0] == -1,
+        "anchor deletion clears final slot");
+    AttackMagicRule dirty = MakeDefaultAttackMagicRule();
+    dirty.spell_id = 21; // 范围法术：归一后固定 target=2 并压缩为唯一合法落点
+    dirty.target_mode = 0;
+    dirty.position_count = 5;
+    dirty.positions[0] = 186; // 容量仅 1，越界写其余槽是 UB，只设第一个
+    NormalizeAttackMagicRule(&dirty);
+    Check(dirty.spell_id == 21 && dirty.target_mode == 2,
+        "area spell normalizes to fixed anchor mode");
+    Check(dirty.position_count == 1 && dirty.positions[0] == 186,
+        "normalization keeps only the first valid anchor");
+    dirty.spell_id = 13; // 非白名单退化为空行
+    dirty.target_mode = 1;
+    dirty.position_count = 1;
+    dirty.positions[0] = 100;
+    NormalizeAttackMagicRule(&dirty);
+    Check(dirty.spell_id == -1 && dirty.target_mode == 0 && dirty.position_count == 0
+        && dirty.positions[0] == -1,
+        "non-whitelisted spell clears to empty row without anchor");
+    AttackMagicRule single = MakeDefaultAttackMagicRule();
+    single.spell_id = 17;
+    single.target_mode = 2;
+    single.position_count = 1;
+    single.positions[0] = 100;
+    NormalizeAttackMagicRule(&single);
+    Check(single.target_mode == 0 && single.position_count == 0,
+        "single-target spell never keeps an anchor");
+    AttackMagicRule area_m1 = MakeDefaultAttackMagicRule();
+    area_m1.spell_id = 22;
+    area_m1.target_mode = 1;
+    NormalizeAttackMagicRule(&area_m1);
+    Check(area_m1.target_mode == 2, "area spell ignores enemy target modes");
+    AttackMagicRule field = MakeDefaultAttackMagicRule();
+    field.spell_id = 26;
+    field.target_mode = 1;
+    field.position_count = 1;
+    field.positions[0] = 100;
+    NormalizeAttackMagicRule(&field);
+    Check(field.target_mode == -1 && field.position_count == 0
+        && field.positions[0] == -1,
+        "field-wide spell has no target control and no anchor");
+    for (int id : {15, 16, 17, 18, 19, 57}) Check(AttackMagicKind(id) == 0, "single-target ids");
+    for (int id : {20, 21, 22, 23}) Check(AttackMagicKind(id) == 1, "area ids");
+    for (int id : {24, 25, 26}) Check(AttackMagicKind(id) == 2, "field-wide ids");
+    for (int id : {-1, 13, 14, 27, 54})
+        Check(AttackMagicKind(id) == -1, "empty or unsupported ids have no kind");
+    // 越界/超量位置在范围法术行上验证：唯一落点也必须是合法 hex。
+    dirty.spell_id = 20;
+    dirty.position_count = 999;
+    dirty.positions[0] = 187;
+    NormalizeAttackMagicRule(&dirty);
+    Check(dirty.position_count == 0,
+        "oversized anchor count bounded to empty without out of range access");
+    status = MakeDefaultStatusFields();
+    status.attack_count = 1;
+    status.attacks[0].spell_id = -1;
+    status.attacks[0].target_mode = 2; // 空行的落点归一后必须干净
+    AddAttackMagicPosition(&status.attacks[0], 186);
+    status.attacks[3].spell_id = 26;
+    status.slow = -5; status.refresh_turns = 0;
+    status.slot_count = 3; status.slots[0] = 27; status.slots[1] = 0; status.slots[2] = 41;
+    NormalizeStatusFields(&status);
+    Check(status.attack_count == 1 && status.attacks[0].spell_id == -1
+        && status.attacks[0].target_mode == 0
+        && status.attacks[0].position_count == 0
+        && status.attacks[3].spell_id == -1,
+        "status keeps empty configured row and resets unconfigured rows");
+    Check(status.slow == 1 && status.refresh_turns == 1 && status.slot_count == 2
+        && status.slots[1] == 41 && status.slots[2] == 0, "status normalizes maintained fields");
+    status.attack_count = 999; NormalizeStatusFields(&status);
+    Check(status.attack_count == kAttackMagicCapacity, "oversized attack count bounded");
+    status.attack_count = -1; NormalizeStatusFields(&status);
+    Check(status.attack_count == 0 && status.attacks[0].spell_id == -1,
+        "negative attack count clears inactive data");
+}
 
-    AutoStackRule slots = MakeDefaultRule();
-    slots.spellSlotCount = 5;
-    slots.spellSlots[0] = 1;
-    slots.spellSlots[1] = 99;
-    slots.spellSlots[2] = 0;
-    slots.spellSlots[3] = -1;
-    slots.spellSlots[4] = 4;
-    NormalizeRule(&slots, 1, false, false, false);
-    Check(slots.spellSlotCount == 3, "invalid spell slots are removed");
-    Check(slots.spellSlots[0] == 1 && slots.spellSlots[1] == 0
-        && slots.spellSlots[2] == 4, "spell slots compact in order");
-
-    // 回归：右键删除最后一个槽后不能被旧版兼容镜像复活。
-    AutoStackRule deleted = MakeDefaultRule();
-    deleted.spellSlotCount = 1;
-    deleted.spellSlots[0] = 7;
-    deleted.quickCastFirst = true;
-    deleted.spellSlot = 7;
-    Check(RemoveSpellSlot(&deleted, 0), "remove last spell slot succeeds");
-    Check(deleted.spellSlotCount == 0 && deleted.spellSlots[0] == -1,
-        "deleting last spell slot stays empty");
-    Check(!deleted.quickCastFirst && deleted.spellSlot == 1,
-        "deleting last spell slot clears legacy mirror");
+void TestAttackMagicRecordDedup()
+{
+    BattleStoreRecord* base = new BattleStoreRecord();
+    BattleStoreRecord* changed = new BattleStoreRecord();
+    for (int p = 0; p < 5; ++p) {
+        base->status[p] = MakeDefaultStatusFields();
+        AddAttackMagicRule(&base->status[p]);
+        base->status[p].attacks[0].spell_id = 22;
+        base->status[p].attacks[0].target_mode = 2;
+        AddAttackMagicPosition(&base->status[p].attacks[0], 170);
+    }
+    *changed = *base;
+    Check(BattleStoreRecordContentEquals(*base, *changed), "identical attack lists deduplicate");
+    for (int p = 0; p < 5; ++p) {
+        *changed = *base; changed->status[p].attacks[0].spell_id = 23;
+        Check(!BattleStoreRecordContentEquals(*base, *changed), "attack spell difference retained");
+        *changed = *base; changed->status[p].attacks[0].target_mode = 1;
+        Check(!BattleStoreRecordContentEquals(*base, *changed), "attack mode difference retained");
+        *changed = *base; changed->status[p].attacks[0].positions[0] = 186;
+        Check(!BattleStoreRecordContentEquals(*base, *changed), "attack anchor difference retained");
+        *changed = *base; RemoveAttackMagicPosition(&changed->status[p].attacks[0], 0);
+        Check(!BattleStoreRecordContentEquals(*base, *changed), "anchor count difference retained");
+        *changed = *base; AddAttackMagicRule(&changed->status[p]);
+        Check(!BattleStoreRecordContentEquals(*base, *changed), "empty row count difference retained");
+    }
+    delete changed;
+    delete base;
 }
 
 void TestProtect()
@@ -821,147 +954,8 @@ void TestProtect()
     Check(def.protectCountBelow == 2, "default protect threshold is 2");
 }
 
-void TestProfileStoreRoundtrip()
+void TestStatusAndAutoStop()
 {
-    AutoStackRule rules[PROFILE_STORE_SLOTS] = {};
-    for (int s = 0; s < PROFILE_STORE_SLOTS; ++s)
-        rules[s] = MakeDefaultRule();
-    rules[7].action = AA_MELEE_ATTACK;
-    rules[7].target.meleeStandHex = 125;
-    rules[7].target.meleeAttackHex = 108;
-    rules[7].target.moveWaypoints[0] = 42;
-    rules[7].target.moveWaypoints[15] = -1;
-    rules[7].target.moveWaypointCount = 1;
-    rules[7].spellSlots[0] = 3;
-    rules[7].spellSlotCount = 1;
-    rules[7].protectMode = PM_LOSS_GT_RESTORE;
-    rules[7].protectCountBelow = 123;
-    rules[7].allowDefendFallback = true;
-    rules[20].action = AA_RANGED_ATTACK;
-    rules[20].target.selector = SEL_RANGED_SPEED;
-    uint16_t stop_turns = 25;
-    int army_types[PROFILE_STORE_SLOTS];
-    int army_counts[PROFILE_STORE_SLOTS] = {};
-    for (int i = 0; i < PROFILE_STORE_SLOTS; ++i) army_types[i] = -1;
-    army_types[0] = 10; army_counts[0] = 20;
-    army_types[1] = 11; army_counts[1] = 30;
-    army_types[2] = 12; army_counts[2] = 40;
-
-    SummonProfileFields summon = MakeDefaultSummonFields();
-    summon.enabled = 1;
-    summon.count_th = 3;
-    summon.hp_th = 900;
-    summon.spell_pick = 2;
-    summon.cond_combine = SUMMON_COMBINE_OR;
-    summon.stop_enemy_mana = 1;
-    summon.stop_mana_th = 258;
-    summon.summon_rule.action = AA_SCATTER;
-    summon.summon_rule.allowDefendFallback = true; // 散开须清掉
-
-    Check(PROFILE_STORE_INTS == 1370, "h3ap9 profile store has 1370 ints");
-    Check(summon.stop_mana_th == 258
-        && MakeDefaultSummonFields().stop_mana_th == 6,
-        "summon mana threshold default 6");
-    Check(MakeDefaultSummonFields().enabled == 0,
-        "summon disabled by default");
-    Check(MakeDefaultSummonFields().cond_combine == SUMMON_COMBINE_AND,
-        "summon conditions default to AND");
-
-    char text[32 * 1024] = {};
-    const int written = EncodeProfileStoreText(army_types, army_counts,
-        rules, stop_turns, summon, text, sizeof(text));
-    Check(written > 0, "profile store encodes");
-
-    uint16_t out_stop = 0;
-    int out_types[PROFILE_STORE_SLOTS] = {};
-    int out_counts[PROFILE_STORE_SLOTS] = {};
-    AutoStackRule out_rules[PROFILE_STORE_SLOTS] = {};
-    SummonProfileFields out_summon = {};
-    Check(DecodeProfileStoreText(text, out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "profile store decodes");
-    Check(out_types[0] == 10 && out_counts[0] == 20
-        && out_types[2] == 12 && out_counts[2] == 40,
-        "army table roundtrip");
-    Check(out_types[3] == -1 && out_counts[3] == 0, "empty slot roundtrip");
-    Check(out_summon.enabled == 1, "summon enable roundtrip");
-    Check(out_rules[7].action == AA_MELEE_ATTACK, "rule action roundtrip");
-    Check(out_rules[7].target.meleeStandHex == 125, "melee stand roundtrip");
-    Check(out_rules[7].target.meleeAttackHex == 108, "melee attack roundtrip");
-    Check(out_rules[7].target.moveWaypoints[0] == 42, "waypoint roundtrip");
-    Check(out_rules[7].target.moveWaypoints[15] == -1, "empty waypoint roundtrip");
-    Check(out_rules[7].target.moveWaypointCount == 1, "waypoint count roundtrip");
-    Check(out_rules[7].spellSlots[0] == 3, "spell slot roundtrip");
-    Check(out_rules[7].spellSlotCount == 1, "spell count roundtrip");
-    Check(out_rules[7].protectMode == PM_LOSS_GT_RESTORE,
-        "protect mode roundtrip");
-    Check(out_rules[7].protectCountBelow == 123, "protect count threshold roundtrip");
-    Check(out_rules[20].protectMode == PM_NONE,
-        "protect mode default is off");
-    Check(out_rules[20].protectCountBelow == 2,
-        "protect count default is 2");
-    Check(out_rules[7].allowDefendFallback, "fallback roundtrip");
-    Check(out_rules[20].action == AA_RANGED_ATTACK, "last slot action roundtrip");
-    Check(out_rules[20].target.selector == SEL_RANGED_SPEED,
-        "last slot selector roundtrip");
-    Check(out_rules[0].action == AA_MANUAL, "default slot stays manual");
-    Check(out_stop == stop_turns, "stop turns roundtrip");
-    Check(out_summon.count_th == 3 && out_summon.hp_th == 900
-        && out_summon.spell_pick == 2 && out_summon.cond_combine == SUMMON_COMBINE_OR
-        && out_summon.stop_enemy_mana == 1
-        && out_summon.stop_mana_th == 258,
-        "summon fields roundtrip");
-    Check(out_summon.summon_rule.action == AA_SCATTER,
-        "summon rule action roundtrip");
-    Check(!out_summon.summon_rule.allowDefendFallback,
-        "scatter clears fallback on decode");
-    Check(out_summon.summon_rule.protectMode == PM_NONE,
-        "summon rule uses protect off");
-
-    Check(!DecodeProfileStoreText("H3AP3 1 2 3", out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "truncated store rejected");
-    Check(!DecodeProfileStoreText("H3AP2 1 2 3", out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "legacy five-slot magic rejected");
-    text[4] = '5'; // H3AP9 -> H3AP5：旧格式（无保活方式字段）拒绝
-    Check(!DecodeProfileStoreText(text, out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "h3ap5 store rejected after format bump");
-    text[4] = '7'; // H3AP7：旧格式（无保活方式字段）拒绝
-    Check(!DecodeProfileStoreText(text, out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "h3ap7 store rejected after format bump");
-    text[4] = '8'; // H3AP8：上一版格式（6 召唤整数、无条件组合）拒绝
-    Check(!DecodeProfileStoreText(text, out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "h3ap8 store rejected after format bump");
-    text[4] = '9';
-    // H3AP9 头 + 少 1 个整数（模拟旧版无 protectMode 的规则）→ 拒绝。
-    {
-        const char* src = text + 5;
-        static char trimmed[32 * 1024] = "H3AP9";
-        int vlen = 5, seen = 0, dropped = 0;
-        while (*src) {
-            while (*src == ' ') ++src;
-            if (!*src) break;
-            const char* tok = src;
-            while (*src && *src != ' ') ++src;
-            ++seen; // 1-based；规则区从第 50 位起，每条 60 个的末位
-            if (seen >= 50 && ((seen - 50) % 60 == 59)) { ++dropped; continue; }
-            trimmed[vlen++] = ' ';
-            for (const char* q = tok; q < src; ++q) trimmed[vlen++] = *q;
-        }
-        trimmed[vlen] = 0;
-        Check(dropped == 22, "trimmed text drops one int per rule");
-        Check(!DecodeProfileStoreText(trimmed, out_types, out_counts,
-                out_rules, &out_stop, &out_summon),
-            "wrong int count rejected");
-    }
-    text[0] = 'X';
-    Check(!DecodeProfileStoreText(text, out_types, out_counts,
-            out_rules, &out_stop, &out_summon),
-        "bad magic rejected");
     Check(AutoStopShouldYield(10, 1000, 100, 9), "nine turns of damage projects within ten");
     Check(!AutoStopShouldYield(10, 1000, 990, 1), "slow damage stays running");
     Check(!AutoStopShouldYield(0, 1000, 1, 9), "zero threshold disables stop");
@@ -1221,16 +1215,10 @@ void TestSummonRuleNormalization()
     rule.action = AA_SCATTER;
     rule.allowDefendFallback = true;
     rule.protectMode = PM_LOSS_GT_RESTORE;
-    rule.quickCastFirst = true;
-    rule.spellSlotCount = 2;
-    rule.spellSlots[0] = 1;
-    rule.spellSlots[1] = 2;
     NormalizeSummonRule(&rule);
     Check(rule.action == AA_SCATTER, "scatter survives normalization");
     Check(!rule.allowDefendFallback, "scatter loses fallback");
     Check(rule.protectMode == PM_NONE, "summon rule resets protect mode");
-    Check(!rule.quickCastFirst && rule.spellSlotCount == 0,
-        "summon rule has no quick cast");
 
     rule = MakeDefaultRule();
     rule.action = AA_RANDOM_MOVE;
@@ -1323,6 +1311,9 @@ void TestCrashGuardCore()
         "null def rejected");
 }
 
+#include "MagicChannelJsonTests.inc.cpp"
+#include "MagicChannelInputTests.inc.cpp"
+
 } // namespace
 
 int main()
@@ -1343,12 +1334,15 @@ int main()
     TestStableStackIdentity();
 TestArchiveSlotMapRounds();
     TestFailedActionPlayerHandoffEligibility();
-    TestLegacySpellSlotCompatibility();
+    TestAttackMagicFields();
+    TestAttackMagicRecordDedup();
+    TestMagicChannelJson();
+    TestMagicChannelInput();
     TestProtect();
     TestSummonChannel();
     TestSummonMoveHex();
     TestSummonRuleNormalization();
-    TestProfileStoreRoundtrip();
+    TestStatusAndAutoStop();
     TestCrashGuardCore();
     std::cout << "PolicyCoreTests: " << g_checks << " checks passed\n";
     return 0;
