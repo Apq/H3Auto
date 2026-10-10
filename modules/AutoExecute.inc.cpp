@@ -162,8 +162,10 @@ static int g_mismatch_detail_attempt = -1;  // 本场详情是否已报过
 // 自动停止：最近两笔敌方血量。两笔都有效才外推，更早的不参与。
 static int g_enemy_hp_turn[2] = { -1, -1 };
 static int g_enemy_hp_value[2] = {};
-// 召唤通道运行态：自动模式本场锁定的元素下标（0..3，-1 未锁定）。
-// 首次成功施放后锁定，战斗结束/重打/状态重置清空（ResetAutoState）。
+// 召唤通道运行态：本场锁定的元素下标（0..3，-1 未锁定）。
+// 游戏规则：本场召唤过一种元素后只能继续召唤该种。锁定来源有二：
+// 己方场上发现召唤元素（玩家手动召唤或助手此前召唤）或助手自身首次
+// 成功施放；战斗结束/重打/状态重置清空（ResetAutoState）。
 static int g_summon_locked_spell = -1;
 // 一回合一次施法不插件记账：读写均用游戏 heroCasted[side]（0x54B4），
 // 施法成功后 MarkHeroCastThisTurn_ 补写玩家方，见该函数注释。
@@ -1173,6 +1175,26 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
         learned[i] = exp > 0;
         amounts[i] = SummonCountAmount_(exp, spell_power);
     }
+    // 游戏规则（2026-10-11 用户裁定）：本场召唤过一种元素后，后续召唤必须
+    // 同种。助手召唤=代替玩家操作，同一把锁：己方场上已有召唤元素（无论玩家
+    // 手动召唤还是助手此前召唤）即视为已锁定，自动模式只能继续召唤该种。
+    if (g_summon_locked_spell < 0) {
+        for (int i = 0; i < 21; ++i) {
+            _BattleStack_* st = &mgr->stack[side][i];
+            if (st->count_current <= 0
+                || !H3AutoPolicy::IsSummonedElemental(st->creature_id))
+                continue;
+            for (int e = 0; e < H3AutoPolicy::SUMMON_ELEMENT_COUNT; ++e) {
+                if (st->creature_id == H3AutoPolicy::kSummonCreatureIds[e]) {
+                    g_summon_locked_spell = e;
+                    LogInfo("[Summon] 场上已有召唤元素 cid=0x%X 锁定元素下标=%d（本场只能召唤该种）",
+                        st->creature_id, e);
+                    break;
+                }
+            }
+            if (g_summon_locked_spell >= 0) break;
+        }
+    }
     const int pick = H3AutoPolicy::PickSummonSpell(
         amounts, learned, sf.spell_pick, g_summon_locked_spell);
     LogDebug("[Summon] check alive=%d/th%d hp=%d/th%d pick_cfg=%d pick=%d locked=%d mana=%d",
@@ -1854,7 +1876,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         if (g_active_rules[i].action != AA_MANUAL) ++action_rules;
     LogInfo("[Auto] 5 profiles committed; active profile=%d actions=%d",
         g_active_profile + 1, action_rules);
-    // 生效方案召唤/停止参数留痕（测试核对：默认勾选+阈值 6+召唤物默认防御）。
+    // 生效方案召唤/停止参数留痕（测试核对：默认不勾+阈值 6+召唤物默认散开）。
     {
         const SummonProfileFields& sf = g_summon[g_active_profile];
         LogInfo("[Auto] active cfg: stop_turns=%d "

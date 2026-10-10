@@ -1100,6 +1100,8 @@ void TestSummonChannel()
         "auto picks largest among learned");
     Check(PickSummonSpell(amounts, all_learned, 0, 3) == 3,
         "locked element overrides auto");
+    Check(PickSummonSpell(amounts, partial, 0, 1) == -1,
+        "locked element no longer castable refuses (same-kind rule)");
     Check(PickSummonSpell(amounts, none_learned, 0, -1) == -1,
         "auto with nothing learned refuses");
     const int tie[SUMMON_ELEMENT_COUNT] = {200, 200, 200, 200};
@@ -1234,8 +1236,8 @@ void TestSummonRuleNormalization()
 
     const SummonProfileFields def = MakeDefaultSummonFields();
     Check(def.count_th == 2 && def.hp_th == 750 && def.spell_pick == 0
-        && def.stop_enemy_mana == 1 && def.stop_mana_th == 6
-        && def.summon_rule.action == AA_DEFEND,
+        && def.stop_enemy_mana == 0 && def.stop_mana_th == 6
+        && def.summon_rule.action == AA_SCATTER,
         "default summon fields");
 
     // 普通规则 NormalizeRule 仍会把召唤动作裁掉（双保险）。

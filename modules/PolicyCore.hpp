@@ -934,9 +934,11 @@ inline bool IsSummonedElemental(int creature_id)
 }
 
 // 选召唤法术。amounts[i]/learned[i]：各元素本次召唤总量（调用方按等级×力量×生物算好）
-// 与是否已学；spell_pick：0=自动，1..4=固定元素；locked_index：自动模式本场锁定（-1 无）。
+// 与是否已学；spell_pick：0=自动，1..4=固定元素；locked_index：本场锁定（-1 无）。
 // 返回元素下标 0..3（对应 kSummonSpellIds/kSummonCreatureIds），-1 = 不召。
-// 固定未学 → 不召；自动有锁定 → 用锁定；否则取总量最大（平手取靠前，稳定可测）。
+// 固定未学 → 不召；自动有锁定 → 用锁定（锁定元素已不可施放时也不召）；
+// 否则取总量最大（平手取靠前，稳定可测）。游戏规则：本场召唤过一种元素后
+// 只能继续召唤该种（2026-10-11 用户裁定：玩家手动召唤同样构成锁定）。
 inline int PickSummonSpell(const int amounts[SUMMON_ELEMENT_COUNT],
     const bool learned[SUMMON_ELEMENT_COUNT], int spell_pick, int locked_index)
 {
@@ -945,7 +947,7 @@ inline int PickSummonSpell(const int amounts[SUMMON_ELEMENT_COUNT],
         return learned[fixed] ? fixed : -1;
     }
     if (locked_index >= 0 && locked_index < SUMMON_ELEMENT_COUNT)
-        return locked_index;
+        return learned[locked_index] ? locked_index : -1;
     int best = -1;
     for (int i = 0; i < SUMMON_ELEMENT_COUNT; ++i) {
         if (!learned[i]) continue;
@@ -1144,10 +1146,10 @@ inline SummonProfileFields MakeDefaultSummonFields()
     fields.hp_th = 750;
     fields.spell_pick = 0;
     fields.cond_combine = SUMMON_COMBINE_AND; // 默认「和」：两条件都满足才召
-    fields.stop_enemy_mana = 1; // 默认勾选：敌方魔力≤阈值即停（阈值默认 6）
+    fields.stop_enemy_mana = 0; // 默认不勾（2026-10-11 用户裁定）；勾选后敌方魔力≤阈值即停
     fields.stop_mana_th = kSummonStopManaDefault;
     fields.summon_rule = MakeDefaultRule();
-    fields.summon_rule.action = AA_DEFEND; // 召唤物默认防御（可改手动/散开/随机）
+    fields.summon_rule.action = AA_SCATTER; // 召唤物默认散开（2026-10-11 用户裁定，原防御）
     return fields;
 }
 
