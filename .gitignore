@@ -75,3 +75,4 @@ Release/*
 !Release/*.zip
 .cowork-temp
 .hermes-tmp*
+/_verify_logs
