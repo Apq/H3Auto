@@ -799,7 +799,7 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
     int base = 0;
     if (expertise == 3) base = 100;
     else if (expertise == 2) base = 75;
-    else if (expertise == 1) base = 50;
+    else if (expertise == 0 || expertise == 1) base = 50;
     else return 0;
     return base * spell_power;
 }
@@ -807,7 +807,7 @@ inline int ResurrectionRestoreHp(int expertise, int spell_power)
 inline int ResurrectionRestoreHp(int base_value, int sp_effect,
     int expertise, int spell_power)
 {
-    if (expertise <= 0 || expertise > 3 || spell_power <= 0) return 0;
+    if (expertise < 0 || expertise > 3 || spell_power <= 0) return 0;
     if (base_value < 0 || sp_effect <= 0)
         return ResurrectionRestoreHp(expertise, spell_power);
     const int64_t total = static_cast<int64_t>(base_value)

@@ -125,7 +125,8 @@ static void AttackMagicCoverage_(H3CombatManager* cm, int spell, int center,
     *friends = 0;
     for (int s = 0; s < 2; ++s) {
         for (int i = 0; i < 21; ++i) {
-            if (!AttackMagicStackHit_(spell, center, cm->stacks[s][i])) continue;
+            if (!AttackMagicStackHit_(spell, center, cm->stacks[s][i])
+                || !TargetMagicAllowed_(cm, side, &cm->stacks[s][i], spell)) continue;
             if (s == side) ++*friends;
             else ++*enemies;
         }
@@ -199,7 +200,8 @@ static int AttackMagicSelectEnemyHex_(H3CombatManager* cm, int spell,
     for (int i = 0; i < 21; ++i) {
         H3CombatCreature& enemy = cm->stacks[1 - side][i];
         if (enemy.numberAlive <= 0 || !CreatureInfoIndexValid_(enemy.type)
-            || H3AutoPolicy::IsWarMachineType(enemy.type)) continue;
+            || H3AutoPolicy::IsWarMachineType(enemy.type)
+            || !TargetMagicAllowed_(cm, side, &enemy, spell)) continue;
         const int center = AttackMagicEnemyCenter_(cm, spell, expertise, side, enemy);
         if (center < 0) continue;
         H3AutoPolicy::TargetCandidate candidate =
@@ -244,7 +246,21 @@ static int AttackMagicSelectHex_(H3CombatManager* cm,
     const H3AutoPolicy::AttackMagicRule& rule, int expertise, int side)
 {
     const int kind = H3AutoPolicy::AttackMagicKind(rule.spell_id);
-    if (kind == 2) return AttackMagicFieldWideHex_(cm, side);
+    if (kind == 2) {
+        // No coordinate predicate for field-wide magic; skip if every enemy is
+        // protected by Dragon Father. The original resolves individual immunity.
+        bool any_target = false;
+        for (int i = 0; i < 21; ++i) {
+            const H3CombatCreature& enemy = cm->stacks[1 - side][i];
+            if (enemy.numberAlive > 0
+                && !H3AutoPolicy::IsWarMachineType(enemy.type)
+                && TargetMagicAllowed_(cm, side, &enemy, rule.spell_id)) {
+                any_target = true;
+                break;
+            }
+        }
+        return any_target ? AttackMagicFieldWideHex_(cm, side) : -1;
+    }
     if (kind == 1) {
         // 范围法术：唯一固定落点。
         if (rule.position_count != 1) return -1;
@@ -322,8 +338,8 @@ static bool TryAttackMagicCast_(_BattleMgr_* mgr)
         for (int row = 0; row < count; ++row) {
             const H3AutoPolicy::AttackMagicRule rule = g_status[profile].attacks[row];
             spell = rule.spell_id;
-            if (!AttackMagicAllowedSpell_(spell) || rule.target_mode < 0
-                || rule.target_mode > 2 || !hero->HasSpell(spell)) continue;
+            if (!AttackMagicAllowedSpell_(spell) || rule.target_mode < -1
+                || rule.target_mode > 2 || !HeroMagicAllowed_(cm, window.side, spell)) continue;
             // HasSpell = learnedSpells | availableSpell（+0x3EA/+0x430 位或），
             // 与原版施法面板同口径：装备/卷轴赋予的攻击魔法也参与（2026-10-11
             // 用户裁定）。学校技能等级不构成资格；expertise 仍实算，神器无
@@ -349,7 +365,8 @@ static bool TryAttackMagicCast_(_BattleMgr_* mgr)
             }
             if (!AttackMagicWindowValid_(window)
                 || !AttackMagicRuleEquals_(g_status[profile].attacks[row], rule)
-                || GetHeroCasted_(mgr, window.side))
+                || GetHeroCasted_(mgr, window.side)
+                || !HeroMagicAllowed_(cm, window.side, spell))
                 return AttackMagicRelease_(window, cm, saved_side);
             const int casted_before = GetHeroCasted_(mgr, window.side);
             selected_row = row;

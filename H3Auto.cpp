@@ -24,6 +24,7 @@ PatcherInstance* _PI = nullptr;
 #include "modules/LogPack.inc.cpp"
 #include "modules/Compat.inc.cpp"
 #include "modules/PanelGfx.inc.cpp"
+#include "modules/SpellRules.inc.cpp"
 #include "modules/AutoExecute.inc.cpp"
 #include "modules/ForceField.inc.cpp"
 #include "modules/AttackMagic.inc.cpp"

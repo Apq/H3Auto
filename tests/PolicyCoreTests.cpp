@@ -1,4 +1,5 @@
 #include "../modules/PolicyCore.hpp"
+#include "../modules/SpellRulesCore.hpp"
 #include "../modules/BattleStoreCoop.hpp"
 #include "../modules/CrashGuardCore.hpp"
 #include "../modules/PanelInputCore.hpp"
@@ -886,7 +887,9 @@ void TestProtect()
     Check(ResurrectionRestoreHp(1, 10) == 500, "basic resurrection restores 50*power");
     Check(ResurrectionRestoreHp(2, 10) == 750, "advanced resurrection restores 75*power");
     Check(ResurrectionRestoreHp(3, 10) == 1000, "expert resurrection restores 100*power");
-    Check(ResurrectionRestoreHp(0, 10) == 0, "unlearned spell restores nothing");
+    Check(ResurrectionRestoreHp(0, 10) == 500, "no school skill still allows owned resurrection");
+    Check(ResurrectionRestoreHp(40, 50, 0, 10) == 540,
+        "no school skill uses spell table baseValue zero");
     // 原版口径：baseValue[等级] + 力量 × spEffect。表值非法时退回旧估算。
     Check(ResurrectionRestoreHp(40, 50, 3, 33) == 1690,
         "spell table restore is base plus power times effect");
@@ -1314,6 +1317,46 @@ void TestCrashGuardCore()
         "null def rejected");
 }
 
+void TestBattleMagicRules()
+{
+    // Exhaust the independent blockers and real spell-level boundaries.
+    // Each artifact side must have the same global effect; Dragon Father is local.
+    for (int mask = 0; mask < 64; ++mask) {
+        BattleMagicRestrictions rules = {};
+        rules.anti_magic_garrison = (mask & 1) != 0;
+        rules.cursed_ground = (mask & 2) != 0;
+        rules.orb[0] = (mask & 4) != 0;
+        rules.orb[1] = (mask & 8) != 0;
+        rules.cloak[0] = (mask & 16) != 0;
+        rules.cloak[1] = (mask & 32) != 0;
+        const int max_level = rules.anti_magic_garrison || rules.orb[0] || rules.orb[1]
+            ? 0 : rules.cursed_ground ? 1 : rules.cloak[0] || rules.cloak[1] ? 2 : 5;
+        for (int level = 1; level <= 5; ++level)
+            Check(BattleAllowsHeroMagic(level, rules) == (level <= max_level),
+                "combined battle magic restrictions obey both sides and level");
+    }
+    const BattleMagicRestrictions clear = {};
+    Check(!BattleAllowsHeroMagic(-1, clear) && !BattleAllowsHeroMagic(0, clear)
+        && !BattleAllowsHeroMagic(6, clear), "unknown spell level refuses");
+    for (int level = 1; level <= 5; ++level) {
+        Check(DragonFatherAllowsMagic(level, false), "unprotected owner keeps eligible targets");
+        Check(DragonFatherAllowsMagic(level, true) == (level == 5),
+            "dragon father blocks levels one through four regardless of vulnerability or caster");
+    }
+    Check(!DragonFatherAllowsMagic(0, true), "unknown target spell level refuses");
+    for (int expertise = 0; expertise <= 3; ++expertise) {
+        Check(MagicHasMassVersion(0x800u | 0x40u, expertise) == (expertise == 3),
+            "friendly buff flag cannot force low skill expert mass magic");
+        Check(MagicHasMassVersion(0x20u, expertise) == (expertise >= 2),
+            "advanced mass version respects school threshold");
+        Check(!MagicHasMassVersion(0x10u | 0x800u, expertise),
+            "single target magic never becomes mass by omitting coordinate");
+        Check(MagicHasMassVersion(0x800u, expertise), "intrinsic mass spell allows no school skill");
+    }
+    Check(!MagicHasMassVersion(0u, -1) && !MagicHasMassVersion(0u, 4),
+        "unknown expertise refuses mass casting");
+}
+
 void TestBattleStoreCoop()
 {
     int stage = 0;
@@ -1342,6 +1385,7 @@ void TestBattleStoreCoop()
 
 int main()
 {
+    TestBattleMagicRules();
     TestBattleStoreCoop();
     TestTextLayout();
     TestPanelItemOwnership();

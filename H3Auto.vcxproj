@@ -65,6 +65,8 @@
   <ItemGroup>
     <ClInclude Include="..\H3API\single_header\H3API.hpp" />
     <ClInclude Include="modules\PolicyCore.hpp" />
+    <ClInclude Include="modules\SpellRulesCore.hpp" />
+    <ClInclude Include="modules\SpellRules.inc.cpp" />
     <ClInclude Include="modules\BattleState.hpp" />
     <ClInclude Include="modules\ForceField.hpp" />
     <ClInclude Include="modules\AttackMagic.inc.cpp" />

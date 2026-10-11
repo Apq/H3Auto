@@ -108,7 +108,7 @@ bool EnsureForceFieldBeforeAction_(_BattleMgr_* mgr)
         // Respect the game's single hero spell per round, even if both shields expired.
         if (mgr->hero_casted[side] != 0) return true;
         H3Hero* hero = cm->hero[side];
-        if (!hero) return true;
+        if (!hero || !HeroMagicAllowed_(cm, side, kForceFieldSpell_)) return true;
         const H3AutoPolicy::ForceFieldPresence presence[2] = {
             ReadForceField_(cm, side, fields.anchor_hex[0]),
             ReadForceField_(cm, side, fields.anchor_hex[1])
@@ -126,6 +126,14 @@ bool EnsureForceFieldBeforeAction_(_BattleMgr_* mgr)
             g_cast_in_flight = false;
             g_forcefield_runtime.casting = false;
             return false;
+        }
+        if (!HeroMagicAllowed_(cm, side, kForceFieldSpell_)
+            || !cm->CanCastSpellAtCoord(kForceFieldSpell_, expertise, anchor)) {
+            CastSideGuardLeave_(cm, saved_side);
+            saved_side = -1;
+            g_cast_in_flight = false;
+            g_forcefield_runtime.casting = false;
+            return true;
         }
         LogInfo("[ForceField] cast profile=%d side=%d anchor=%d exp=%d",
             profile + 1, side, anchor, expertise);

@@ -1106,15 +1106,13 @@ static int EnemyAliveHp_(_BattleMgr_* mgr)
 
 // ==== 召唤通道（保活复活的兜底，§2.3）====
 // 事件型判定：每次控制权交玩家都判（无回合标记）；英雄已施法则跳过
-// （TryProtectCast_ 共享守卫已查）。法力消耗与召唤量常量表为暂定口径，
-// 上机逆向确认后修订（§5 清单项）。
-static const int kSummonManaCostProvisional = 15; // SoD 四系召唤法力消耗（暂定）
+// （TryProtectCast_ 共享守卫已查）。耗魔统一使用原版真实费用。
 
 // 召唤量（个）= 力量 × 等级系数（基础 2 / 高级 3 / 专家 4；暂定，§5）。
 // 只影响自动模式的元素排序，不参与判定。
 static int SummonCountAmount_(int expertise, int spell_power)
 {
-    if (expertise <= 0 || spell_power <= 0) return 0;
+    if (expertise < 0 || expertise > 3 || spell_power <= 0) return 0;
     const int mult = expertise >= 3 ? 4 : expertise == 2 ? 3 : 2;
     return spell_power * mult;
 }
@@ -1173,7 +1171,7 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
     for (int i = 0; i < H3AutoPolicy::SUMMON_ELEMENT_COUNT; ++i) {
         const int exp = hero->GetSpellExpertise(
             H3AutoPolicy::kSummonSpellIds[i], cm->specialTerrain);
-        learned[i] = exp > 0;
+        learned[i] = HeroMagicAllowed_(cm, side, H3AutoPolicy::kSummonSpellIds[i]);
         amounts[i] = SummonCountAmount_(exp, spell_power);
     }
     // 游戏规则（2026-10-11 用户裁定）：本场召唤过一种元素后，后续召唤必须
@@ -1208,11 +1206,12 @@ static bool SummonChannel_(_BattleMgr_* mgr, int side,
         return false;
     }
     const int spell_id = H3AutoPolicy::kSummonSpellIds[pick];
+    if (!HeroMagicAllowed_(cm, side, spell_id)) return false;
     const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
     if (!H3AutoPolicy::SummonShouldCast(alive, sf.count_th, hp_total,
             sf.hp_th, sf.cond_combine, GetHeroMana_(mgr, side),
-            kSummonManaCostProvisional,
-            GetHeroCasted_(mgr, side) != 0, expertise > 0))
+            hero->CalculateSpellCost(spell_id, cm->army[1 - side], cm->specialTerrain),
+            GetHeroCasted_(mgr, side) != 0, hero->HasSpell(spell_id) != 0))
         return false;   // 时机不满足：静默跳过，不记失败（§0）
 
     // 召唤锚定格：己方第一支存活部队所在格。召唤法术 target hex
@@ -1380,10 +1379,6 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     if (!hero) return false;
     const int spell_power = cm->heroSpellPower[side];
 
-    // 复活固定耗魔 10（SoD，不随等级变化）；召唤法术耗魔由 SummonChannel_
-    // 自查。法力 <10 时复活必不能施，但先收集候选再统一判（日志完整）。
-    const int mana = GetHeroMana_(mgr, side);
-
     // 收集己方部队（按队保活方式，选「不保活」的队永不入选；战争机器与召唤物克隆槽不参与）
     // 按各队自己的方式判定。够格者中统一取血量最低（全灭者剩余 0 天然最前）。
     H3AutoPolicy::TargetCandidate cands[21] = {};
@@ -1421,12 +1416,10 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
         const int spell_id = P_CreatureInformation[st->creature_id].undead
             ? 39 : 38;
+        if (!HeroMagicAllowed_(cm, side, spell_id)
+            || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), spell_id))
+            continue;
         const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
-        if (expertise <= 0) {
-            LogDebug("[Protect] skip no-expertise slot=%d spell=%d",
-                slot, spell_id);
-            continue;                                   // 没学该法术
-        }
         int spell_base = -1;
         int spell_effect = -1;
         __try {
@@ -1477,7 +1470,7 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         if (!g_summon[g_active_profile].enabled) return false;
         return SummonChannel_(mgr, side, cm, hero, spell_power);
     }
-    if (mana < 10) return false;                       // 有人该救但法力不够
+    // Candidate qualification already used the game's actual spell cost.
     // 候选明细（debug）：定位“该救不救/救错对象”类问题。
     for (int i = 0; i < cand_count; ++i)
         LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d restore=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
@@ -1497,11 +1490,18 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     const int best_wound = H3AutoPolicy::WoundValue(cands[picked]);
 
     _BattleStack_* st = &mgr->stack[side][best_slot];
+    if (!HeroMagicAllowed_(cm, side, best_spell)
+        || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), best_spell))
+        return false;
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     // 原版施法失败不能逃出战斗回调。
     const int prot_mana_before = GetHeroMana_(mgr, side);
     const int prot_casted_before = GetHeroCasted_(mgr, side);
     const int prot_cas = CastSideGuardEnter_(cm, side);
+    if (!cm->CanCastSpellAtCoord(best_spell, best_exp, StackHex_(st))) {
+        CastSideGuardLeave_(cm, prot_cas);
+        return false;
+    }
     g_cast_in_flight = true;
     __try {
         LogDebug("[Protect] cast spell=%d slot=%d hex=%d exp=%d power=%d rem=%d wound=%d mana=%d casted=%d cas=%d",
@@ -1543,7 +1543,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     for (int i = 0; i < status.slot_count && i < H3AutoPolicy::kStatusSlotCapacity;
             ++i) {
         const int spell = status.slots[i];
-        if (spell <= 0 || spell >= 81) continue;
+        if (spell <= 0 || spell >= 70) continue;
+        if (!HeroMagicAllowed_(cm, side, spell)) continue;
         if (g_status_immune_mask & (1ULL << spell)) continue;
         __try {
             expertise_of[i] = hero->GetSpellExpertise(spell, cm->specialTerrain);
@@ -1567,6 +1568,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             spell_flags = 0;
         }
+        // A positionless hero cast must actually have a native mass version.
+        if (!H3AutoPolicy::MagicHasMassVersion(spell_flags, expertise_of[i])) continue;
         int stack_durations[21] = {};
         int stack_count = 0;
         int living = 0;
@@ -1576,7 +1579,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             ++living;
             // 各法术排除的生物不同（亡灵不吃圣灵、无士气不吃欢欣鼓舞、
             // 非射击不吃精准射击等）。没有可接受目标仍去施放会弹出阻止框。
-            if (!StackCanReceiveStatusSpell_(st, spell, spell_flags))
+            if (!TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), spell)
+                || !StackCanReceiveStatusSpell_(st, spell, spell_flags))
                 continue;
             int dur = 0;
             __try {
@@ -1614,7 +1618,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         int enemy_durations[21] = {};
         int enemy_hexes[21] = {};
         const bool slow_masked =
-            (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0;
+            (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0
+            || !HeroMagicAllowed_(cm, side, H3AutoPolicy::kSlowSpellId);
         int found_slow = -1;
         if (want_slow && !slow_masked) {
             unsigned slow_flags = 0;
@@ -1633,7 +1638,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 _BattleStack_* st = &mgr->stack[enemy_side][slot];
                 if (!st || st->count_current <= 0) continue;
                 ++living_slow;
-                if (!StackCanReceiveStatusSpell_(st, H3AutoPolicy::kSlowSpellId,
+                if (!TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st),
+                        H3AutoPolicy::kSlowSpellId)
+                    || !StackCanReceiveStatusSpell_(st, H3AutoPolicy::kSlowSpellId,
                         slow_flags))
                     continue;
                 int dur = 0;
@@ -1697,12 +1704,14 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         if (expertise < 3) return false;
     }
     // 保持状态列表里的法术都是全体魔法，不指定目标格。
-    if (spell_id < 0) return false;
+    if (spell_id < 0 || spell_id >= 70) return false;
     int expertise = 0;
     __try {
         expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (expertise <= 0) return false;
+    if (!HeroMagicAllowed_(cm, side, spell_id)
+        || H3Spell::SingleTarget(spell_id, expertise)) return false;
     const int st_mana_before = GetHeroMana_(mgr, side);
     const int st_casted_before = GetHeroCasted_(mgr, side);
     const int st_cas = CastSideGuardEnter_(cm, side);
@@ -1711,7 +1720,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         LogDebug("[Status] cast spell=%d exp=%d power=%d turn=%d mana=%d casted=%d cas=%d",
             spell_id, expertise, spell_power, status_turn,
             st_mana_before, st_casted_before, st_cas);
-        cm->CastSpell(spell_id, -1, 1, -1, expertise, spell_power);
+        // Hero path computes mass targeting from expertise and enforces mana/book.
+        cm->CastSpell(spell_id, -1, 0, -1, expertise, spell_power);
     } __except (1) {
         g_cast_in_flight = false;
         CastSideGuardLeave_(cm, st_cas);
