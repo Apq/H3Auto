@@ -4,6 +4,7 @@
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 
 #include "ForceField.hpp"
+#include "BattleStoreCoop.hpp"
 static void ResetAttackMagicRuntime_();
 static bool TryAttackMagicCast_(_BattleMgr_* mgr);
 
@@ -2604,6 +2605,44 @@ int DecideTakeover(_BattleMgr_* mgr)
     }
 }
 
+// H3BattleStore协作ABI v1：动态查询，不依赖DLL加载顺序；未加载时原行为。
+// Query返回忙态，Before返回FALSE代表稳定玩家窗口未建立（暂不推进自动效果）。
+// 保存失败也消费本回合尝试并返回TRUE，不阻塞自动战斗、不重试。首档尝试
+// 后不再要求活动栈对齐，避免原版自动模式的active_stack滞后挡住后续行动。
+static bool g_storeCoopRestoring = false;
+static void BattleStoreRestoreNotify_()
+{
+    Variable* epoch = _P->VarFind("H3BattleStore.RestoreEpoch.v1");
+    static DWORD lastEpoch = 0;
+    if (!epoch || epoch->GetValue() == lastEpoch) return;
+    const DWORD current = epoch->GetValue();
+    g_storeCoopRestoring = true;
+    __try {
+        // 面板关闭可重入Blt，处理闸先置位，手动控制先于刷新。
+        SetControlMode_(CM_MANUAL);
+        ResetAutoState();
+        BindStackTrackingFromBattle_();
+        lastEpoch = current;
+        LogInfo("[Coop] battle restored epoch=%lu; rules preserved, manual control, cursors restarted", current);
+    } __finally { g_storeCoopRestoring = false; }
+}
+static bool BattleStoreAllowsAutomation_(_BattleMgr_* mgr)
+{
+    if (!_P || !mgr) return true;
+    typedef BOOL (__stdcall* BusyQuery)();
+    typedef BOOL (__stdcall* BeforeAction)(void*);
+    const auto busy = reinterpret_cast<BusyQuery>(
+        _P->VarGetValue<DWORD>("H3BattleStore.BusyQuery.v1", 0));
+    return BattleStoreAutomationAllowed_(
+        [busy]() { return g_storeCoopRestoring || (busy && busy()); },
+        []() { BattleStoreRestoreNotify_(); },
+        [mgr]() {
+            const auto before = reinterpret_cast<BeforeAction>(
+                _P->VarGetValue<DWORD>("H3BattleStore.BeforeAutoAction.v1", 0));
+            return (!before || before(mgr)) && mgr == o_BattleMgr;
+        });
+}
+
 // 供战斗消息入口调用：若当前单位应由 H3Auto 主动执行，则提交动作。
 // 返回 true 表示已写入 action，原版输入可继续走默认路径处理后续。
 bool TryAutoExecuteActiveStack(bool allow_unit_action)
@@ -2613,6 +2652,7 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
     if (g_phase != BP_COMBAT_CLOSED) return false; // 状态机守卫（S5.3）
     __try {
         PollControlHotkeys_(mgr);
+        if (!BattleStoreAllowsAutomation_(mgr)) return false;
         if (!EnsureForceFieldBeforeAction_(mgr)) return false;
         const int decision = DecideTakeover(mgr);
         if (decision != CD_EXECUTE_H3AUTO)
@@ -2657,6 +2697,7 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
     }
     __try {
         PollControlHotkeys_(This);
+        if (!BattleStoreAllowsAutomation_(This)) return 0;
         if (!EnsureForceFieldBeforeAction_(This)) return 0;
         // 每次行动（控制权交玩家）都判保活（事件型，无回合标记）：
         // 复活按各队方式（剩余数量≤/损失量大于恢复量），召唤按阈值，

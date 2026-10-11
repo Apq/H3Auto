@@ -1,4 +1,5 @@
 #include "../modules/PolicyCore.hpp"
+#include "../modules/BattleStoreCoop.hpp"
 #include "../modules/CrashGuardCore.hpp"
 #include "../modules/PanelInputCore.hpp"
 #include "../modules/MagicChannelInputCore.hpp"
@@ -1313,6 +1314,27 @@ void TestCrashGuardCore()
         "null def rejected");
 }
 
+void TestBattleStoreCoop()
+{
+    int stage = 0;
+    bool busy = false;
+    auto query = [&]() { return busy; };
+    auto restore = [&]() { stage = 1; };
+    auto before = [&]() { Check(stage == 1, "restore notification precedes automatic save"); stage = 2; return true; };
+    Check(BattleStoreAutomationAllowed_(query, restore, before) && stage == 2,
+        "optional listeners complete before automation");
+    stage = 0; busy = true;
+    Check(!BattleStoreAutomationAllowed_(query, restore, before) && stage == 0,
+        "busy blocks restore consumption and save callbacks");
+    busy = false;
+    Check(!BattleStoreAutomationAllowed_(query, restore, []() { return false; }),
+        "unstable player window blocks all automatic effects");
+    Check(!BattleStoreAutomationAllowed_(query, restore, [&]() { busy = true; return true; }),
+        "reentrant busy after save blocks automatic effects");
+    Check(BattleStoreAutomationAllowed_([]() { return false; }, []() {}, []() { return true; }),
+        "missing optional plugin preserves original automation");
+}
+
 #include "MagicChannelJsonTests.inc.cpp"
 #include "MagicChannelInputTests.inc.cpp"
 
@@ -1320,6 +1342,7 @@ void TestCrashGuardCore()
 
 int main()
 {
+    TestBattleStoreCoop();
     TestTextLayout();
     TestPanelItemOwnership();
     TestPanelAdmission();
