@@ -40,6 +40,7 @@ static void TestMagicChannelJson()
         move.target.moveWaypoints[1] = 170;
         move.target.moveWaypoints[2] = 170;
         move.allowDefendFallback = true;
+        move.waitMode = AW_EVERY_TURN;
         move.protectMode = PM_COUNT_BELOW;
         move.protectCountBelow = 10 + p;
         AutoStackRule& melee = source->rules[p][20 - p];
@@ -52,6 +53,7 @@ static void TestMagicChannelJson()
         melee.target.meleeAttackHexes[1] = 61;
         melee.target.meleeStandHex = 40;
         melee.target.meleeAttackHex = 41;
+        melee.waitMode = AW_SMART;
         melee.protectMode = PM_LOSS_GT_RESTORE;
         source->stop_turns[p] = static_cast<uint16_t>(p * 100);
         SummonProfileFields& summon = source->summon[p];
@@ -109,6 +111,9 @@ static void TestMagicChannelJson()
                 && decoded->rules[p][20 - p].target.meleePairCount == 2
                 && decoded->forcefield[p].anchor_hex[1] == 120 + p,
             "army slot mapping and forcefield survive each profile");
+        Check(decoded->rules[p][p].waitMode == AW_EVERY_TURN
+                && decoded->rules[p][20 - p].waitMode == AW_SMART,
+            "wait mode survives production codec roundtrip per slot");
         Check(ProfileToJson_(decoded->rules[p], decoded->stop_turns[p],
                 decoded->summon[p], decoded->status[p], decoded->forcefield[p]) == profiles[p],
             "production decoded profile reserializes to the identical JSON object");
@@ -217,6 +222,28 @@ static void TestMagicChannelJson()
     rule["spells"] = BattleJson::array({1});
     AutoStackRule unit = MakeDefaultRule();
     Check(!ParseRuleJson_(rule, &unit), "removed per-army spells field rejected");
+    // 等待方式：缺键=无（strict JSON 里旧对象也能读回默认），越界值钳到无。
+    rule = RuleToJson_(MakeDefaultRule());
+    Check(rule.contains("waitMode") && rule["waitMode"] == 0,
+        "default rule serializes wait mode none");
+    rule.erase("waitMode");
+    unit = MakeDefaultRule();
+    unit.waitMode = AW_EVERY_TURN;
+    Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_NONE,
+        "missing wait mode falls back to none");
+    for (int bad_wait : {-1, (int)AW_COUNT, 99}) {
+        rule = RuleToJson_(MakeDefaultRule());
+        rule["waitMode"] = bad_wait;
+        unit = MakeDefaultRule();
+        unit.waitMode = AW_SMART;
+        Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_NONE,
+            "out-of-range wait mode clamps to none");
+    }
+    rule = RuleToJson_(MakeDefaultRule());
+    rule["waitMode"] = AW_SMART;
+    unit = MakeDefaultRule();
+    Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_SMART,
+        "valid wait mode parses");
     BattleJson bad_record = record;
     bad_record["profiles"][0]["status"].erase("attacks");
     Check(!ParseRecordJson_(bad_record, decoded),
@@ -226,12 +253,12 @@ static void TestMagicChannelJson()
     Check(!ParseRecordJson_(bad_record, decoded),
         "record rejects removed army spells field through production profile path");
 
-    Check(IsBattleStoreJsonVersion_(BattleJson{{"version", 5}}),
-        "production root version helper accepts schema v5");
-    for (const BattleJson& version : {BattleJson(4), BattleJson(6), BattleJson(true),
-            BattleJson(5.0), BattleJson("5"), max_unsigned})
+    Check(IsBattleStoreJsonVersion_(BattleJson{{"version", 6}}),
+        "production root version helper accepts schema v6");
+    for (const BattleJson& version : {BattleJson(4), BattleJson(5), BattleJson(7),
+            BattleJson(true), BattleJson(6.0), BattleJson("6"), max_unsigned})
         Check(!IsBattleStoreJsonVersion_(BattleJson{{"version", version}}),
-            "production root version helper rejects legacy and wrong types");
+            "production root version helper rejects v5 and earlier plus wrong types");
     Check(!IsBattleStoreJsonVersion_(BattleJson::object()), "missing root version rejected");
     Check(!IsBattleStoreJsonVersion_(BattleJson::array()), "nonobject root rejected");
     delete decoded;

@@ -60,6 +60,9 @@ static bool ParseRuleJson_(const BattleJson& obj, AutoStackRule* rule)
         }
     }
     r.allowDefendFallback = JsonInt_(obj, "fallback", 0) != 0;
+    const int wait_mode = JsonInt_(obj, "waitMode", (int)AW_NONE);
+    r.waitMode = (wait_mode >= 0 && wait_mode < (int)AW_COUNT)
+        ? static_cast<uint8_t>(wait_mode) : (uint8_t)AW_NONE;
     const int mode = JsonInt_(obj, "protectMode", (int)PM_NONE);
     r.protectMode = (mode == (int)PM_COUNT_BELOW
             || mode == (int)PM_LOSS_GT_RESTORE)
@@ -78,6 +81,7 @@ static BattleJson RuleToJson_(const AutoStackRule& rule)
         {"side", (int)rule.target.side},
         {"selector", (int)rule.target.selector},
         {"fallback", rule.allowDefendFallback ? 1 : 0},
+        {"waitMode", (int)rule.waitMode},
         {"protectMode", (int)rule.protectMode},
         {"protectCount", rule.protectCountBelow},
     };
@@ -268,6 +272,7 @@ static BattleJson ProfileToJson_(const AutoStackRule rules[21],
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = rules[slot];
         if (rule.action == AA_MANUAL
+            && rule.waitMode == AW_NONE
             && rule.protectMode == PM_NONE
             && rule.target.moveWaypointCount == 0
             && rule.target.meleePairCount == 0)
@@ -319,6 +324,6 @@ static bool ParseRecordJson_(const BattleJson& obj, BattleStoreRecord* rec)
 static bool IsBattleStoreJsonVersion_(const BattleJson& root)
 {
     return root.is_object() && root.contains("version")
-        && root["version"].is_number_integer() && root["version"] == 5;
+        && root["version"].is_number_integer() && root["version"] == 6;
 }
 

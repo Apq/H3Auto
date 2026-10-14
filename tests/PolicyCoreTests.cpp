@@ -951,11 +951,12 @@ void TestProtect()
             "empty candidate list returns -1");
     }
 
-    // 默认规则：保活默认不开启（三选一），阈值默认 2。
+    // 默认规则：保活默认不开启（三选一），阈值默认 2；等待方式默认「无」。
     const AutoStackRule def = MakeDefaultRule();
     Check(def.protectMode == PM_NONE,
         "default rule does not protect");
     Check(def.protectCountBelow == 2, "default protect threshold is 2");
+    Check(def.waitMode == AW_NONE, "default rule does not wait");
 }
 
 void TestStatusAndAutoStop()
@@ -1221,10 +1222,12 @@ void TestSummonRuleNormalization()
     rule.action = AA_SCATTER;
     rule.allowDefendFallback = true;
     rule.protectMode = PM_LOSS_GT_RESTORE;
+    rule.waitMode = AW_EVERY_TURN;
     NormalizeSummonRule(&rule);
     Check(rule.action == AA_SCATTER, "scatter survives normalization");
     Check(!rule.allowDefendFallback, "scatter loses fallback");
     Check(rule.protectMode == PM_NONE, "summon rule resets protect mode");
+    Check(rule.waitMode == AW_NONE, "summon rule resets wait mode");
 
     rule = MakeDefaultRule();
     rule.action = AA_RANDOM_MOVE;
@@ -1244,11 +1247,23 @@ void TestSummonRuleNormalization()
         && def.summon_rule.action == AA_SCATTER,
         "default summon fields");
 
-    // 普通规则 NormalizeRule 仍会把召唤动作裁掉（双保险）。
+    // 普通规则 NormalizeRule 仍会把召唤动作裁掉（双保险），
+    // 并把越界等待方式钳回「无」。等待方式不随行动切换被抹掉。
     AutoStackRule leak = MakeDefaultRule();
     leak.action = AA_SCATTER;
     NormalizeRule(&leak, 1, false, false, false);
     Check(leak.action == AA_MANUAL, "normalize rule strips summon action");
+
+    AutoStackRule wait_rule = MakeDefaultRule();
+    wait_rule.action = AA_MOVE;
+    wait_rule.waitMode = AW_EVERY_TURN;
+    NormalizeRule(&wait_rule, 1, false, false, false);
+    Check(wait_rule.action == AA_MOVE && wait_rule.waitMode == AW_EVERY_TURN,
+        "normalize rule keeps valid wait mode");
+
+    wait_rule.waitMode = (uint8_t)AW_COUNT;
+    NormalizeRule(&wait_rule, 1, false, false, false);
+    Check(wait_rule.waitMode == AW_NONE, "normalize rule clamps bad wait mode");
 }
 
 } // namespace

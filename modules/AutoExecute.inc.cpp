@@ -71,6 +71,12 @@ static int g_pipeline_landed_turn = -1;   // 命令落地时的战场行动计�
 // 它是魔幻法师施法间隔，不是通用回合计数。
 static bool g_pipeline_morale_extra = false;
 
+// 「等待方式=每回合」的提交记录：同一部队同一回合只提交一次等待。
+// 原版等待标志（creature info.flags bit25）可能滞后于提交一帧，这里再记
+// 一层，避免连发等待把本回合卡住。战斗重置时清空（见 ResetAutoState）。
+static _BattleStack_* g_wait_submitted_stack = nullptr;
+static int g_wait_submitted_turn = -1;
+
 static const char* ControlModeName_(ControlMode m)
 {
     switch (m) {
@@ -759,6 +765,8 @@ void ResetAutoState()
     g_pipeline_stack = nullptr;
     g_pipeline_action_landed = false;
     g_pipeline_morale_extra = false;
+    g_wait_submitted_stack = nullptr; // 等待提交记录只在本场战斗内有效
+    g_wait_submitted_turn = -1;
     // F9 全手动是用户对"本场谁执行"的显式选择；取消重打/重绑不清，
     // 否则用户切到全手动后保存设置，面板关闭即被静默切回自动。
     // 只清单次接管与施法等待等运行时数据。
@@ -2334,6 +2342,40 @@ static bool SubmitWait_(_BattleMgr_* mgr, _BattleStack_* self)
     return true;
 }
 
+// 原版等待标志 = creature info.flags bit25（H3CreatureInformation::waiting）。
+// 新回合由游戏自己用 0xF8FFFFFF 清 bit24/25/26，所以这一位就是「本回合已等待」。
+static bool StackIsWaiting_(_BattleStack_* stack)
+{
+    if (!stack) return false;
+    __try {
+        const unsigned flags =
+            reinterpret_cast<H3CombatCreature*>(stack)->info.flags;
+        return (flags & 0x02000000u) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogError("[Auto] 等待标志读取异常 code=0x%08X", GetExceptionCode());
+        return true; // 读不到按「已等待」处理：宁可不等待，也不连发两次等待
+    }
+}
+
+// 是否需要在执行配置动作前先提交等待（等待方式=每回合）。
+// 战争机器不参与等待；士气额外行动发生在回合尾部，也不再等待；
+// 主动作本身就是等待时不重复。
+static bool ShouldSubmitWaitFirst_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule)
+{
+    if (!mgr || !self) return false;
+    // 「无」不等待；「智能」策略待定，当前与「无」同行为。
+    if (rule.waitMode != AW_EVERY_TURN) return false;
+    if (rule.action == AA_WAIT) return false;
+    if (IsWarMachineCid_(self->creature_id)) return false;
+    if (g_pipeline_morale_extra && StackHasGoodMorale_(self)) return false;
+    if (StackIsWaiting_(self)) return false;
+    const int turn = GetCurrentBattleTurn_(mgr);
+    if (g_wait_submitted_stack == self && g_wait_submitted_turn == turn)
+        return false;
+    return true;
+}
+
 // 提交急救：action=11, actionParameter=己方伤员 hex。
 static bool SubmitFirstAid_(_BattleMgr_* mgr, _BattleStack_* self, const AutoStackRule& rule)
 {
@@ -2490,6 +2532,23 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     if (!allow_unit_action) {
         RequestUnitActionWake_(self);
         return false;
+    }
+
+    // 等待方式=每回合：本回合第一次轮到时先提交等待，等本回合等待阶段
+    // 再执行配置动作。等待本身不是「已处理」——不能用 PS_HANDLED 挡住
+    // 等待阶段的第二次控制权，否则这支部队本回合永远不会动。
+    if (ShouldSubmitWaitFirst_(mgr, self, rule)) {
+        if (SubmitWait_(mgr, self)) {
+            g_wait_submitted_stack = self;
+            g_wait_submitted_turn = GetCurrentBattleTurn_(mgr);
+            g_auto_state.action_wake_stack = nullptr;
+            LogInfo("[Auto] wait first slot=%d cid=0x%X action=%d turn=%d",
+                self->army_slot_ix, self->creature_id, (int)rule.action,
+                g_wait_submitted_turn);
+            return true;
+        }
+        LogWarn("[Auto] wait submit failed slot=%d cid=0x%X",
+            self->army_slot_ix, self->creature_id);
     }
 
     const bool ok = SubmitConfiguredUnitAction_(mgr, self, rule, runtime);

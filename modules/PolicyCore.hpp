@@ -87,10 +87,24 @@ enum ProtectMode : uint8_t {
     PM_COUNT
 };
 
+// 等待方式（部队级，三选一）：游戏内「等待」是每支部队自己的一次机会。
+// AW_NONE=不等待（默认）：轮到直接执行配置动作。
+// AW_EVERY_TURN=每回合：每回合第一次轮到时先提交等待，等待阶段再执行配置动作。
+// AW_SMART=智能：当前与不等待同行为（策略待定），仅存档与界面占位。
+enum AutoWaitMode : uint8_t {
+    AW_NONE = 0,
+    AW_EVERY_TURN,
+    AW_SMART,
+    AW_COUNT
+};
+
 struct AutoStackRule {
     AutoActionKind action;
     AutoTargetRule target;
     bool allowDefendFallback;
+
+    // 等待方式（默认不等待）。手动行动不参与等待：那支部队整回合交给玩家。
+    uint8_t         waitMode;            // AutoWaitMode
 
     // 保活方式三选一（默认不保活）；法术自动选：亡灵用聚灵、活体用复活。
     uint8_t         protectMode;         // ProtectMode：0=按剩余数量；1=损失量大于恢复量；2=不保活
@@ -117,6 +131,7 @@ inline AutoStackRule MakeDefaultRule()
     r.target.moveWaypointCount = 0;
     r.target.meleePairCount = 0;
     r.allowDefendFallback = false;
+    r.waitMode = AW_NONE;
     r.protectMode = PM_NONE;
     r.protectCountBelow = 2;
     return r;
@@ -1072,6 +1087,7 @@ inline void NormalizeSummonRule(AutoStackRule* rule)
         (rule->action == AA_RANDOM_MOVE) && rule->allowDefendFallback;
     rule->protectMode = PM_NONE;   // 召唤物共享规则不走保活
     rule->protectCountBelow = 2;
+    rule->waitMode = AW_NONE;      // 召唤物共享规则不走等待方式
 }
 
 // 返回候选下标；平分时保留先出现者，与原执行器行为一致。
@@ -1371,6 +1387,7 @@ inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged
     if (!rule) return;
     if (rule->protectCountBelow < 0) rule->protectCountBelow = 0;
     if (rule->protectMode >= PM_COUNT) rule->protectMode = PM_NONE;
+    if (rule->waitMode >= AW_COUNT) rule->waitMode = AW_NONE;
 
     AutoActionKind allowed[AA_COUNT] = {};
     const int n = GetAllowedActions(creature_type, is_ranged,
@@ -1477,6 +1494,11 @@ using H3AutoPolicy::ProtectMode;
 using H3AutoPolicy::PM_COUNT_BELOW;
 using H3AutoPolicy::PM_LOSS_GT_RESTORE;
 using H3AutoPolicy::PM_NONE;
+using H3AutoPolicy::AutoWaitMode;
+using H3AutoPolicy::AW_NONE;
+using H3AutoPolicy::AW_EVERY_TURN;
+using H3AutoPolicy::AW_SMART;
+using H3AutoPolicy::AW_COUNT;
 using H3AutoPolicy::SUMMON_ELEMENT_COUNT;
 using H3AutoPolicy::SUMMON_COMBINE_AND;
 using H3AutoPolicy::SUMMON_COMBINE_OR;

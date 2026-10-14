@@ -54,14 +54,23 @@ static const int CC_ICON_FRAME_H = 66;
 
 static const int CC_LABEL_H  = 11;
 
-// 头像列固定；右侧第二列为行动/降级，第三列为目标或循环路径。
-// 第二小列左缘贴图标金框右缘，留 4px 间距。
+// 头像列固定；右侧依次为：等待方式（标签+下拉）、行动下拉、第三列（目标/循环路径）。
+// 头部各组控件左缘仍贴图标金框右缘，留 4px 间距。2026-10-14：为「等待方式」
+// 让位，行动下拉及其后的第三列整体右移。
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
-static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68
-static const int CC_COL2_W   = 104; // 「允许降级为防御」完整显示 + 行动下拉
-static const int CC_COL3_X   = CC_COL2_X + CC_COL2_W + 6; // ≈206
+static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68（等待方式组起点）
+// 等待方式：「等待方式:」标签 + 三选一下拉（无/每回合/智能）。
+static const int CC_WAIT_LBL_W = 52;                            // 「等待方式:」
+static const int CC_WAIT_DD_X  = CC_COL2_X + CC_WAIT_LBL_W + 2; // ≈122
+static const int CC_WAIT_DD_W  = 60;                            // 「每回合」+ 箭头
+// 行动下拉：整体右移到等待方式之后。
+static const int CC_ACTION_DD_X = CC_WAIT_DD_X + CC_WAIT_DD_W + 6; // ≈188
+static const int CC_ACTION_DD_W = 76;                              // 「循环近战」+ 箭头
+// 降级复选框：仍在行动下拉正下方（小列2 下行），宽度沿用旧值。
+static const int CC_FALLBACK_W = 104;
+static const int CC_COL3_X   = CC_ACTION_DD_X + CC_ACTION_DD_W + 6; // ≈270
 static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
-static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈358
+static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈237
 static const int CC_ROW_H    = 22;
 // 删除顶部施法行：行动/目标、降级/路径、保活三行统一上移 22px。
 static const int CC_TOP_Y    = 8;
@@ -82,18 +91,54 @@ static const int CC_PROTECT_CNT_BOX_X = CC_PROTECT_CNT_LBL_X + CC_PROTECT_CNT_LB
 static const int CC_PROTECT_CNT_BOX_W = 92;  // 容纳 10 位（2147483647）
 static const int CC_PROTECT_CNT_BOX_H = 16;
 static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
-// 循环移动/近战槽：按文本宽度定槽宽，再反算每行/总容量（两行）。
+// 循环移动/近战槽：槽宽按文本定，每行几个按该行可用宽度算。前两行占第三列，
+// 第三行让开同高度的保活组（68..356）从 360 起——三行合计仍能放下
+// MOVE_WAYPOINT_CAPACITY(16) 与 MELEE_PAIR_CAPACITY(10) 的全部槽位。
 static const int CC_PATH_SLOT_GAP = 3;
-static const int CC_MOVE_SLOT_W = 32;  // A01（8 槽/行放进 290 宽）
-static const int CC_MELEE_SLOT_W = 54; // A01→B02（5 槽/行放进 290 宽）
-static const int CC_MOVE_SLOTS_PER_ROW =
-    (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MOVE_SLOT_W + CC_PATH_SLOT_GAP); // 8
-static const int CC_MELEE_SLOTS_PER_ROW =
-    (CC_COL3_W + CC_PATH_SLOT_GAP) / (CC_MELEE_SLOT_W + CC_PATH_SLOT_GAP); // 5
+static const int CC_MOVE_SLOT_W = 32;  // A01
+static const int CC_MELEE_SLOT_W = 54; // A01→B02
+static const int CC_PATH_ROWS = 3;
+static const int CC_SLOT_ROW3_X = CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W + 4; // ≈360
+static const int CC_SLOT_ROW3_W = CC_COL3_RIGHT - CC_SLOT_ROW3_X;                  // ≈147
+
+static int CellControl_PathRowX_(int row)
+{
+    return row < 2 ? CC_COL3_X : CC_SLOT_ROW3_X;
+}
+
+static int CellControl_PathRowY_(int row)
+{
+    return row == 0 ? CC_TOP_Y : (row == 1 ? CC_BOT_Y : CC_PROTECT_Y);
+}
+
+// 该行能放几个槽（按该行实际可用宽度）。
+static int CellControl_PathRowCapacity_(int row, int slot_w)
+{
+    const int w = (row < 2) ? CC_COL3_W : CC_SLOT_ROW3_W;
+    return (w + CC_PATH_SLOT_GAP) / (slot_w + CC_PATH_SLOT_GAP);
+}
+
+// 槽下标 → (行, 行内列号)。超出三行总容量返回 false。
+static bool CellControl_PathSlotRowCol_(int index, int slot_w,
+    int* out_row, int* out_col)
+{
+    int remain = index < 0 ? 0 : index;
+    for (int row = 0; row < CC_PATH_ROWS; ++row) {
+        const int per = CellControl_PathRowCapacity_(row, slot_w);
+        if (per <= 0) continue;
+        if (remain < per) {
+            if (out_row) *out_row = row;
+            if (out_col) *out_col = remain;
+            return true;
+        }
+        remain -= per;
+    }
+    return false;
+}
 
 // 兼容旧名
-static const int CC_COMBO_X  = CC_COL2_X;
-static const int CC_COMBO_W  = CC_COL2_W; // 行动下拉用第二小列宽
+static const int CC_COMBO_X  = CC_ACTION_DD_X; // 行动下拉左缘
+static const int CC_COMBO_W  = CC_ACTION_DD_W;
 static const int CC_COL_W    = CC_COL3_W; // 旧“内容列宽”=第三列
 static const int CC_ROW1_Y   = CC_TOP_Y;
 
@@ -118,6 +163,7 @@ enum CellExpandKind {
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
     CEX_PROTECT,  // 保活方式（剩余数量 / 损失量大于恢复量）
+    CEX_WAIT,     // 等待方式（无 / 每回合 / 智能）
 };
 
 // ========================================================================
@@ -134,6 +180,7 @@ struct CellControl
     bool             action_pressed;
     bool             selector_pressed;
     bool             protect_pressed;
+    bool             wait_pressed;
     bool             dirty;
     bool             has_data;
     H3LoadedDef*     def_cache;
@@ -480,37 +527,40 @@ static RECT CellControl_GetCellRect(int cell_panel_x, int cell_panel_y)
 // 前向声明：展开项数（实现见后）
 static int CellControl_GetExpandedItemCount(CellControl* ctrl);
 
-// 三小列布局下每个下拉所在小列 X（相对格子）。
-// 行动/站立 = 小列2；选择器/攻击 = 小列3。
+// 各下拉所在小列 X（相对格子）。
+// 等待方式 = 行动下拉左侧的新组；行动 = 行动下拉；选择器/攻击 = 第三列。
 static int CellControl_GetExpandListLeftX(CellControl* ctrl)
 {
-    if (!ctrl) return CC_COL2_X;
+    if (!ctrl) return CC_COL3_X;
     switch (ctrl->expanded) {
-    case CEX_ACTION:   return CC_COL2_X;
+    case CEX_ACTION:   return CC_ACTION_DD_X;
+    case CEX_WAIT:     return CC_WAIT_DD_X;
     case CEX_STAND:    return CC_COL3_X;
     case CEX_SELECTOR: return CC_COL3_X;
     case CEX_ATTACK:   return CC_COL3_X;
     case CEX_PROTECT:  return CC_PROTECT_DD_X;
-    default:           return CC_COL2_X;
+    default:           return CC_COL3_X;
     }
 }
 
-// 展开列表宽度：行动=第二列，保活=专用宽度，其余=第三列
+// 展开列表宽度：等待=等待下拉宽，行动=行动下拉宽，保活=专用宽度，其余=第三列
 static int CellControl_GetExpandListWidth(CellControl* ctrl)
 {
     if (!ctrl) return CC_COL3_W;
-    if (ctrl->expanded == CEX_ACTION) return CC_COL2_W;
+    if (ctrl->expanded == CEX_ACTION) return CC_ACTION_DD_W;
+    if (ctrl->expanded == CEX_WAIT) return CC_WAIT_DD_W;
     if (ctrl->expanded == CEX_PROTECT) return CC_PROTECT_DD_W;
     return CC_COL3_W;
 }
 
 // 当前展开列表的局部 Y（列表顶部，相对格子）= 其所在行下边缘。
-// 行动/选择器=上行；近战站立/攻击依控件所处行展开。
+// 等待/行动/选择器=上行；近战站立/攻击依控件所处行展开；保活=底部行。
 static int CellControl_GetExpandListTopY(CellControl* ctrl)
 {
     if (!ctrl) return CC_TOP_Y + CC_ROW_H;
     switch (ctrl->expanded) {
     case CEX_ACTION:   return CC_TOP_Y + CC_ROW_H;
+    case CEX_WAIT:     return CC_TOP_Y + CC_ROW_H;
     case CEX_SELECTOR: return CC_TOP_Y + CC_ROW_H;
     case CEX_STAND:    return CC_TOP_Y + CC_ROW_H;
     case CEX_ATTACK:   return CC_BOT_Y + CC_ROW_H;
@@ -798,38 +848,56 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
     const bool shows_fallback = CellControl_ActionShowsFallback(
         ctrl->data.creature_type, rule.action);
 
+    // ---- 等待方式（行动下拉左侧的组：标签 + 三选一下拉）----
+    {
+        CellControl_DrawText(scr, fntS, T("cell.wait_mode_lbl"),
+            CC_COL2_X, CC_ROW1_Y, CC_WAIT_LBL_W, CC_ROW_H,
+            (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+        const int wait_mode = (rule.waitMode < AW_COUNT)
+            ? (int)rule.waitMode : (int)AW_NONE;
+        const char* wait_label =
+            wait_mode == (int)AW_EVERY_TURN ? T("cell.wait_every")
+            : wait_mode == (int)AW_SMART ? T("cell.wait_smart")
+            : T("cell.wait_none");
+        CellControl_DrawButtonBg(scr, CC_WAIT_DD_X, CC_ROW1_Y, CC_WAIT_DD_W,
+            CC_ROW_H, ctrl->wait_pressed, false);
+        CellControl_DrawText(scr, fntS, wait_label,
+            CC_WAIT_DD_X + 4, CC_ROW1_Y, CC_WAIT_DD_W - 20, CC_ROW_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        CellControl_DrawArrow(scr, CC_WAIT_DD_X + CC_WAIT_DD_W - 14,
+            CC_ROW1_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_WAIT);
+    }
+
     // ---- 行动下拉 ----
     const char* action_label =
         (rule.action >= 0 && rule.action < AA_COUNT && g_action_labels[rule.action])
         ? g_action_labels[rule.action] : "---";
-    CellControl_DrawButtonBg(scr, CC_COMBO_X, CC_ROW1_Y, CC_COMBO_W, CC_ROW_H,
-        ctrl->action_pressed, false);
+    CellControl_DrawButtonBg(scr, CC_ACTION_DD_X, CC_ROW1_Y, CC_ACTION_DD_W,
+        CC_ROW_H, ctrl->action_pressed, false);
     CellControl_DrawText(scr, fntS, action_label,
-        CC_COMBO_X + 4, CC_ROW1_Y, CC_COMBO_W - 20, CC_ROW_H,
+        CC_ACTION_DD_X + 4, CC_ROW1_Y, CC_ACTION_DD_W - 20, CC_ROW_H,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
-    CellControl_DrawArrow(scr, CC_COMBO_X + CC_COMBO_W - 14,
+    CellControl_DrawArrow(scr, CC_ACTION_DD_X + CC_ACTION_DD_W - 14,
         CC_ROW1_Y + CC_ROW_H / 2 - 3, ctrl->expanded != CEX_ACTION);
 
-    // 小列2 上行 = 行动下拉（已画于上）。
-    // 小列2 下行 = 降级复选框（普通部队主动行动）；近战时下行 = 站立格。
-    // 小列3 上行 = 选择器 / 近战攻击格；下行 = 阵营 / 固定说明。
+    // 上行 = 等待方式组 + 行动下拉；下行 = 降级复选框。
+    // 第三列上行 = 选择器 / 循环槽；下行 = 固定说明 / 循环槽。
     if (needs_target) {
         if (rule.action == AA_MOVE) {
-            // 循环移动：两行槽位，每槽一个路径点；槽宽按 A01 文本定，
-            // 一行能摆几个就几个（当前 8×2=16）。
+            // 循环移动：三行槽位，每槽一个路径点；槽宽按 A01 文本定，
+            // 每行能摆几个按该行可用宽度算（合计 16 槽全部可见）。
             const int gap = CC_PATH_SLOT_GAP;
             const int slot_w = CC_MOVE_SLOT_W;
-            const int per_row = CC_MOVE_SLOTS_PER_ROW;
             const int count = rule.target.moveWaypointCount;
             for (int index = 0; index < MOVE_WAYPOINT_CAPACITY; ++index) {
-                const int row = index / per_row;
-                const int col = index % per_row;
-                if (row > 1) break;
-                const int x = CC_COL3_X + col * (slot_w + gap);
-                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 const bool existing = index < count;
                 const bool add_slot = index == count && count < MOVE_WAYPOINT_CAPACITY;
                 if (!existing && !add_slot) continue;
+                int row = 0, col = 0;
+                if (!CellControl_PathSlotRowCol_(index, slot_w, &row, &col))
+                    break; // 超出三行容量：剩余槽不可见（容量常量应已覆盖）
+                const int x = CellControl_PathRowX_(row) + col * (slot_w + gap);
+                const int y = CellControl_PathRowY_(row);
 
                 const bool requested = ctrl->move_path_pick_request == index + 1;
                 CellControl_DrawButtonBg(scr, x, y, slot_w, CC_ROW_H,
@@ -848,22 +916,20 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                 }
             }
         } else if (CellControl_ActionUsesTwoHex(rule.action)) {
-            // 循环近战：两行槽位，显示“站立位→攻击位”；槽宽按文本定，
-            // 一行能摆几个就几个（当前 5×2=10）。
+            // 循环近战：三行槽位，显示“站立位→攻击位”；槽宽按文本定，
+            // 每行能摆几个按该行可用宽度算（合计 10 对全部可见）。
             const int gap = CC_PATH_SLOT_GAP;
             const int slot_w = CC_MELEE_SLOT_W;
-            const int per_row = CC_MELEE_SLOTS_PER_ROW;
             const int count = rule.target.meleePairCount;
             for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
-                const int row = index / per_row;
-                const int col = index % per_row;
-                if (row > 1) break;
-                const int x = CC_COL3_X + col * (slot_w + gap);
-                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
                 const bool existing = index < count;
                 const bool add_slot = index == count && count < MELEE_PAIR_CAPACITY;
-                const bool visible = existing || add_slot;
-                if (!visible) continue;
+                if (!existing && !add_slot) continue;
+                int row = 0, col = 0;
+                if (!CellControl_PathSlotRowCol_(index, slot_w, &row, &col))
+                    break; // 超出三行容量：剩余槽不可见（容量常量应已覆盖）
+                const int x = CellControl_PathRowX_(row) + col * (slot_w + gap);
+                const int y = CellControl_PathRowY_(row);
 
                 const bool requested = ctrl->melee_pair_pick_request == index + 1;
                 CellControl_DrawButtonBg(scr, x, y, slot_w, CC_ROW_H,
@@ -907,7 +973,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
         }
     }
 
-    // ---- 降级复选框：小列2下行（近战与非近战统一）----
+    // ---- 降级复选框：行动下拉正下方（等待方式组右侧同行的下一行）----
     if (shows_fallback) {
         const int cb_x = CC_COL2_X + 2;
         const int cb_y = CC_BOT_Y + 3;
@@ -924,7 +990,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             Fill(scr, cb_x + 7, cb_y + 3, 2, 2, 235, 205, 116);
         }
         CellControl_DrawText(scr, fntS, T("cell.allow_fallback"),
-            cb_x + cb_box + 4, cb_y - 1, CC_COL2_W - cb_box - 8, CC_CHECKBOX_H,
+            cb_x + cb_box + 4, cb_y - 1, CC_FALLBACK_W - cb_box - 8, CC_CHECKBOX_H,
             (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
     }
 
@@ -1092,7 +1158,7 @@ static void CellControl_DrawActionDropdownTo(CellControl* ctrl, H3LoadedPcx16* s
         CellControl_DrawDropdownItem(scr, fntS, label, i,
             cell_panel_x, cell_panel_y,
             a == ctrl->data.rule.action, i == hover_idx, false,
-            CC_TOP_Y + CC_ROW_H, CC_COL2_X, CC_COL2_W);
+            CC_TOP_Y + CC_ROW_H, CC_ACTION_DD_X, CC_ACTION_DD_W);
     }
 }
 
@@ -1167,7 +1233,7 @@ static void CellControl_DrawHexDropdownTo(CellControl* ctrl, H3LoadedPcx16* scr,
 
     const int list_x = cell_panel_x + col_x;
     const int list_top = cell_panel_y + row_y + CC_ROW_H;
-    const int list_w = (col_x == CC_COL2_X) ? CC_COL2_W : CC_COL3_W;
+    const int list_w = (col_x == CC_SLOT_ROW3_X) ? CC_SLOT_ROW3_W : CC_COL3_W;
     const int vis = (n < CC_DD_MAX_VISIBLE) ? n : CC_DD_MAX_VISIBLE;
     for (int v = 0; v < vis; ++v) {
         const int i = scroll + v;
@@ -1229,6 +1295,28 @@ static void CellControl_DrawProtectDropdownTo(CellControl* ctrl,
     }
 }
 
+// 展开等待方式列表（三选一：无 / 每回合 / 智能）
+static void CellControl_DrawWaitDropdownTo(CellControl* ctrl,
+    H3LoadedPcx16* scr, int cell_panel_x, int cell_panel_y, int hover_idx)
+{
+    if (!ctrl || ctrl->expanded != CEX_WAIT || !scr) return;
+    H3Font* fntS = GetSmallFont();
+    if (!fntS) return;
+
+    // 显示顺序与常量一致：无（默认）在最上。
+    static const char* const kKeys[3] = {
+        "cell.wait_none", "cell.wait_every", "cell.wait_smart",
+    };
+    const int cur = (ctrl->data.rule.waitMode < AW_COUNT)
+        ? (int)ctrl->data.rule.waitMode : (int)AW_NONE;
+    for (int i = 0; i < 3; ++i) {
+        CellControl_DrawDropdownItem(scr, fntS, T(kKeys[i]), i,
+            cell_panel_x, cell_panel_y,
+            i == cur, i == hover_idx, false,
+            CC_TOP_Y + CC_ROW_H, CC_WAIT_DD_X, CC_WAIT_DD_W);
+    }
+}
+
 // 统一绘制当前展开列表（面板层第二趟调用）
 static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
     int cell_panel_x, int cell_panel_y, int hover_idx)
@@ -1249,6 +1337,9 @@ static void CellControl_DrawExpandedTo(CellControl* ctrl, H3LoadedPcx16* scr,
         break;
     case CEX_PROTECT:
         CellControl_DrawProtectDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
+        break;
+    case CEX_WAIT:
+        CellControl_DrawWaitDropdownTo(ctrl, scr, cell_panel_x, cell_panel_y, hover_idx);
         break;
     default:
         break;
@@ -1279,6 +1370,8 @@ static int CellControl_GetExpandedItemCount(CellControl* ctrl)
     }
     case CEX_PROTECT:
         return (int)H3AutoPolicy::PM_COUNT;
+    case CEX_WAIT:
+        return (int)H3AutoPolicy::AW_COUNT;
     default:
         return 0;
     }
@@ -1298,10 +1391,20 @@ enum CellHitArea
     CELL_HIT_DROP,       // 当前展开列表
     CELL_HIT_PROTECT_MODE,       // 保活方式下拉框（剩余数量/损失量）
     CELL_HIT_PROTECT_COUNT,     // 「剩≤」数量阈值数字框（方式=按剩余数量）
+    CELL_HIT_WAIT,              // 等待方式下拉框（无/每回合/智能）
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
 };
+
+// 等待方式的单行提示。收起时用当前选中项，展开时用悬停项。
+static const char* CellControl_WaitTip_(int mode)
+{
+    const char* key = mode == (int)H3AutoPolicy::AW_EVERY_TURN ? "tips.wait_opt1"
+        : mode == (int)H3AutoPolicy::AW_SMART ? "tips.wait_opt2"
+        : "tips.wait_opt0";
+    return T(key);
+}
 
 // 保活方式的单行提示。收起时用当前选中项，展开时用悬停项。
 static const char* CellControl_ProtectTip_(int mode)
@@ -1374,6 +1477,9 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
     case CELL_HIT_PROTECT_MODE:
         return CellControl_ProtectTip_(
             ctrl ? (int)ctrl->data.rule.protectMode : 0);
+    case CELL_HIT_WAIT:
+        return CellControl_WaitTip_(
+            ctrl ? (int)ctrl->data.rule.waitMode : 0);
     case CELL_HIT_PROTECT_COUNT:
         return T("tips.cell_protect_count");
     case CELL_HIT_DROP:
@@ -1386,6 +1492,8 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
             };
             return CellControl_ProtectTip_(kOrder[hover_idx]);
         }
+        if (ctrl && ctrl->expanded == CEX_WAIT && hover_idx >= 0 && hover_idx < 3)
+            return CellControl_WaitTip_(hover_idx);
         return T("tips.cell_drop");
     default:
         break;
@@ -1425,22 +1533,26 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
         }
     }
 
-    // 行动下拉：小列2 上行
-    if (ctrl->expanded != CEX_ACTION && in_box(CC_COL2_X, CC_TOP_Y, CC_COL2_W))
+    // 等待方式下拉：上行最左（行动下拉之前）
+    if (ctrl->expanded != CEX_WAIT && in_box(CC_WAIT_DD_X, CC_TOP_Y, CC_WAIT_DD_W))
+        return CELL_HIT_WAIT;
+
+    // 行动下拉：上行，位于等待方式组之后
+    if (ctrl->expanded != CEX_ACTION
+        && in_box(CC_ACTION_DD_X, CC_TOP_Y, CC_ACTION_DD_W))
         return CELL_HIT_ACTION;
 
     if (needs_target) {
         if (ctrl->data.rule.action == AA_MOVE) {
-            // 循环移动：按布局反算的槽宽命中；只暴露已有项和末尾追加项。
+            // 循环移动：按三行布局反算的槽位命中；只暴露已有项和末尾追加项。
             const int gap = CC_PATH_SLOT_GAP;
             const int slot_w = CC_MOVE_SLOT_W;
-            const int per_row = CC_MOVE_SLOTS_PER_ROW;
             for (int index = 0; index < MOVE_WAYPOINT_CAPACITY; ++index) {
-                const int row = index / per_row;
-                const int col = index % per_row;
-                if (row > 1) break;
-                const int x = CC_COL3_X + col * (slot_w + gap);
-                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                int row = 0, col = 0;
+                if (!CellControl_PathSlotRowCol_(index, slot_w, &row, &col))
+                    break;
+                const int x = CellControl_PathRowX_(row) + col * (slot_w + gap);
+                const int y = CellControl_PathRowY_(row);
                 if (local_x >= x && local_x < x + slot_w
                     && local_y >= y && local_y < y + CC_ROW_H
                     && (index < ctrl->data.rule.target.moveWaypointCount
@@ -1451,16 +1563,15 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                 }
             }
         } else if (melee) {
-            // 循环近战：按布局反算的槽宽命中；只暴露已有项和末尾追加项。
+            // 循环近战：按三行布局反算的槽位命中；只暴露已有项和末尾追加项。
             const int gap = CC_PATH_SLOT_GAP;
             const int slot_w = CC_MELEE_SLOT_W;
-            const int per_row = CC_MELEE_SLOTS_PER_ROW;
             for (int index = 0; index < MELEE_PAIR_CAPACITY; ++index) {
-                const int row = index / per_row;
-                const int col = index % per_row;
-                if (row > 1) break;
-                const int x = CC_COL3_X + col * (slot_w + gap);
-                const int y = (row == 0) ? CC_TOP_Y : CC_BOT_Y;
+                int row = 0, col = 0;
+                if (!CellControl_PathSlotRowCol_(index, slot_w, &row, &col))
+                    break;
+                const int x = CellControl_PathRowX_(row) + col * (slot_w + gap);
+                const int y = CellControl_PathRowY_(row);
                 if (local_x >= x && local_x < x + slot_w
                     && local_y >= y && local_y < y + CC_ROW_H
                     && (index < ctrl->data.rule.target.meleePairCount
@@ -1471,15 +1582,15 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                 }
             }
         } else {
-            // 选择器：小列3上行
+            // 选择器：第三列上行
             if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y, CC_COL3_W))
                 return CELL_HIT_SELECTOR;
         }
     }
 
-    // 降级复选框：统一在小列2下行（行动下拉正下方）
+    // 降级复选框：行动下拉正下方（等待方式组不占这一行）
     if (shows_fallback) {
-        if (local_x >= CC_COL2_X && local_x < CC_COL2_X + CC_COL2_W
+        if (local_x >= CC_COL2_X && local_x < CC_COL2_X + CC_FALLBACK_W
             && local_y >= CC_BOT_Y && local_y < CC_BOT_Y + CC_ROW_H)
             return CELL_HIT_CHECKBOX;
     }
@@ -1562,6 +1673,13 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
     CellHitArea hit = CellControl_HitTestInCell(ctrl, mouse_local_x, mouse_local_y);
 
     if (msg_type == 4) { // LButtonDown
+        if (hit == CELL_HIT_WAIT) {
+            ctrl->expanded = (ctrl->expanded == CEX_WAIT) ? CEX_NONE : CEX_WAIT;
+            ctrl->wait_pressed = true;
+            ctrl->hover_item = -1;
+            ctrl->dirty = true;
+            return true;
+        }
         if (hit == CELL_HIT_ACTION) {
             ctrl->expanded = (ctrl->expanded == CEX_ACTION) ? CEX_NONE : CEX_ACTION;
             ctrl->action_pressed = true;
@@ -1700,6 +1818,16 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                     if (idx < 3)
                         ctrl->data.rule.protectMode =
                             (uint8_t)kPick[idx];
+                } else if (ctrl->expanded == CEX_WAIT) {
+                    // 与展开列表同一显示顺序：无 / 每回合 / 智能。
+                    static const int kPick[3] = {
+                        (int)H3AutoPolicy::AW_NONE,
+                        (int)H3AutoPolicy::AW_EVERY_TURN,
+                        (int)H3AutoPolicy::AW_SMART,
+                    };
+                    if (idx < 3)
+                        ctrl->data.rule.waitMode =
+                            (uint8_t)kPick[idx];
                 } else if (ctrl->expanded == CEX_STAND || ctrl->expanded == CEX_ATTACK) {
                     int hexes[165];
                     const int n = CellControl_BuildMeleeHexList(ctrl, hexes);
@@ -1726,6 +1854,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                 ctrl->action_pressed = false;
                 ctrl->selector_pressed = false;
                 ctrl->protect_pressed = false;
+                ctrl->wait_pressed = false;
                 ctrl->dirty = true;
                 return true;
             }
@@ -1733,6 +1862,7 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         ctrl->action_pressed = false;
         ctrl->selector_pressed = false;
         ctrl->protect_pressed = false;
+        ctrl->wait_pressed = false;
         ctrl->dirty = true;
     }
 
