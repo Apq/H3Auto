@@ -77,9 +77,14 @@ static bool g_pipeline_morale_extra = false;
 static _BattleStack_* g_wait_submitted_stack = nullptr;
 static int g_wait_submitted_turn = -1;
 // 选过「等待」后再次轮到：等待是一种行动选择——现在轮到它但先不动，等其它
-// 部队动完会再次轮到它，那时不能再等待，要执行配置动作。用该记号把这次激活
-// 标成“本次行动”，别被士气额外行动的循环语义吃掉（否则循环移动会变原地防御）。
-// 记号只消费一次；bit25 已清说明进了新回合，同样作废。
+// 部队动完会再次轮到它，那时不能再等待，要执行配置动作。
+// 注意原版士气口径（2026-10-14 用户口径 + SoD 反编译核对）：**等待不掷士气**，
+// 防御也不掷（FUN_00464500 遇 bit27=defending 直接返回）；只有 WALK/SHOOT/
+// 近战结算/CATAPULT/MONSTER_SPELL 这些行动结算时才掷，成功才置 bit24 并追加
+// 一次行动。所以再次轮到它时 bit24 必然未置位，那次行动就是普通行动；若这次
+// 行动掷出士气，之后的额外行动才走 morale_extra 逻辑。
+// 该记号只用于日志与「不能连等两次」的显式判定；bit25 已清说明进了新回合，
+// 记号同时作废。
 static _BattleStack_* g_wait_again_stack = nullptr;
 static bool g_pipeline_wait_again = false;
 
@@ -2367,8 +2372,8 @@ static bool StackIsWaiting_(_BattleStack_* stack)
 }
 
 // 是否需要在执行配置动作前先提交等待（等待方式=每回合）。
-// 战争机器不参与等待；士气额外行动发生在回合尾部，也不再等待；
-// 主动作本身就是等待时不重复。
+// 战争机器不参与等待；等待本身不掷士气，但士气额外行动是「某个行动结算后」
+// 追加的，那时本回合已经行动过，不再等待；主动作本身就是等待时不重复。
 static bool ShouldSubmitWaitFirst_(_BattleMgr_* mgr, _BattleStack_* self,
     const AutoStackRule& rule)
 {
@@ -2423,8 +2428,7 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     // 无回合游标，自然再执行一次。使用时重新核对当前部队的士气成功标志，
     // 不能比较 turn：士气额外行动入口已经把 turn 加一。
     const bool morale_extra = g_pipeline_morale_extra
-        && StackHasGoodMorale_(self)
-        && !g_pipeline_wait_again; // 选过等待后再次轮到＝本次行动，不套士气循环语义
+        && StackHasGoodMorale_(self);
     if (morale_extra && rule.action == AA_MOVE) {
         LogInfo("[Auto] morale extra: MOVE -> DEFEND slot=%d",
             self->army_slot_ix);
@@ -2551,7 +2555,8 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
 
     // 等待方式=每回合：本次轮到先提交「等待」，等其它部队动完再次轮到它时
     // 再执行配置动作。等待是一次行动选择、不是「已处理」——不能用 PS_HANDLED
-    // 挡住再次轮到的控制权，否则这支部队本回合永远不会动。
+    // 挡住再次轮到的控制权，否则这支部队本回合永远不会动。等待不掷士气，
+    // 士气只会出现在真正行动的那一次之后。
     if (ShouldSubmitWaitFirst_(mgr, self, rule)) {
         if (SubmitWait_(mgr, self)) {
             g_wait_submitted_stack = self;
@@ -2814,8 +2819,9 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
             const bool morale_extra = StackHasGoodMorale_(current_stack);
             // 选过等待后再次轮到：我们本次轮到让它等待过，且 bit25 仍在
             // （等待已被原版消费）= 这次就是「等其它部队动完后再轮到它」，
-            // 要按配置行动，不能按士气额外行动的循环语义处理。
-            // 记号只消费一次：再下一次激活（真·士气额外行动）走原逻辑。
+            // 按配置执行本次行动。等待不掷士气，所以这里 bit24 必然未置位，
+            // 走普通行动路径；本次行动若掷出士气，之后的额外行动再走
+            // morale_extra 逻辑（记号此时已消费，不会误判）。
             if (g_wait_again_stack == current_stack
                 && StackIsWaiting_(current_stack)) {
                 g_pipeline_wait_again = true;
@@ -2829,8 +2835,8 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
             }
             g_pipeline_stage = PS_IDLE;
             g_pipeline_action_landed = false;
-            g_pipeline_morale_extra = morale_extra && !g_pipeline_wait_again;
-            if (morale_extra && !g_pipeline_wait_again)
+            g_pipeline_morale_extra = morale_extra;
+            if (morale_extra)
                 LogInfo("[Auto] morale re-action: reset pipeline slot=%d cid=0x%X turn=%d",
                     current_stack->army_slot_ix,
                     current_stack->creature_id, turn);
