@@ -405,15 +405,17 @@ static int ParseHotkeyVk_(const char* text, int default_vk, bool letter_only)
 // 战斗存档库（§17 智能存读档）：<游戏根>\Games\<地图名>\Auto\ 下，每场
 // 战斗（指纹）一个文件 <16位十六进制指纹>.json，同场多次「确定」各存
 // 一条，按时间升序排列，只保留最近 kBattlesKeep_ 条（旧的丢弃）。JSON：
-//   {"version":6,"battle":"<hex16>","entries":[
+//   {"version":7,"battle":"<hex16>","entries":[
 //     {"time":"...","active":1..5,"profiles":[5 个方案对象]}]}
 // 方案对象按字段展开：stopTurns、summon、army[]、status、forcefield。
 // status.attacks 必需；每条严格含 spell/target/positions，旧部队 spells 不再接受。
 // forcefield.anchor_hex 必须是两整数数组；army[].rule.waitMode 是等待方式
-// （0=无、1=每回合、2=智能）。只接受 v6 和对应战斗指纹；v6 之前的存档一律拒绝，
-// 视为没有存档（2026-10-14 用户口径：格式变更不做旧档兼容）。
-// 数组只写实际数量。旧版本与 H3AP 数字串一律拒绝，视为没有存档。
-// 跨文件再按 mtime LRU 保留最近 kBattlesKeep_ 场。
+// （0=无、1=每回合、2=不反兵攻城）；army[].rule.siegeSafeHex 是不反兵攻城的
+// 安全位置格（仅该动作且已设置时写）。只接受 v7 和对应战斗指纹；v7 之前的
+// 存档一律拒绝，视为没有存档（2026-10-14 用户口径：格式变更不做旧档兼容；
+// v7 = 行动新增 AA_SIEGE、等待方式第 3 项语义改为不反兵攻城、新增
+// siegeSafeHex 字段）。数组只写实际数量。旧版本与 H3AP 数字串一律拒绝，
+// 视为没有存档。跨文件再按 mtime LRU 保留最近 kBattlesKeep_ 场。
 //
 // 目录规则（2026-10-06 对齐 H3BattleStore）：地图名读 HD 游戏名链
 //   *(char**)(*(DWORD*)0x699538 + 0x1fb40)（热座=玩家输入、遭遇战=地图名；
@@ -684,7 +686,7 @@ static bool SaveBattleStoreRaw_(unsigned long long fp,
         });
     }
     const BattleJson root = {
-        {"version", 6},
+        {"version", 7},
         {"battle", battle},
         {"entries", entries},
     };

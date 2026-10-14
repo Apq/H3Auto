@@ -63,6 +63,12 @@ static bool ParseRuleJson_(const BattleJson& obj, AutoStackRule* rule)
     const int wait_mode = JsonInt_(obj, "waitMode", (int)AW_NONE);
     r.waitMode = (wait_mode >= 0 && wait_mode < (int)AW_COUNT)
         ? static_cast<uint8_t>(wait_mode) : (uint8_t)AW_NONE;
+    // 不反兵攻城的安全位置（v7 新增；-1=未设置）。
+    if (obj.contains("siegeSafeHex") && obj["siegeSafeHex"].is_number_integer()) {
+        const int safe = obj["siegeSafeHex"].get<int>();
+        if (safe >= 1 && safe <= 185)
+            r.target.siegeSafeHex = static_cast<int16_t>(safe);
+    }
     const int mode = JsonInt_(obj, "protectMode", (int)PM_NONE);
     r.protectMode = (mode == (int)PM_COUNT_BELOW
             || mode == (int)PM_LOSS_GT_RESTORE)
@@ -99,6 +105,9 @@ static BattleJson RuleToJson_(const AutoStackRule& rule)
                 (int)rule.target.meleeAttackHexes[i]}));
         obj["melee"] = pairs;
     }
+    // 不反兵攻城的安全位置：只在该动作且已设置时写。
+    if (rule.action == AA_SIEGE && rule.target.siegeSafeHex >= 1)
+        obj["siegeSafeHex"] = (int)rule.target.siegeSafeHex;
     return obj;
 }
 
@@ -324,6 +333,6 @@ static bool ParseRecordJson_(const BattleJson& obj, BattleStoreRecord* rec)
 static bool IsBattleStoreJsonVersion_(const BattleJson& root)
 {
     return root.is_object() && root.contains("version")
-        && root["version"].is_number_integer() && root["version"] == 6;
+        && root["version"].is_number_integer() && root["version"] == 7;
 }
 

@@ -158,6 +158,9 @@ struct StackTrackEntry {
     // 本场运行游标：配置只保存序列，进度只存在跟踪表。
     int   move_cursor;
     int   melee_cursor;
+    // 不反兵攻城的两步游标：0=入城攻击步（要先等待），1=退避步（不等待）。
+    // 每一步成功落地后才翻转，失败本回合重试同一步。
+    int   siege_phase;
 };
 static StackTrackEntry g_stack_track[21] = {};
 static int  g_track_side = -1;
@@ -297,6 +300,7 @@ static void BindStackTrackingFromBattle_()
         t.alive = s->count_current > 0;
         t.move_cursor = 0;
         t.melee_cursor = 0;
+        t.siege_phase = 0; // 开局从「入城攻击步」起（先等待）
 
         // 绑定时刻已在场的召唤物（重开面板再勾号的场景）：
         // 召唤启用时直接套用共享规则。
@@ -393,6 +397,7 @@ static void UpdateStackTracking_()
             t.alive = true;
             t.move_cursor = 0;
             t.melee_cursor = 0;
+            t.siege_phase = 0;
 
             g_active_rules[i] = g_summon[g_active_profile].summon_rule;
             g_track_active = true;
@@ -2356,6 +2361,146 @@ static bool SubmitWait_(_BattleMgr_* mgr, _BattleStack_* self)
     return true;
 }
 
+// 战场六向邻格：直接用原版战斗管理器已建好的 adjacentSquares，
+// 与面板拾取/几何判定同一份数据（不自己算 y 奇偶）。有效格 1..185。
+static int SiegeHexNeighbors_(_BattleMgr_* mgr, int hex, int out[6])
+{
+    if (!mgr || !out) return 0;
+    if (hex < 1 || hex > 185) return 0;
+    int n = 0;
+    __try {
+        H3CombatManager* cm = H3CombatManager::Get();
+        if (!cm) return 0;
+        const H3AdjacentSquares& adjacent = cm->adjacentSquares[hex];
+        const int16_t* original = &adjacent.topRight;
+        for (int i = 0; i < 6; ++i) {
+            const int nb = original[i];
+            if (nb < 1 || nb > 185) continue;
+            out[n++] = nb;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogError("[Auto] 邻格读取异常 code=0x%08X hex=%d", GetExceptionCode(), hex);
+        return 0;
+    }
+    return n;
+}
+
+// 该格上是否有任意部队（含己方；头/尾两格都算）。
+static _BattleStack_* StackOccupyingHex_(_BattleMgr_* mgr, int hex)
+{
+    if (!mgr || hex < 1 || hex > 185) return nullptr;
+    for (int side = 0; side < 2; ++side) {
+        for (int i = 0; i < 21; ++i) {
+            _BattleStack_* t = &mgr->stack[side][i];
+            if (t->count_current <= 0 || t->count_at_start <= 0) continue;
+            if (t->creature_id < 0) continue;
+            if (StackHex_(t) == hex) return t;
+            int second = -1;
+            __try {
+                second = THISCALL_1(int, 0x4463C0, t);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                second = -1;
+            }
+            if (second == hex) return t;
+        }
+    }
+    return nullptr;
+}
+
+// 找一个能站到目标敌人旁边、且本回合可达的空格（穿开着的城门由原版
+// 可达性判定负责：不可达/没门时 IsMoveTargetReachable_ 会否掉）。
+// 已站在相邻格时直接用它（原地出手）。
+static int FindMeleeStandHex_(_BattleMgr_* mgr, _BattleStack_* self, int enemy_hex)
+{
+    int neighbors[6] = {};
+    const int n = SiegeHexNeighbors_(mgr, enemy_hex, neighbors);
+    const int my_hex = StackHex_(self);
+    // 第一优先：已经站在敌人旁边（原地出手，省移动）。
+    for (int i = 0; i < n; ++i)
+        if (neighbors[i] == my_hex) return my_hex;
+    // 第二优先：可达且没被任何部队占住的相邻格。
+    for (int i = 0; i < n; ++i) {
+        const int nb = neighbors[i];
+        if (StackOccupyingHex_(mgr, nb)) continue;
+        if (IsMoveTargetReachable_(mgr, self, nb)) return nb;
+    }
+    return -1;
+}
+
+// 不反兵攻城：两步交替的循环打法。
+//   siege_phase==0 入城攻击步：按「远程飞兵高速优先」自动挑一个敌人，
+//                  找一个可达的相邻格，提交近战（走进去打）。
+//   siege_phase==1 退避步：走到玩家指定的「安全位置」（城外围格）。
+// 每一步只有真正落地才翻转游标；失败本回合重试同一步，游标不动。
+// 士气额外行动（repeat=true）重打当前步，也不翻转游标。
+static bool SubmitSiegeStep_(_BattleMgr_* mgr, _BattleStack_* self,
+    const AutoStackRule& rule, StackTrackEntry& runtime, bool repeat)
+{
+    if (!mgr || !self) return false;
+    int phase = runtime.siege_phase;
+    if (phase != 0 && phase != 1) phase = 0;
+
+    if (phase == 1) {
+        // —— 退避步：不等待，直接退到安全位置 ——
+        const int safe = rule.target.siegeSafeHex;
+        if (safe < 1 || safe > 185) {
+            LogWarn("[Auto] siege safe hex 未设置 slot=%d；本回合交回降级/玩家",
+                self->army_slot_ix);
+            return false;
+        }
+        if (StackHex_(self) == safe) {
+            // 已经在安全位置：这一步等于已完成，游标翻回入城攻击步；
+            // 本回合不再提交动作（由降级链决定防御或交玩家）。
+            runtime.siege_phase = 0;
+            LogInfo("[Auto] siege 已在安全位置 hex=%d slot=%d，游标翻回入城步",
+                safe, self->army_slot_ix);
+            return false;
+        }
+        if (!IsMoveTargetReachable_(mgr, self, safe)) {
+            LogWarn("[Auto] siege 安全位置不可达 slot=%d hex=%d；游标不动",
+                self->army_slot_ix, safe);
+            return false;
+        }
+        if (!WriteAction_(mgr, self, BA_WALK, -1, safe))
+            return false;
+        if (!repeat) runtime.siege_phase = 0;
+        LogInfo("[Auto] siege 退避 slot=%d -> hex=%d%s",
+            self->army_slot_ix, safe, repeat ? " (士气重打)" : "");
+        return true;
+    }
+
+    // —— 入城攻击步：自动挑敌人 + 找相邻格 + 走进去打 ——
+    int side_filter = 1; // 敌方
+    if (rule.target.side == ATS_OWN) side_filter = 0;
+    else if (rule.target.side == ATS_EITHER) side_filter = 2;
+    _BattleStack_* enemy = SelectStackTarget_(mgr, self, rule, side_filter, false);
+    if (!enemy) {
+        LogWarn("[Auto] siege 入城步无目标 slot=%d selector=%d",
+            self->army_slot_ix, (int)rule.target.selector);
+        return false;
+    }
+    const int attack_hex = StackHex_(enemy);
+    if (attack_hex < 1 || attack_hex > 185) return false;
+    const int stand_hex = FindMeleeStandHex_(mgr, self, attack_hex);
+    if (stand_hex < 0) {
+        LogWarn("[Auto] siege 入城步无可用站位 slot=%d enemy_slot=%d enemy_hex=%d",
+            self->army_slot_ix, enemy->army_slot_ix, attack_hex);
+        return false;
+    }
+
+    // 与近战提交一致：写悬停字段，模拟玩家点过该攻击格。
+    mgr->mouse_coord = attack_hex;
+    mgr->attacker_coord = stand_hex;
+    mgr->move_type = 7;
+    if (!WriteAction_(mgr, self, BA_WALK_ATTACK, stand_hex, attack_hex))
+        return false;
+    if (!repeat) runtime.siege_phase = 1;
+    LogInfo("[Auto] siege 入城攻击 slot=%d stand=%d attack=%d enemy_slot=%d cid=0x%X%s",
+        self->army_slot_ix, stand_hex, attack_hex, enemy->army_slot_ix,
+        enemy->creature_id, repeat ? " (士气重打)" : "");
+    return true;
+}
+
 // 原版等待标志 = creature info.flags bit25（H3CreatureInformation::waiting）。
 // 新回合由游戏自己用 0xF8FFFFFF 清 bit24/25/26，所以这一位就是「本回合已等待」。
 static bool StackIsWaiting_(_BattleStack_* stack)
@@ -2371,16 +2516,26 @@ static bool StackIsWaiting_(_BattleStack_* stack)
     }
 }
 
-// 是否需要在执行配置动作前先提交等待（等待方式=每回合）。
+// 是否需要在执行配置动作前先提交等待。
 // 战争机器不参与等待；等待本身不掷士气，但士气额外行动是「某个行动结算后」
 // 追加的，那时本回合已经行动过，不再等待；主动作本身就是等待时不重复。
+// 等待规则分三档：
+//   AW_NONE       不等待。
+//   AW_EVERY_TURN 每次轮到都先等待，再次轮到时执行配置动作。
+//   AW_SIEGE      不反兵攻城的两步各有各的规则：入城攻击那一步先等待
+//                 （把自己挪到本回合最后，进去打完敌人行动阶段够不到它），
+//                 退避那一步不等待（它最快，要趁敌人没动先退回城外）。
 static bool ShouldSubmitWaitFirst_(_BattleMgr_* mgr, _BattleStack_* self,
-    const AutoStackRule& rule)
+    const AutoStackRule& rule, const StackTrackEntry& runtime)
 {
     if (!mgr || !self) return false;
-    // 「无」不等待；「智能」策略待定，当前与「无」同行为。
-    if (rule.waitMode != AW_EVERY_TURN) return false;
     if (rule.action == AA_WAIT) return false;
+    if (rule.waitMode == AW_NONE) return false;
+    if (rule.waitMode == AW_SIEGE
+        && (rule.action != AA_SIEGE || runtime.siege_phase != 0))
+        return false; // 退避步（或没选攻城动作）不等待
+    if (rule.waitMode != AW_EVERY_TURN && rule.waitMode != AW_SIEGE)
+        return false;
     if (g_pipeline_wait_again) return false; // 选过等待后再次轮到：不能再等待
     if (IsWarMachineCid_(self->creature_id)) return false;
     if (g_pipeline_morale_extra && StackHasGoodMorale_(self)) return false;
@@ -2424,8 +2579,9 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
     // —— 士气高涨的额外行动：循环语义作用于回合，不作用于同回合的额外行动 ——
     // 循环移动：无条件防御（不受“允许降级为防御”控制）；路径游标已在本回合
     // 正常推进，下回合走下一点。循环近战：重打本回合刚执行过的组合，游标
-    // 不往前推进（下回合继续原顺序）。其余动作（远程/急救/防御/召唤物走位）
-    // 无回合游标，自然再执行一次。使用时重新核对当前部队的士气成功标志，
+    // 不往前推进（下回合继续原顺序）。不反兵攻城：重打当前那一步，游标不翻转
+    // （见 SubmitSiegeStep_ 的 repeat 参数）。其余动作（远程/急救/防御/召唤物
+    // 走位）无回合游标，自然再执行一次。使用时重新核对当前部队的士气成功标志，
     // 不能比较 turn：士气额外行动入口已经把 turn 加一。
     const bool morale_extra = g_pipeline_morale_extra
         && StackHasGoodMorale_(self);
@@ -2460,6 +2616,10 @@ static bool SubmitConfiguredUnitAction_(_BattleMgr_* mgr, _BattleStack_* self,
             SubmitMelee_(mgr, self, rule, runtime, melee_repeat_pair));
     case AA_RANGED_ATTACK:
         return fallback_or_fail(SubmitRanged_(mgr, self, rule));
+    case AA_SIEGE:
+        // 不反兵攻城：两步交替，士气额外行动重打当前步、不翻转游标。
+        return fallback_or_fail(
+            SubmitSiegeStep_(mgr, self, rule, runtime, morale_extra));
     case AA_FIRST_AID:
         if (cid != WM_FIRST_AID) return false;
         return SubmitFirstAid_(mgr, self, rule); // 帐篷不降级
@@ -2557,7 +2717,7 @@ static bool TrySubmitConfiguredAction_(_BattleMgr_* mgr, bool allow_unit_action)
     // 再执行配置动作。等待是一次行动选择、不是「已处理」——不能用 PS_HANDLED
     // 挡住再次轮到的控制权，否则这支部队本回合永远不会动。等待不掷士气，
     // 士气只会出现在真正行动的那一次之后。
-    if (ShouldSubmitWaitFirst_(mgr, self, rule)) {
+    if (ShouldSubmitWaitFirst_(mgr, self, rule, runtime)) {
         if (SubmitWait_(mgr, self)) {
             g_wait_submitted_stack = self;
             g_wait_submitted_turn = GetCurrentBattleTurn_(mgr);

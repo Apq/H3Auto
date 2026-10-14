@@ -18,6 +18,12 @@ enum AutoActionKind : uint8_t {
     // 召唤物共享规则专用（普通部队行动下拉不出现）：
     AA_SCATTER,       // 散开：与己方其它部队分级拉开距离（≥2 格 → ≥1 格 → 原地防御）
     AA_RANDOM_MOVE,   // 随机移动：可达格均匀随机
+    // 不反兵攻城（2026-10-14 用户提出）：不反兵（九头/蛇女等）在攻城战里的循环打法。
+    // 「等待」是一种部队行动选择——现在轮到它但先不动，等其它部队动完再次轮到它；
+    // 所以第 1 回合：先等待，再次轮到才穿开着的城门进去打一个敌人（目标自动按
+    // 「远程飞兵高速优先」挑）；第 2 回合：不等待，直接退到玩家指定的「安全位置」
+    // （退回城外，让敌人行动阶段够不到它）。两步交替循环。详见 docs/02 对应小节。
+    AA_SIEGE,
     AA_COUNT
 };
 
@@ -71,6 +77,9 @@ struct AutoTargetRule {
     AutoTargetSelector selector;
     int16_t meleeStandHex;
     int16_t meleeAttackHex;
+    // 不反兵攻城的「安全位置」：退避那一步走到这里（攻城的城外围格）。
+    // 只对该动作有意义，-1=未设置。
+    int16_t siegeSafeHex;
     int16_t moveWaypoints[MOVE_WAYPOINT_CAPACITY];
     int8_t moveWaypointCount;
     int16_t meleeStandHexes[MELEE_PAIR_CAPACITY];
@@ -90,11 +99,12 @@ enum ProtectMode : uint8_t {
 // 等待方式（部队级，三选一）：游戏内「等待」是每支部队自己的一次机会。
 // AW_NONE=不等待（默认）：轮到直接执行配置动作。
 // AW_EVERY_TURN=每回合：每次轮到它时先选「等待」，等其它部队动完再次轮到它时再执行配置动作。
-// AW_SMART=智能：当前与不等待同行为（策略待定），仅存档与界面占位。
+// AW_SIEGE=不反兵攻城：这套打法自己的等待规则——入城攻击那一步先等待，退避那一步不等待。
+// （2026-10-14 用户裁定：原「智能」占位项改名为「不反兵攻城」，即本打法的等待规则。）
 enum AutoWaitMode : uint8_t {
     AW_NONE = 0,
     AW_EVERY_TURN,
-    AW_SMART,
+    AW_SIEGE,
     AW_COUNT
 };
 
@@ -122,6 +132,7 @@ inline AutoStackRule MakeDefaultRule()
     r.target.selector = SEL_RANDOM;
     r.target.meleeStandHex = -1;
     r.target.meleeAttackHex = -1;
+    r.target.siegeSafeHex = -1;
     for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
         r.target.moveWaypoints[i] = -1;
     for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
@@ -718,6 +729,8 @@ inline int GetAllowedActions(int creature_type, bool is_ranged,
         push(AA_DEFEND);
         push(AA_MOVE);
         push(AA_MELEE_ATTACK);
+        // 不反兵攻城：普通部队都能选（打法是玩家自己按不反兵部队去用）。
+        push(AA_SIEGE);
         if (is_ranged) push(AA_RANGED_ATTACK);
         break;
     }
@@ -727,7 +740,8 @@ inline int GetAllowedActions(int creature_type, bool is_ranged,
 inline bool ActionNeedsTarget(AutoActionKind action)
 {
     return action == AA_MOVE || action == AA_MELEE_ATTACK
-        || action == AA_RANGED_ATTACK || action == AA_FIRST_AID;
+        || action == AA_RANGED_ATTACK || action == AA_FIRST_AID
+        || action == AA_SIEGE; // 需要第三列画「安全位置」槽
 }
 
 inline bool ActionUsesTwoHex(AutoActionKind action)
@@ -749,6 +763,7 @@ inline AutoTargetRule DefaultTargetForAction(AutoActionKind action)
     AutoTargetRule t = {};
     t.meleeStandHex = -1;
     t.meleeAttackHex = -1;
+    t.siegeSafeHex = -1; // ={} 只会清零；未设置必须显式 -1（0 不是合法格）
     for (int i = 0; i < MOVE_WAYPOINT_CAPACITY; ++i)
         t.moveWaypoints[i] = -1;
     for (int i = 0; i < MELEE_PAIR_CAPACITY; ++i) {
@@ -767,6 +782,13 @@ inline AutoTargetRule DefaultTargetForAction(AutoActionKind action)
         t.kind = AT_STACK;
         t.side = ATS_ENEMY;
         t.selector = SEL_RANDOM;
+        break;
+    // 不反兵攻城：入城打谁由插件自动挑，规则固定用「远程飞兵高速优先」
+    // （2026-10-14 用户裁定：使用远程攻击类的该条规则）。
+    case AA_SIEGE:
+        t.kind = AT_STACK;
+        t.side = ATS_ENEMY;
+        t.selector = SEL_RANGED_SPEED;
         break;
     case AA_FIRST_AID:
         t.kind = AT_STACK;
@@ -1423,9 +1445,19 @@ inline void NormalizeRule(AutoStackRule* rule, int creature_type, bool is_ranged
         rule->target.kind = AT_POSITION;
         rule->target.selector = SEL_RANDOM;
         break;
+    // 不反兵攻城：目标固定按「远程飞兵高速优先」自动挑，玩家只配安全位置。
+    case AA_SIEGE:
+        rule->target.kind = AT_STACK;
+        rule->target.side = ATS_ENEMY;
+        rule->target.selector = SEL_RANGED_SPEED;
+        if (rule->target.siegeSafeHex < 1 || rule->target.siegeSafeHex > 185)
+            rule->target.siegeSafeHex = -1;
+        break;
     default:
         break;
     }
+    // 其它动作不留安全位置残值（换动作时由面板重新默认目标）。
+    if (rule->action != AA_SIEGE) rule->target.siegeSafeHex = -1;
 
     if (!ActionUsesTwoHex(rule->action)) {
         AutoTargetSelector selectors[SEL_COUNT] = {};
@@ -1473,6 +1505,7 @@ using H3AutoPolicy::AA_RANGED_ATTACK;
 using H3AutoPolicy::AA_FIRST_AID;
 using H3AutoPolicy::AA_SCATTER;
 using H3AutoPolicy::AA_RANDOM_MOVE;
+using H3AutoPolicy::AA_SIEGE;
 using H3AutoPolicy::AA_COUNT;
 using H3AutoPolicy::AT_NONE;
 using H3AutoPolicy::AT_STACK;
@@ -1497,7 +1530,7 @@ using H3AutoPolicy::PM_NONE;
 using H3AutoPolicy::AutoWaitMode;
 using H3AutoPolicy::AW_NONE;
 using H3AutoPolicy::AW_EVERY_TURN;
-using H3AutoPolicy::AW_SMART;
+using H3AutoPolicy::AW_SIEGE;
 using H3AutoPolicy::AW_COUNT;
 using H3AutoPolicy::SUMMON_ELEMENT_COUNT;
 using H3AutoPolicy::SUMMON_COMBINE_AND;

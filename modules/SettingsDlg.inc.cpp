@@ -114,6 +114,8 @@ static int s_melee_pick_stand_hex = -1;
 static bool s_pick_wait_button_release = false;
 static int s_move_pick_cell = -1;
 static int s_move_pick_wp = -1;
+// 不反兵攻城「安全位置」拾取：s_siege_safe_pick_cell 为卡片索引，单击 1 格。
+static int s_siege_safe_pick_cell = -1;
 static bool s_forcefield_pick = false;
 static int s_forcefield_pick_slot = -1;
 static void EndForceFieldPick_();
@@ -1135,6 +1137,7 @@ static void RebindVisibleCells_()
             ctrl->hover_item = -1;
             ctrl->melee_pair_pick_request = 0;
             ctrl->move_path_pick_request = 0;
+            ctrl->siege_safe_pick_request = 0;
             ctrl->dirty = true;
         }
     }
@@ -1354,6 +1357,7 @@ void OpenSettingsPanel_()
     s_melee_pick_stand_hex = -1;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
+    s_siege_safe_pick_cell = -1;
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
@@ -1534,6 +1538,7 @@ void CloseSettingsPanel()
     s_pick_wait_button_release = false;
     s_move_pick_cell = -1;
     s_move_pick_wp = -1;
+    s_siege_safe_pick_cell = -1;
     s_help_modal_open = false;
     s_battle_dd_open = false;
     s_battle_dd_hover = -1;
@@ -2604,6 +2609,15 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             LogInfo("[Panel] 进入循环近战拾取 cell=%d pair=%d",
                                 i, s_melee_pick_pair);
                             ctrl->melee_pair_pick_request = 0;
+                        }
+                        // 不反兵攻城：安全位置只点 1 格（同循环移动交互）。
+                        if (ctrl->siege_safe_pick_request != 0) {
+                            s_siege_safe_pick_cell = i;
+                            s_panel_hidden_for_pick = true;
+                            s_pick_wait_button_release = true;
+                            HidePanelForPick_();
+                            LogInfo("[Panel] 进入安全位置拾取 cell=%d", i);
+                            ctrl->siege_safe_pick_request = 0;
                         }
                         // 进入拾取后必须保持面板隐藏；只在普通卡片操作时重画。
                         if (!s_panel_hidden_for_pick)

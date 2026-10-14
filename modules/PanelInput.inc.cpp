@@ -517,7 +517,7 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     // 用 SquareAtCoordinates(0x464380) 转换，不依赖 mouseCoord 也不恢复 hover，
     // 因此拾取期间游戏不会显示任何与待行动兵种相关的悬停高亮，只有我
     // 们自己的蓝色格子标示。左键松开=确认，右键=取消。
-    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0 || s_forcefield_pick || s_attack_pick_row >= 0)) {
+    if (s_p.active && (s_melee_pick_phase != 0 || s_move_pick_cell >= 0 || s_siege_safe_pick_cell >= 0 || s_forcefield_pick || s_attack_pick_row >= 0)) {
         const int raw = static_cast<int>(msg.command);
         // 只用松开确认；LCLICK_OUTSIDE/RCLICK_OUTSIDE 与 UP 会在同一次点击里连发，
         // 只处理 UP 即可，无需按时间或格号去重。
@@ -920,6 +920,21 @@ static void EndMeleePick_()
     LogInfo("[Panel] 结束循环近战拾取 cell=%d pair=%d", old_cell, old_pair);
 }
 
+// 结束不反兵攻城「安全位置」拾取：恢复面板输入/绘制。
+static void EndSiegeSafePick_()
+{
+    if (s_siege_safe_pick_cell < 0) return;
+    const int old_cell = s_siege_safe_pick_cell;
+    s_siege_safe_pick_cell = -1;
+    s_panel_hidden_for_pick = false;
+    s_pick_wait_button_release = false;
+    RefreshBattleAfterPick_();
+    // 拾取期间 hover 始终保持屏蔽（不再 RestoreBattleHover_），结束时无需重屏蔽。
+    ForcePanelModalDepth_(true);
+    DrawPanelToBuffer_();
+    LogInfo("[Panel] 结束安全位置拾取 cell=%d", old_cell);
+}
+
 // 战场拾取坐标捕获：屏障已吞掉点击（不会触发部队行动），这里只把屏幕坐标
 // 转成 hex 回填。right_click=true 表示取消当前拾取。
 // 战场拾取回填：hex 由屏障处理器从消息坐标通过 SquareAtCoordinates 转换后传入。
@@ -1003,6 +1018,23 @@ static void DoPickCapture_(int hex, bool right_click)
         return;
     }
 
+    // 不反兵攻城「安全位置」：单击 1 格保存；右键取消不改原记录。
+    if (s_siege_safe_pick_cell >= 0 && s_siege_safe_pick_cell < CELL_COUNT) {
+        if (right_click) {
+            EndSiegeSafePick_();
+            return;
+        }
+        CellControl* ctrl = &s_p.cells[s_siege_safe_pick_cell];
+        if (ctrl->has_data && CellControl_HexValid(hex)) {
+            ctrl->data.rule.target.siegeSafeHex = static_cast<int16_t>(hex);
+            ctrl->dirty = true;
+            LogInfo("[Panel] siege safe hex saved cell=%d hex=%d",
+                s_siege_safe_pick_cell, hex);
+            EndSiegeSafePick_();
+        }
+        return;
+    }
+
     // 循环近战连续拾取：第一击保存站立格并保持面板隐藏；第二击选择攻击格。
     // 两格必须不同且相邻；成功后一次性覆盖/追加组合并恢复面板。
     // 右键任一阶段均取消且不改原记录。
@@ -1073,7 +1105,7 @@ static void UpdatePanelModalSuspension_()
     // 手动挂起（s_panel_modal_suspended=true）以让出战场点击。此时不能让
     // 本函数按“无系统模态”把挂起状态重置回 false，否则会立刻重装输入拦截、
     // 吃掉战场点击，导致拾取永远收不到坐标、反复重进选格模式。
-    if (s_move_pick_cell >= 0 || s_melee_pick_phase != 0 || s_forcefield_pick || s_attack_pick_row >= 0) return;
+    if (s_move_pick_cell >= 0 || s_siege_safe_pick_cell >= 0 || s_melee_pick_phase != 0 || s_forcefield_pick || s_attack_pick_row >= 0) return;
     const INT32 modal_depth = *reinterpret_cast<INT32*>(0x69FEA4);
     // The same counter also rises while the game is inactive. Only an in-game
     // modal dialog should hide the panel; clicking outside must leave it intact.

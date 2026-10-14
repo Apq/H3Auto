@@ -254,7 +254,7 @@ static const int MAGIC_ATT_SUB_GAP = 6;                        // 大列内小�
 // 硬编码默认标签（INI 加载失败时使用）
 static const char* DEFAULT_ACTION_LABELS[AA_COUNT] = {
     "手动", "防御", "等待", "循环移动", "循环近战", "远程攻击", "急救治疗",
-    "散开", "随机移动",
+    "散开", "随机移动", "不反兵攻城",
 };
 static const char* DEFAULT_SELECTOR_LABELS[SEL_COUNT] = {
     "随机", "远程飞兵高速优先", "数量最多", "失血比例", "失血数值",

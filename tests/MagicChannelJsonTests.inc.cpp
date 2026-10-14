@@ -53,8 +53,16 @@ static void TestMagicChannelJson()
         melee.target.meleeAttackHexes[1] = 61;
         melee.target.meleeStandHex = 40;
         melee.target.meleeAttackHex = 41;
-        melee.waitMode = AW_SMART;
+        melee.waitMode = AW_SIEGE;
         melee.protectMode = PM_LOSS_GT_RESTORE;
+        // 不反兵攻城（v7）：行动、等待方式与安全位置一起过真实序列化。
+        AutoStackRule& siege = source->rules[p][(p + 1) % 20];
+        siege.action = AA_SIEGE;
+        siege.target.kind = AT_STACK;
+        siege.target.side = ATS_ENEMY;
+        siege.target.selector = SEL_RANGED_SPEED;
+        siege.target.siegeSafeHex = static_cast<int16_t>(17 + p);
+        siege.waitMode = AW_SIEGE;
         source->stop_turns[p] = static_cast<uint16_t>(p * 100);
         SummonProfileFields& summon = source->summon[p];
         summon = MakeDefaultSummonFields();
@@ -112,8 +120,12 @@ static void TestMagicChannelJson()
                 && decoded->forcefield[p].anchor_hex[1] == 120 + p,
             "army slot mapping and forcefield survive each profile");
         Check(decoded->rules[p][p].waitMode == AW_EVERY_TURN
-                && decoded->rules[p][20 - p].waitMode == AW_SMART,
+                && decoded->rules[p][20 - p].waitMode == AW_SIEGE,
             "wait mode survives production codec roundtrip per slot");
+        Check(decoded->rules[p][(p + 1) % 20].action == AA_SIEGE
+                && decoded->rules[p][(p + 1) % 20].target.siegeSafeHex == 17 + p
+                && decoded->rules[p][(p + 1) % 20].waitMode == AW_SIEGE,
+            "siege action, safe hex and wait mode survive codec roundtrip");
         Check(ProfileToJson_(decoded->rules[p], decoded->stop_turns[p],
                 decoded->summon[p], decoded->status[p], decoded->forcefield[p]) == profiles[p],
             "production decoded profile reserializes to the identical JSON object");
@@ -235,15 +247,33 @@ static void TestMagicChannelJson()
         rule = RuleToJson_(MakeDefaultRule());
         rule["waitMode"] = bad_wait;
         unit = MakeDefaultRule();
-        unit.waitMode = AW_SMART;
+        unit.waitMode = AW_SIEGE;
         Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_NONE,
             "out-of-range wait mode clamps to none");
     }
     rule = RuleToJson_(MakeDefaultRule());
-    rule["waitMode"] = AW_SMART;
+    rule["waitMode"] = AW_SIEGE;
     unit = MakeDefaultRule();
-    Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_SMART,
+    Check(ParseRuleJson_(rule, &unit) && unit.waitMode == AW_SIEGE,
         "valid wait mode parses");
+    // 安全位置：合法 1..185 落位，越界忽略回默认 -1，缺失不恢复。
+    rule = RuleToJson_(MakeDefaultRule());
+    rule["action"] = (int)AA_SIEGE;
+    rule["kind"] = (int)AT_STACK;
+    rule["selector"] = (int)SEL_RANGED_SPEED;
+    rule["siegeSafeHex"] = 185;
+    unit = MakeDefaultRule();
+    Check(ParseRuleJson_(rule, &unit) && unit.action == AA_SIEGE
+            && unit.target.siegeSafeHex == 185,
+        "siege safe hex parses inside battle bounds");
+    rule["siegeSafeHex"] = 186;
+    unit = MakeDefaultRule();
+    Check(ParseRuleJson_(rule, &unit)
+            && unit.target.siegeSafeHex == MakeDefaultRule().target.siegeSafeHex,
+        "out-of-bounds siege safe hex ignored");
+    BattleJson siege_json = RuleToJson_(decoded->rules[0][1]);
+    Check(siege_json.contains("siegeSafeHex") && siege_json["siegeSafeHex"] == 17,
+        "siege rule serializes its safe hex");
     BattleJson bad_record = record;
     bad_record["profiles"][0]["status"].erase("attacks");
     Check(!ParseRecordJson_(bad_record, decoded),
@@ -253,12 +283,12 @@ static void TestMagicChannelJson()
     Check(!ParseRecordJson_(bad_record, decoded),
         "record rejects removed army spells field through production profile path");
 
-    Check(IsBattleStoreJsonVersion_(BattleJson{{"version", 6}}),
-        "production root version helper accepts schema v6");
-    for (const BattleJson& version : {BattleJson(4), BattleJson(5), BattleJson(7),
-            BattleJson(true), BattleJson(6.0), BattleJson("6"), max_unsigned})
+    Check(IsBattleStoreJsonVersion_(BattleJson{{"version", 7}}),
+        "production root version helper accepts schema v7");
+    for (const BattleJson& version : {BattleJson(4), BattleJson(5), BattleJson(6),
+            BattleJson(8), BattleJson(true), BattleJson(7.0), BattleJson("7"), max_unsigned})
         Check(!IsBattleStoreJsonVersion_(BattleJson{{"version", version}}),
-            "production root version helper rejects v5 and earlier plus wrong types");
+            "production root version helper rejects v6 and earlier plus wrong types");
     Check(!IsBattleStoreJsonVersion_(BattleJson::object()), "missing root version rejected");
     Check(!IsBattleStoreJsonVersion_(BattleJson::array()), "nonobject root rejected");
     delete decoded;

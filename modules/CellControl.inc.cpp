@@ -59,18 +59,23 @@ static const int CC_LABEL_H  = 11;
 // 让位，行动下拉及其后的第三列整体右移。
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
 static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68（等待方式组起点）
-// 等待方式：「等待方式:」标签 + 三选一下拉（无/每回合/智能）。
+// 等待方式：「等待方式:」标签 + 三选一下拉（无/每回合/不反兵攻城）。
 static const int CC_WAIT_LBL_W = 52;                            // 「等待方式:」
 static const int CC_WAIT_DD_X  = CC_COL2_X + CC_WAIT_LBL_W + 2; // ≈122
-static const int CC_WAIT_DD_W  = 60;                            // 「每回合」+ 箭头
-// 行动下拉：整体右移到等待方式之后。
-static const int CC_ACTION_DD_X = CC_WAIT_DD_X + CC_WAIT_DD_W + 6; // ≈188
-static const int CC_ACTION_DD_W = 76;                              // 「循环近战」+ 箭头
+// 2026-10-14（二次调整）：第三项由「智能」改名为「不反兵攻城」（5 个汉字），
+// 两个下拉都要放下它。硬约束：近战槽前两行每行仍要 4 个（54+3 间距），
+// 即第三列 ≥ 4*57-3=225；下拉文本区 = 宽-20 ≥ 5*11=55，即宽 ≥ 75。
+// 取 76/76、组间 4px：122+76+4+76+4=282，第三列 = 507-282 = 225 恰好双满足
+//（移动槽每行 6 个下限 207 也满足）。改前 60/76+6px 间隙时第三列 237。
+static const int CC_WAIT_DD_W  = 76;                            // 「不反兵攻城」+ 箭头
+// 行动下拉：整体右移到等待方式之后（同样要放下「不反兵攻城」）。
+static const int CC_ACTION_DD_X = CC_WAIT_DD_X + CC_WAIT_DD_W + 4; // ≈202
+static const int CC_ACTION_DD_W = 76;                              // 「不反兵攻城」+ 箭头
 // 降级复选框：仍在行动下拉正下方（小列2 下行），宽度沿用旧值。
 static const int CC_FALLBACK_W = 104;
-static const int CC_COL3_X   = CC_ACTION_DD_X + CC_ACTION_DD_W + 6; // ≈270
+static const int CC_COL3_X   = CC_ACTION_DD_X + CC_ACTION_DD_W + 4; // ≈282
 static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
-static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈237
+static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈225
 static const int CC_ROW_H    = 22;
 // 删除顶部施法行：行动/目标、降级/路径、保活三行统一上移 22px。
 static const int CC_TOP_Y    = 8;
@@ -97,6 +102,9 @@ static const int CC_CNT_MAX_DIGITS    = 10;  // int 上限 2147483647
 static const int CC_PATH_SLOT_GAP = 3;
 static const int CC_MOVE_SLOT_W = 32;  // A01
 static const int CC_MELEE_SLOT_W = 54; // A01→B02
+// 不反兵攻城「安全位置」组：标签「安全位置」4 汉字 + 单个格子槽（A01/＋）。
+static const int CC_SIEGE_LBL_W = 48;
+static const int CC_SIEGE_SLOT_W = 44;
 static const int CC_PATH_ROWS = 3;
 static const int CC_SLOT_ROW3_X = CC_PROTECT_CNT_BOX_X + CC_PROTECT_CNT_BOX_W + 4; // ≈360
 static const int CC_SLOT_ROW3_W = CC_COL3_RIGHT - CC_SLOT_ROW3_X;                  // ≈147
@@ -163,7 +171,7 @@ enum CellExpandKind {
     CEX_STAND,    // 近战站立格（全战场坐标，可滚动）
     CEX_ATTACK,   // 近战攻击格（站立格相邻格）
     CEX_PROTECT,  // 保活方式（剩余数量 / 损失量大于恢复量）
-    CEX_WAIT,     // 等待方式（无 / 每回合 / 智能）
+    CEX_WAIT,     // 等待方式（无 / 每回合 / 不反兵攻城）
 };
 
 // ========================================================================
@@ -190,6 +198,8 @@ struct CellControl
     // 循环移动路径点拾取请求：0=无，1..MOVE_WAYPOINT_CAPACITY=要新增/重设的路径点索引+1。
     // 与循环近战一致：每次只进战场点 1 格，返回后覆盖/追加对应槽。
     int              move_path_pick_request;
+    // 不反兵攻城「安全位置」拾取请求：0=无，1=待进战场点选安全格。
+    int              siege_safe_pick_request;
     // 展开可滚动列表的滚动顶行（用于 CEX_STAND）
     int              dd_scroll;
 
@@ -477,6 +487,7 @@ static void CellControl_Init(CellControl* ctrl)
     ctrl->hover_item = -1;
     ctrl->melee_pair_pick_request = 0;
     ctrl->move_path_pick_request = 0;
+    ctrl->siege_safe_pick_request = 0;
 }
 
 static void CellControl_Destroy(CellControl* ctrl)
@@ -857,7 +868,7 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
             ? (int)rule.waitMode : (int)AW_NONE;
         const char* wait_label =
             wait_mode == (int)AW_EVERY_TURN ? T("cell.wait_every")
-            : wait_mode == (int)AW_SMART ? T("cell.wait_smart")
+            : wait_mode == (int)AW_SIEGE ? T("cell.wait_siege")
             : T("cell.wait_none");
         CellControl_DrawButtonBg(scr, CC_WAIT_DD_X, CC_ROW1_Y, CC_WAIT_DD_W,
             CC_ROW_H, ctrl->wait_pressed, false);
@@ -947,6 +958,36 @@ static void CellControl_DrawCollapsed(CellControl* ctrl)
                         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
                 }
             }
+        } else if (rule.action == AA_SIEGE) {
+            // 不反兵攻城：第三列上行 = 「安全位置」＋ 一个格子槽（点＋进战场
+            // 点选，退避步就走这里）；下行 = 打法说明。目标由插件按
+            // 「远程飞兵高速优先」自动挑，不占选择器。
+            CellControl_DrawText(scr, fntS, T("cell.siege_safe_lbl"),
+                CC_COL3_X, CC_TOP_Y, CC_SIEGE_LBL_W, CC_ROW_H,
+                (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+            const int slot_x = CC_COL3_X + CC_SIEGE_LBL_W;
+            const bool requested = ctrl->siege_safe_pick_request != 0;
+            CellControl_DrawButtonBg(scr, slot_x, CC_TOP_Y, CC_SIEGE_SLOT_W,
+                CC_ROW_H, requested, false);
+            if (rule.target.siegeSafeHex < 1) {
+                CellControl_DrawPlusButton(scr,
+                    slot_x + (CC_SIEGE_SLOT_W - 16) / 2,
+                    CC_TOP_Y + (CC_ROW_H - 16) / 2, 16, requested);
+            } else {
+                char hex_buf[12] = {};
+                CellControl_FormatPosition(hex_buf, sizeof(hex_buf),
+                    rule.target.siegeSafeHex);
+                CellControl_DrawText(scr, fntS, hex_buf,
+                    slot_x + 1, CC_TOP_Y, CC_SIEGE_SLOT_W - 2, CC_ROW_H,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_CENTER);
+            }
+            // 下行固定说明
+            Fill(scr, CC_COL3_X, CC_BOT_Y, CC_COL3_W, CC_ROW_H, 48, 36, 20);
+            scr->DrawFrame(CC_COL3_X, CC_BOT_Y, CC_COL3_W, CC_ROW_H,
+                (BYTE)120, (BYTE)96, (BYTE)48);
+            CellControl_DrawText(scr, fntS, T("cell.siege_hint"),
+                CC_COL3_X + 4, CC_BOT_Y, CC_COL3_W - 8, CC_ROW_H,
+                (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
         } else {
             // 选择器：小列3上行
             const char* sel_label =
@@ -1295,7 +1336,7 @@ static void CellControl_DrawProtectDropdownTo(CellControl* ctrl,
     }
 }
 
-// 展开等待方式列表（三选一：无 / 每回合 / 智能）
+// 展开等待方式列表（三选一：无 / 每回合 / 不反兵攻城）
 static void CellControl_DrawWaitDropdownTo(CellControl* ctrl,
     H3LoadedPcx16* scr, int cell_panel_x, int cell_panel_y, int hover_idx)
 {
@@ -1305,7 +1346,7 @@ static void CellControl_DrawWaitDropdownTo(CellControl* ctrl,
 
     // 显示顺序与常量一致：无（默认）在最上。
     static const char* const kKeys[3] = {
-        "cell.wait_none", "cell.wait_every", "cell.wait_smart",
+        "cell.wait_none", "cell.wait_every", "cell.wait_siege",
     };
     const int cur = (ctrl->data.rule.waitMode < AW_COUNT)
         ? (int)ctrl->data.rule.waitMode : (int)AW_NONE;
@@ -1391,7 +1432,8 @@ enum CellHitArea
     CELL_HIT_DROP,       // 当前展开列表
     CELL_HIT_PROTECT_MODE,       // 保活方式下拉框（剩余数量/损失量）
     CELL_HIT_PROTECT_COUNT,     // 「剩≤」数量阈值数字框（方式=按剩余数量）
-    CELL_HIT_WAIT,              // 等待方式下拉框（无/每回合/智能）
+    CELL_HIT_WAIT,              // 等待方式下拉框（无/每回合/不反兵攻城）
+    CELL_HIT_SIEGE_SAFE,        // 不反兵攻城「安全位置」槽（＋ 进战场点选）
     // 动态槽位：命中值 = BASE + index，容量由布局常量决定。
     CELL_HIT_MELEE_PAIR_BASE = 100,
     CELL_HIT_MOVE_WP_BASE    = 200,
@@ -1401,7 +1443,7 @@ enum CellHitArea
 static const char* CellControl_WaitTip_(int mode)
 {
     const char* key = mode == (int)H3AutoPolicy::AW_EVERY_TURN ? "tips.wait_opt1"
-        : mode == (int)H3AutoPolicy::AW_SMART ? "tips.wait_opt2"
+        : mode == (int)H3AutoPolicy::AW_SIEGE ? "tips.wait_opt2"
         : "tips.wait_opt0";
     return T(key);
 }
@@ -1502,6 +1544,8 @@ static const char* CellControl_TipForHit(CellHitArea hit, const CellControl* ctr
         return T("tips.cell_move");
     if (hit >= CELL_HIT_MELEE_PAIR_BASE && hit < CELL_HIT_MELEE_PAIR_BASE + MELEE_PAIR_CAPACITY)
         return T("tips.cell_melee");
+    if (hit == CELL_HIT_SIEGE_SAFE)
+        return T("tips.cell_siege");
     return nullptr;
 }
 
@@ -1581,6 +1625,12 @@ static CellHitArea CellControl_HitTestInCell(CellControl* ctrl, int local_x, int
                     return static_cast<CellHitArea>(CELL_HIT_MELEE_PAIR_BASE + index);
                 }
             }
+        } else if (ctrl->data.rule.action == AA_SIEGE) {
+            // 不反兵攻城：安全位置槽（第三列上行，标签右侧）
+            if (local_y >= CC_TOP_Y && local_y < CC_TOP_Y + CC_ROW_H
+                && local_x >= CC_COL3_X + CC_SIEGE_LBL_W
+                && local_x < CC_COL3_X + CC_SIEGE_LBL_W + CC_SIEGE_SLOT_W)
+                return CELL_HIT_SIEGE_SAFE;
         } else {
             // 选择器：第三列上行
             if (ctrl->expanded != CEX_SELECTOR && in_box(CC_COL3_X, CC_TOP_Y, CC_COL3_W))
@@ -1745,6 +1795,13 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
             ctrl->dirty = true;
             return true;
         }
+        if (hit == CELL_HIT_SIEGE_SAFE) {
+            // 安全位置设置：同循环移动——隐藏面板后进战场点 1 格。
+            ctrl->expanded = CEX_NONE;
+            ctrl->siege_safe_pick_request = 1;
+            ctrl->dirty = true;
+            return true;
+        }
         if (hit == CELL_HIT_DROP)
             return true; // 按下只消费，松开再选
 
@@ -1760,6 +1817,15 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
         ctrl->expanded = CEX_NONE;
         ctrl->move_path_pick_request = 0;
         ctrl->melee_pair_pick_request = 0;
+        ctrl->siege_safe_pick_request = 0;
+
+        // 安全位置槽右键 = 清空（与循环槽右键删除同语义）。
+        if (hit == CELL_HIT_SIEGE_SAFE
+            && ctrl->data.rule.target.siegeSafeHex >= 1) {
+            ctrl->data.rule.target.siegeSafeHex = -1;
+            ctrl->dirty = true;
+            return true;
+        }
 
         if (hit >= CELL_HIT_MOVE_WP_BASE
             && hit < CELL_HIT_MOVE_WP_BASE + MOVE_WAYPOINT_CAPACITY) {
@@ -1797,6 +1863,16 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                         ctrl->data.rule.action = allowed[idx];
                         ctrl->data.rule.target =
                             CellControl_DefaultTargetForAction(ctrl->data.rule.action);
+                        // 选「不反兵攻城」时等待方式自动切到对应选项；
+                        // 反向换走时若等待方式还停在该选项，回落到「无」
+                        //（2026-10-14 用户裁定）。
+                        if (ctrl->data.rule.action == AA_SIEGE)
+                            ctrl->data.rule.waitMode =
+                                (uint8_t)H3AutoPolicy::AW_SIEGE;
+                        else if (ctrl->data.rule.waitMode
+                            == (uint8_t)H3AutoPolicy::AW_SIEGE)
+                            ctrl->data.rule.waitMode =
+                                (uint8_t)H3AutoPolicy::AW_NONE;
                         CellControl_NormalizeRule(&ctrl->data.rule, ctrl->data.creature_type,
                             ctrl->data.is_ranged, ctrl->data.has_artillery,
                             ctrl->data.has_first_aid);
@@ -1819,11 +1895,11 @@ static bool CellControl_OnMouse(CellControl* ctrl, int msg_type,
                         ctrl->data.rule.protectMode =
                             (uint8_t)kPick[idx];
                 } else if (ctrl->expanded == CEX_WAIT) {
-                    // 与展开列表同一显示顺序：无 / 每回合 / 智能。
+                    // 与展开列表同一显示顺序：无 / 每回合 / 不反兵攻城。
                     static const int kPick[3] = {
                         (int)H3AutoPolicy::AW_NONE,
                         (int)H3AutoPolicy::AW_EVERY_TURN,
-                        (int)H3AutoPolicy::AW_SMART,
+                        (int)H3AutoPolicy::AW_SIEGE,
                     };
                     if (idx < 3)
                         ctrl->data.rule.waitMode =

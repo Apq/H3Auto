@@ -391,6 +391,76 @@ void TestInvalidActionNormalization()
         "ordinary ranged stack keeps defend fallback");
 }
 
+void TestSiegeActionRules()
+{
+    // 普通部队行动集包含不反兵攻城（近战与远程兵都有）。
+    AutoActionKind melee_actions[AA_COUNT] = {};
+    const int melee_n = GetAllowedActions(1, false, false, false, melee_actions);
+    bool melee_has_siege = false;
+    for (int i = 0; i < melee_n; ++i)
+        if (melee_actions[i] == AA_SIEGE) melee_has_siege = true;
+    Check(melee_has_siege, "ordinary melee stack can pick siege action");
+
+    AutoActionKind ranged_actions[AA_COUNT] = {};
+    const int ranged_n = GetAllowedActions(1, true, false, false, ranged_actions);
+    bool ranged_has_siege = false;
+    for (int i = 0; i < ranged_n; ++i)
+        if (ranged_actions[i] == AA_SIEGE) ranged_has_siege = true;
+    Check(ranged_has_siege, "ordinary ranged stack can pick siege action");
+
+    // 战争机器不允许（回归）。
+    AutoActionKind ballista_actions[AA_COUNT] = {};
+    const int ballista_n = GetAllowedActions(CREATURE_BALLISTA, true, true, false,
+        ballista_actions);
+    bool ballista_has_siege = false;
+    for (int i = 0; i < ballista_n; ++i)
+        if (ballista_actions[i] == AA_SIEGE) ballista_has_siege = true;
+    Check(!ballista_has_siege, "war machine cannot pick siege action");
+
+    Check(ActionNeedsTarget(AA_SIEGE),
+        "siege action needs target rule for the safe hex slot");
+    Check(ActionShowsFallback(1, AA_SIEGE),
+        "siege action shows defend fallback");
+
+    // 默认目标：敌方 + 远程飞兵高速优先（2026-10-14 用户裁定）。
+    const AutoTargetRule siege_default = DefaultTargetForAction(AA_SIEGE);
+    Check(siege_default.kind == AT_STACK && siege_default.side == ATS_ENEMY
+        && siege_default.selector == SEL_RANGED_SPEED,
+        "siege default target is enemy ranged-flyer-speed");
+    Check(siege_default.siegeSafeHex == -1,
+        "siege default safe hex is unset");
+
+    // 归一化：合法安全位置保留，越界清空；其它动作不留安全位置残值。
+    // （kind 先置 AT_STACK：默认规则的 kind=AT_NONE 会被整体替换成默认目标，
+    //  面板选行动时也是先给 DefaultTargetForAction 再让玩家配安全位置。）
+    AutoStackRule siege = MakeDefaultRule();
+    siege.action = AA_SIEGE;
+    siege.target.kind = AT_STACK;
+    siege.target.siegeSafeHex = 100;
+    siege.target.selector = SEL_RANDOM;
+    NormalizeRule(&siege, 1, false, false, false);
+    Check(siege.action == AA_SIEGE && siege.target.siegeSafeHex == 100,
+        "siege normalization keeps a valid safe hex");
+    Check(siege.target.selector == SEL_RANGED_SPEED,
+        "siege normalization forces ranged-flyer-speed selector");
+    Check(siege.target.kind == AT_STACK && siege.target.side == ATS_ENEMY,
+        "siege normalization forces enemy stack target");
+
+    siege.target.siegeSafeHex = 300;
+    NormalizeRule(&siege, 1, false, false, false);
+    Check(siege.target.siegeSafeHex == -1,
+        "siege normalization drops out-of-bounds safe hex");
+
+    AutoStackRule moved = siege;
+    moved.action = AA_MOVE;
+    NormalizeRule(&moved, 1, false, false, false);
+    Check(moved.target.siegeSafeHex == -1,
+        "non-siege action clears the safe hex");
+
+    // 等待方式第 3 档改名后仍在原数值位，越界钳回「无」。
+    Check(AW_SIEGE == 2, "siege wait mode keeps numeric slot 2");
+}
+
 void TestTargetScoring()
 {
     const TargetCandidate candidates[] = {
@@ -1412,6 +1482,7 @@ int main()
     TestWarMachineActions();
     TestSelectorsAreIndependent();
     TestInvalidActionNormalization();
+    TestSiegeActionRules();
     TestTargetScoring();
     TestTargetNormalization();
     TestResultLifecycle();
