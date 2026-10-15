@@ -8,6 +8,12 @@ using _bool8_  = char;
 #define CALL_2(return_type, calling_convention, address, arg1, arg2) THISCALL_2(return_type, address, arg1, arg2)
 #define CALL_3(return_type, calling_convention, address, arg1, arg2, arg3) THISCALL_3(return_type, address, arg1, arg2, arg3)
 
+// ===== 游戏全局对象访问垫片（自 PanelGfx 迁入，批次2/docs/13）=====
+// 原定义在 PanelGfx.inc.cpp（界面层），但 BattleLifecycle 等功能层也需要
+// 窗口管理器；无界面编译变体（H3AUTO_UI_NULL）不含 PanelGfx，宏必须常驻。
+#define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
+#define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
+
 // ===== 战斗相关结构体 =====
 
 // 远程/近战判定（从 CreatureInfo 中取 is_ranged）

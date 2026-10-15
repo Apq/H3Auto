@@ -5,8 +5,8 @@
 #include "PanelLayout.hpp"
 #include "TextLayoutCore.hpp"
 
-#define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
-#define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
+// o_WndMgr / o_DDSurfaceBackBuffer 游戏地址垫片已迁至 Compat.inc.cpp
+// （功能层 BattleLifecycle 也依赖；无界面变体不含本文件）。
 
 static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogError 等见 ConfigLog）
 static void LogWarn(const char* fmt, ...);

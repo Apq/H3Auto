@@ -762,20 +762,8 @@ static void RefreshBattleAfterPick_()
     }
 }
 
-static H3BaseDlg* FindDialogByVtable_(UINT target_vtable)
-{
-    if (!o_WndMgr) return nullptr;
-
-    H3BaseDlg* dlg = o_WndMgr->firstDlg;
-    for (int i = 0; dlg && i < 16; ++i) {
-        if (*(UINT*)dlg == target_vtable)
-            return dlg;
-
-        // H3BaseDlg::nextDialog is protected and is stored at +0x08.
-        dlg = *reinterpret_cast<H3BaseDlg**>(reinterpret_cast<BYTE*>(dlg) + 0x08);
-    }
-    return nullptr;
-}
+// FindDialogByVtable_/GetBattleItemUnderCursor_ 已迁至 BattleLifecycle.inc.cpp
+// （批次2）：对话链与底栏探测是生命周期/功能层能力，悬停屏障以下同 TU 顺序取用。
 
 static bool IsBattleInputBlockerLive_(H3BaseDlg* battle_ui)
 {
@@ -1128,53 +1116,5 @@ static void UpdatePanelModalSuspension_()
         DrawPanelToBuffer_();
         LogInfo("[Panel] 系统模态对话框已关闭，恢复设置面板。");
     }
-}
-
-static INT32 GetBattleItemUnderCursor_(H3BaseDlg* battle_ui)
-{
-    if (!battle_ui) return -1;
-
-    const H3POINT cursor = H3POINT::GetCursorPosition();
-    H3CombatDlg* combat_dlg = reinterpret_cast<H3CombatDlg*>(battle_ui);
-
-    // Bottom-panel items overlap: the 0x7D0 background covers the buttons and
-    // appears earlier in the vector. Find the known auto-fight button first.
-    if (combat_dlg->bottomPanel) {
-        H3Vector<H3DlgItem*>& items = combat_dlg->bottomPanel->GetItems();
-        for (H3DlgItem** it = items.begin(); it != items.end(); ++it) {
-            H3DlgItem* item = *it;
-            if (!item || item->GetID() != s_autofight_button_id) continue;
-
-            const INT32 x = item->GetAbsoluteX();
-            const INT32 y = item->GetAbsoluteY();
-            if (cursor.x >= x && cursor.x < x + item->GetWidth()
-                && cursor.y >= y && cursor.y < y + item->GetHeight())
-            {
-                return s_autofight_button_id;
-            }
-        }
-
-        // Diagnostic fallback for other overlapping controls under the cursor.
-        INT32 fallback_id = -1;
-        for (H3DlgItem** it = items.begin(); it != items.end(); ++it) {
-            H3DlgItem* item = *it;
-            if (!item || !item->IsVisible()) continue;
-
-            const INT32 x = item->GetAbsoluteX();
-            const INT32 y = item->GetAbsoluteY();
-            if (cursor.x >= x && cursor.x < x + item->GetWidth()
-                && cursor.y >= y && cursor.y < y + item->GetHeight())
-            {
-                fallback_id = item->GetID();
-            }
-        }
-        if (fallback_id != -1)
-            return fallback_id;
-    }
-
-    H3Msg msg = {};
-    msg.position = cursor;
-    H3DlgItem* item = battle_ui->ItemAtPosition(msg);
-    return item ? item->GetID() : -1;
 }
 

@@ -24,14 +24,22 @@ PatcherInstance* _PI = nullptr;
 #include "modules/UiTexts.inc.cpp"
 #include "modules/LogPack.inc.cpp"
 #include "modules/Compat.inc.cpp"
+#if !defined(H3AUTO_UI_NULL)
+// 无界面编译变体（诊断/自动化验证用，不进玩家分发包）：定义 H3AUTO_UI_NULL
+// 时跳过全部界面实现包含，g_uiPort 保持 UiPortHost 的兜底空实现——
+// 面板/拾取/悬浮物不存在，自动化与生命周期层照常运行（docs/13 批次3）。
 #include "modules/PanelGfx.inc.cpp"
+#endif
 #include "modules/SpellRules.inc.cpp"
 #include "modules/AutoExecute.inc.cpp"
 #include "modules/ForceField.inc.cpp"
 #include "modules/AttackMagic.inc.cpp"
 #include "modules/BattleState.inc.cpp"
+#include "modules/BattleLifecycle.inc.cpp"
+#if !defined(H3AUTO_UI_NULL)
 #include "modules/CellControl.inc.cpp"
 #include "modules/SettingsDlg.inc.cpp"
 #include "modules/PanelInput.inc.cpp"
 #include "modules/PanelDraw.inc.cpp"
+#endif
 #include "modules/Entry.inc.cpp"

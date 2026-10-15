@@ -17,10 +17,9 @@ extern char g_profiles_path[MAX_PATH];
 // g_uiPort 契约回到 SettingsDlg 适配器。
 #include "AutoUiPort.hpp"
 extern IH3AutoUi* g_uiPort;
-// 战斗生命周期事件源（BattleUI 出现/消失、开面板热键消费、结果窗意图）。
-// 暂居 SettingsDlg（批次2 搬入独立 BattleLifecycle 模块），Entry 对它的
-// 直接依赖是已登记的过渡债务；默认构建行为与旧版完全一致。
-extern void CheckAutoFightDialogClosed();
+// 战斗生命周期事件源（BattleUI 出现/消失、开面板热键消费、结果窗意图），
+// 批次2 起独立于界面实现（BattleLifecycle.inc.cpp）。
+#include "BattleLifecycle.hpp"
 extern bool TryAutoExecuteActiveStack(bool allow_unit_action);
 
 // LoHook 0x600430（BltComplete）：每帧检测自动战斗对话框 + 画面板。

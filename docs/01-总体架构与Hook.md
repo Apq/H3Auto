@@ -101,10 +101,11 @@ H3Auto/
     ├── AutoUiPort.hpp / UiPortHost.inc.cpp  # 界面契约 IH3AutoUi + g_uiPort 宿主（docs/13）
     ├── UiTexts.inc.cpp      # 界面文案外置（T() / LoadUiTexts）
     ├── LogPack.inc.cpp      # 日志打包 .7z + CF_HDROP 剪贴板
-    ├── Compat.inc.cpp       # 结构体与内存访问兼容层
-    ├── PanelGfx.inc.cpp     # 面板图片资源
+    ├── Compat.inc.cpp       # 结构体与内存访问兼容层（含 o_WndMgr/o_DDSurfaceBackBuffer 垫片）
+    ├── PanelGfx.inc.cpp     # 面板图片资源（H3AUTO_UI_NULL 时不编译）
     ├── PanelLayout.hpp      # 面板布局常量
     ├── BattleState.hpp / .inc.cpp  # 战场状态机（SetPhase_ 唯一出口）
+    ├── BattleLifecycle.hpp / .inc.cpp # 战斗生命周期事件源（BattleUI 出现/消失、开面板热键、结果窗意图；docs/13）
     ├── AutoExecute.inc.cpp  # 接管判定 / 动作提交 / 目标选择 / 保活 / 自动停止
     ├── ForceField.hpp / .inc.cpp # 两落点力盾配置与保持
     ├── AttackMagic.inc.cpp # 目标择点/直接攻击施法
@@ -126,14 +127,14 @@ H3Auto/
 
 ```text
 IniUtf8 → UiPortHost → ConfigLog → CrashGuard → UiTexts → LogPack → Compat
-→ PanelGfx → AutoExecute → ForceField → AttackMagic → BattleState → CellControl
-→ SettingsDlg → PanelInput → PanelDraw → Entry
+→ [PanelGfx] → SpellRules → AutoExecute → ForceField → AttackMagic → BattleState
+→ BattleLifecycle → [CellControl → SettingsDlg → PanelInput → PanelDraw] → Entry
 ```
 
-包含顺序以入口文件为准，LZMA C 源独立参与编译；依赖及构建配置见[工程配置](<../H3Auto.vcxproj>)。
-
-功能层与界面的边界见[界面与功能分离](<13-界面与功能分离.md>)：`0x600430`/`0x4746B0` 两个 LoHook 外壳在 Entry，面板帧与消息吞并经 `g_uiPort`（`IH3AutoUi`）回到 SettingsDlg 尾部的 `PanelUiPort_` 适配器。
+`[ ]` 内为界面实现群，仅在未定义 `H3AUTO_UI_NULL` 时编译（无界面诊断变体，不随包分发，见 [界面与功能分离](<13-界面与功能分离.md>) 批次 3）。兼容层（Compat）的 `o_WndMgr`/`o_DDSurfaceBackBuffer` 垫片必须常驻：生命周期层与界面层都要窗口管理器。
 
 包含顺序以入口文件为准，LZMA C 源独立参与编译；依赖及构建配置见[工程配置](<../H3Auto.vcxproj>)。
+
+功能层与界面的边界见[界面与功能分离](<13-界面与功能分离.md>)：`0x600430`/`0x4746B0` 两个 LoHook 外壳与生命周期事件源均在 Entry/BattleLifecycle 侧，面板帧与消息吞并经 `g_uiPort`（`IH3AutoUi`）回到 SettingsDlg 尾部的 `PanelUiPort_` 适配器。
 
 MagicChannelUi在SettingsDlg上下文包含，MagicChannelDraw在PanelDraw上下文包含，共享同一翻译单元静态状态；详见[接口考证](<../../H3Note/H3Auto智能攻击施法接口考证.md>)。
