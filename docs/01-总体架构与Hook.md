@@ -98,6 +98,7 @@ H3Auto/
     ├── MagicChannelInputCore.hpp # 原生列表滚轮/鼠标手势纯逻辑
     ├── CrashGuardCore.hpp   # 崩溃防御纯逻辑（异常码命名/噪音过滤/历史环/SoD 指纹；单测覆盖）
     ├── CrashGuard.inc.cpp   # 崩溃自记录 + 钩子铠甲 + 自熔断 + 版本门卫（§18）
+    ├── AutoUiPort.hpp / UiPortHost.inc.cpp  # 界面契约 IH3AutoUi + g_uiPort 宿主（docs/13）
     ├── UiTexts.inc.cpp      # 界面文案外置（T() / LoadUiTexts）
     ├── LogPack.inc.cpp      # 日志打包 .7z + CF_HDROP 剪贴板
     ├── Compat.inc.cpp       # 结构体与内存访问兼容层
@@ -110,11 +111,11 @@ H3Auto/
     ├── MagicChannelUi.inc.cpp # 攻击行/下拉/滚轮/位置编辑
     ├── MagicChannelDraw.inc.cpp # 状态5行预留/攻击列表/浮层绘制
     ├── TextLayoutCore.hpp   # 实际行高文字矩形纯几何核心
-    ├── SettingsDlg.inc.cpp  # 设置面板 / 网格 / 滚动条 / 战场拾取
+    ├── SettingsDlg.inc.cpp  # 设置面板 / 网格 / 滚动条 / 战场拾取 / PanelUiPort_ 契约适配器
     ├── CellControl.inc.cpp  # 卡片控件绘制 / 命中 / 下拉几何
     ├── PanelInput.hpp / .inc.cpp   # 面板输入（鼠标 / 键盘钩子）
     ├── PanelDraw.hpp / .inc.cpp    # 面板绘制（Tab / 帮助 / tips / 状态栏）
-    └── Entry.inc.cpp        # Hook 挂接与入口
+    └── Entry.inc.cpp        # Hook 挂接与入口（含 BltComplete/消息钩子外壳，docs/13）
 ```
 
 ---
@@ -124,10 +125,14 @@ H3Auto/
 [H3Auto.cpp](<../H3Auto.cpp>) 按顺序将模块包含到同一翻译单元，共享静态状态：
 
 ```text
-IniUtf8 → ConfigLog → CrashGuard → UiTexts → LogPack → Compat → PanelGfx
-→ AutoExecute → ForceField → AttackMagic → BattleState → CellControl → SettingsDlg
-→ PanelInput → PanelDraw → Entry
+IniUtf8 → UiPortHost → ConfigLog → CrashGuard → UiTexts → LogPack → Compat
+→ PanelGfx → AutoExecute → ForceField → AttackMagic → BattleState → CellControl
+→ SettingsDlg → PanelInput → PanelDraw → Entry
 ```
+
+包含顺序以入口文件为准，LZMA C 源独立参与编译；依赖及构建配置见[工程配置](<../H3Auto.vcxproj>)。
+
+功能层与界面的边界见[界面与功能分离](<13-界面与功能分离.md>)：`0x600430`/`0x4746B0` 两个 LoHook 外壳在 Entry，面板帧与消息吞并经 `g_uiPort`（`IH3AutoUi`）回到 SettingsDlg 尾部的 `PanelUiPort_` 适配器。
 
 包含顺序以入口文件为准，LZMA C 源独立参与编译；依赖及构建配置见[工程配置](<../H3Auto.vcxproj>)。
 

@@ -5,14 +5,89 @@
 
 extern void ResetAutoState();
 extern void ShutdownCombatHotkeys();
-extern INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c);
-extern INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c);
 extern int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This);
 extern int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags);
 extern void LoadUiTexts();
 extern void InstallCrashGuard();          // CrashGuard.inc.cpp：VEH+UEF 崩溃自记录
 extern bool GuardVerifySodBytes_();       // CrashGuard.inc.cpp：SoD 数据指纹门卫
 extern char g_profiles_path[MAX_PATH];
+
+// ---- 界面契约与生命周期（docs/13-界面与功能分离.md）----
+// 钩子外壳归 Entry：只做透传判定委托 + 原函数恰好一次；面板帧/消息吞并经
+// g_uiPort 契约回到 SettingsDlg 适配器。
+#include "AutoUiPort.hpp"
+extern IH3AutoUi* g_uiPort;
+// 战斗生命周期事件源（BattleUI 出现/消失、开面板热键消费、结果窗意图）。
+// 暂居 SettingsDlg（批次2 搬入独立 BattleLifecycle 模块），Entry 对它的
+// 直接依赖是已登记的过渡债务；默认构建行为与旧版完全一致。
+extern void CheckAutoFightDialogClosed();
+extern bool TryAutoExecuteActiveStack(bool allow_unit_action);
+
+// LoHook 0x600430（BltComplete）：每帧检测自动战斗对话框 + 画面板。
+// 外壳铠甲语义（§18 L2）与旧 SettingsDlg 实现逐字一致。
+static INT Hook_BltComplete_Inner_(LoHook* h, HookContext* c)
+{
+    (void)h; (void)c;
+    static int s_frame = 0;
+    s_frame++;
+    CheckAutoFightDialogClosed();
+    if (g_uiPort->IsPanelActive()) {
+        // 面板帧（模态深度/输入/绘制/拾取标记）经界面契约执行。
+        g_uiPort->OnFramePanelTick();
+    } else {
+        // 部队动作提交与观察均由当前动作管线处理，
+        // 再决定推进游标并提交部队主动作，不能只依赖偶发战斗消息。
+        __try {
+            TryAutoExecuteActiveStack(false);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return EXEC_DEFAULT;
+}
+
+INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
+{
+    __try {
+        return Hook_BltComplete_Inner_(h, c);
+    } __except (GuardCrashFilter_(GHID_BLT, GetExceptionInformation())) {}
+    return EXEC_DEFAULT;
+}
+
+// LoHook 0x4746B0（战斗消息处理入口 FUN_004746b0）。this=H3CombatManager
+// 在 ECX，消息指针 msg 在栈上 [esp+4]。msg[0]=类型（4=鼠标移动）。
+// 1) 面板打开时：吞 0-9 快捷施法键、把鼠标移动坐标改成离屏（清 hover）。
+// 2) 面板关闭时：若当前活动单位应由 H3Auto 主动执行，则在此提交 action
+//    字段，让原版主循环自然进入 FUN_004786b0 执行动画/伤害/回合推进。
+static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c)
+{
+    (void)h;
+
+    // 战场拾取（近战选格 / 循环移动路径）的点击捕获在透明 item 屏障
+    // BlockBattleItemMessage_ 里处理（靠 StopProcessing 吞点击，绝不触发
+    // 部队行动）。此处不再处理拾取，避免与屏障逻辑冲突、空转。
+
+    // 面板存活期间：吞并判定后直接返回（与旧实现一致，绝不落入主动作
+    // 提交分支）；面板的消息吞并/坐标改写经界面契约执行。
+    if (g_uiPort->IsPanelActive()) {
+        if (g_uiPort->FilterGameMsg(*reinterpret_cast<int**>(c->esp + 4)))
+            return NO_EXEC_DEFAULT;
+        return EXEC_DEFAULT;
+    }
+
+    // 面板未打开：尝试主动提交当前单位动作（防御/远程/近战等）。
+    // 只写 battle->action，不跳过原函数；原函数看到 action!=0 会走执行路径。
+    __try {
+        TryAutoExecuteActiveStack(true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return EXEC_DEFAULT;
+}
+
+INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
+{
+    __try {
+        return Hook_BattleMsgProc_Inner_(h, c);
+    } __except (GuardCrashFilter_(GHID_MSGPROC, GetExceptionInformation())) {}
+    return EXEC_DEFAULT;   // 安全默认：放行消息给原版处理
+}
 
 // ---- 版本自证（0.5 对外版）----
 // 玩家反馈排查第一步：确认实际加载的 DLL 版本与路径。多包双装/旧包残留

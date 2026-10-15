@@ -76,9 +76,10 @@ SummonProfileFields g_summon[5] = {
 // 玩家接受战斗结果后清空 5 套方案（取消/重打不调用）。
 // 日志在调用方 OnBattleResultAccepted 打印，避免依赖本文件后部 WriteLog。
 // g_last_profile 不清：下次进面板仍选中最后存/读档编号。
-// 面板草稿（SettingsDlg 的 ResetPanelDrafts，前向声明如下）同步清空：
-// 生效方案与草稿不一致会让下一场「确定」复活上一场部队的旧规则。
-void ResetPanelDrafts();
+// 面板草稿经界面契约同步清空（UiPortHost 的 g_uiPort，SettingsDlg 适配器
+// 实现）：生效方案与草稿不一致会让下一场「确定」复活上一场部队的旧规则。
+#include "AutoUiPort.hpp"
+extern IH3AutoUi* g_uiPort;
 static void ResetAttackMagicRuntime_();
 
 void ClearConfirmedProfiles()
@@ -100,7 +101,7 @@ void ClearConfirmedProfiles()
     for (int s = 0; s < 21; ++s)
         g_active_rules[s] = def;
     ResetAttackMagicRuntime_();
-    ResetPanelDrafts();
+    g_uiPort->ResetPanelDrafts();
 }
 
 static struct Config {

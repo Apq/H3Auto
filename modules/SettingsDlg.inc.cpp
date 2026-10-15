@@ -8,6 +8,8 @@ extern void OnBattleResultAccepted();
 extern void EnsureStackTrackingBound();
 void OpenSettingsPanel_();
 void HandlePanelInput_();
+void CloseSettingsPanel();  // 本文件后部定义；提交/取消路径提前使用
+bool IsPanelActive();       // 本文件后部定义；CheckAutoFightDialogClosed 提前使用
 
 // ========================================================================
 // 第一部分：数据声明
@@ -509,7 +511,8 @@ static void CheckBattleResultLifecycle_()
     // 取消已按但 BattleUI 尚未回来：等下一帧。
 }
 
-static void CheckAutoFightDialogClosed()
+// 非 static：Entry 的帧钩子外壳每帧调用（外部链接）。
+void CheckAutoFightDialogClosed()
 {
     if (!o_WndMgr) return;
 
@@ -610,104 +613,17 @@ static void CheckAutoFightDialogClosed()
 }
 
 // ========================================================================
-// 第五部分：LoHook
+// 第五部分：LoHook（已迁出）
 // ========================================================================
 
-extern bool TryAutoExecuteActiveStack(bool allow_unit_action);
-
-static INT Hook_BltComplete_Inner_(LoHook* h, HookContext* c)
-{
-    (void)h; (void)c;
-    static int s_frame = 0;
-    s_frame++;
-    CheckAutoFightDialogClosed();
-    if (s_p.active) {
-        ForcePanelModalDepth_(true);
-        UpdatePanelModalSuspension_();
-        // 拾取期间（s_panel_hidden_for_pick）面板隐藏：跳过重绘与常规输入，
-        // 点击交给屏障 item 处理。但 suspended 保持 false，否则输入不派发。
-        if (s_p.active && !s_panel_modal_suspended && !s_panel_hidden_for_pick) {
-            HandlePanelInput_();
-            DrawPanelToBuffer_();
-            ForcePanelDefaultCursor_();
-        }
-        if (s_p.active && s_panel_hidden_for_pick)
-            DrawMeleePickMarker_();
-    } else {
-        // 部队动作提交与观察均由当前动作管线处理，
-        // 再决定推进游标并提交部队主动作，不能只依赖偶发战斗消息。
-        __try {
-            TryAutoExecuteActiveStack(false);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    return EXEC_DEFAULT;
-}
-
-// 铠甲外壳（§18 L2）：钩子内任何异常被吞并记 error，安全默认
-// EXEC_DEFAULT（放行原版 Blt）。异常聚合限流，钩子保持可用。
-INT __stdcall Hook_BltComplete(LoHook* h, HookContext* c)
-{
-    __try {
-        return Hook_BltComplete_Inner_(h, c);
-    } __except (GuardCrashFilter_(GHID_BLT, GetExceptionInformation())) {}
-    return EXEC_DEFAULT;
-}
-
-// 战斗消息处理入口（FUN_004746b0 @ 0x4746B0）。this=H3CombatManager 在 ECX，
-// 消息指针 msg 在栈上 [esp+4]。msg[0]=类型（4=鼠标移动），msg[4]=x，msg[5]=y。
-// 1) 面板打开时：把鼠标移动坐标改成离屏，清掉 hover 高亮。
-// 2) 面板关闭时：若当前活动单位应由 H3Auto 主动执行，则在此提交 action 字段，
-//    让原版主循环自然进入 FUN_004786b0 执行动画/伤害/回合推进。
-static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c);
-
-INT __stdcall Hook_BattleMsgProc(LoHook* h, HookContext* c)
-{
-    __try {
-        return Hook_BattleMsgProc_Inner_(h, c);
-    } __except (GuardCrashFilter_(GHID_MSGPROC, GetExceptionInformation())) {}
-    return EXEC_DEFAULT;   // 安全默认：放行消息给原版处理
-}
-
-static INT Hook_BattleMsgProc_Inner_(LoHook* h, HookContext* c)
-{
-    (void)h;
-
-    // 战场拾取（近战选格 / 循环移动路径）的点击捕获已移到透明 item 屏障
-    // BlockBattleItemMessage_ 里处理（靠 StopProcessing 吞点击，绝不触发
-    // 部队行动）。此处不再处理拾取，避免与屏障逻辑冲突、空转。
-
-    // 设置面板存活期间（含隐藏拾取态）：吞掉 0-9 数字键消息，
-    // 防止原版/HD 快捷施法在战斗消息链里捕获热键。
-    if (s_p.active) {
-        __try {
-            int* msg = *reinterpret_cast<int**>(c->esp + 4);
-            if (msg) {
-                const int cmd = msg[0];
-                // KEY_DOWN=1 / KEY_UP=2 / KEY_HELD=0x100；键码在 subtype(=msg[1])。
-                if (cmd == 1 || cmd == 2 || cmd == 0x100) {
-                    const int key = msg[1];
-                    // H3 虚拟键：H3VK_1=2 ... H3VK_9=10, H3VK_0=11
-                    if (key >= 2 && key <= 11)
-                        return NO_EXEC_DEFAULT;
-                }
-                if (!s_panel_modal_suspended && !s_panel_hidden_for_pick
-                    && cmd == 4) {   // 鼠标移动
-                    msg[4] = -1000; // x 离屏
-                    msg[5] = -1000; // y 离屏
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        return EXEC_DEFAULT;
-    }
-
-    // 面板未打开：尝试主动提交当前单位动作（防御/远程/近战等）。
-    // 只写 battle->action，不跳过原函数；原函数看到 action!=0 会走执行路径。
-    __try {
-        TryAutoExecuteActiveStack(true);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return EXEC_DEFAULT;
-}
-
+// ==== 界面契约适配器（docs/13）====
+// 原本住在这里的两个 LoHook 外壳（0x600430 BltComplete / 0x4746B0
+// BattleMsgProc）已整体迁至 Entry.inc.cpp：钩子层只做「透传判定委托 +
+// 原函数恰好一次」，面板帧与消息吞并经 g_uiPort 调回本文件尾部的
+// PanelUiPort_ 适配器，钩子装甲与逻辑调用留在 Entry。
+// 上方 CheckAutoFightDialogClosed 是战斗生命周期事件源（状态机 S1-S8 的
+// BattleUI 出现/消失、开面板热键消费、结果窗意图），暂居本文件、
+// 由 Entry 外部链接调用；批次2 搬入独立 BattleLifecycle 模块。
 
 // ===== 保活通道下拉行（方案级，随当前选中方案的草稿） =====
 static void CommitStopTurnsEdit_()
@@ -2766,3 +2682,87 @@ void HandlePanelInput_()
     previous_page_up_down = page_up_down;
     previous_page_down_down = page_down_down;
 }
+
+// ========================================================================
+// 界面契约适配器（docs/13-界面与功能分离.md）
+// ========================================================================
+// 唯一职责：把 IH3AutoUi 契约转发到本文件既有的静态实现，行为零变化。
+// 静态初始化期把 g_uiPort 从兜底空实现接管为真实面板（定义顺序晚于
+// UiPortHost.inc.cpp，先于 DllMain，故 ConfigLog 的清方案路径行为不变）。
+#include "AutoUiPort.hpp"
+extern IH3AutoUi* g_uiPort;
+
+namespace {
+
+struct PanelUiPort_ final : public IH3AutoUi {
+    bool IsPanelActive() const override
+    {
+        return s_p.active;
+    }
+
+    bool OpenPanel() override
+    {
+        OpenSettingsPanel_();
+        return s_p.active;
+    }
+
+    void ClosePanelSilently() override
+    {
+        CloseSettingsPanel();
+    }
+
+    void ResetPanelDrafts() override
+    {
+        ::ResetPanelDrafts();   // 全局限定：调用 SettingsDlg 的同名自由函数
+    }
+
+    // 绘制帧的面板部分（原 Hook_BltComplete_Inner_ 的 UI 分支原样迁入）。
+    void OnFramePanelTick() override
+    {
+        ForcePanelModalDepth_(true);
+        UpdatePanelModalSuspension_();
+        // 拾取期间（s_panel_hidden_for_pick）面板隐藏：跳过重绘与常规输入，
+        // 点击交给屏障 item 处理。但 suspended 保持 false，否则输入不派发。
+        if (s_p.active && !s_panel_modal_suspended && !s_panel_hidden_for_pick) {
+            HandlePanelInput_();
+            DrawPanelToBuffer_();
+            ForcePanelDefaultCursor_();
+        }
+        if (s_p.active && s_panel_hidden_for_pick)
+            DrawMeleePickMarker_();
+    }
+
+    // 战斗消息钩子的面板吞并（原 Hook_BattleMsgProc_Inner_ 面板分支原样迁入；
+    // 键码/坐标读法与原实现一致）。返回 true = 吞并该消息。
+    bool FilterGameMsg(int* msg) override
+    {
+        // 设置面板存活期间（含隐藏拾取态）：吞掉 0-9 数字键消息，
+        // 防止原版/HD 快捷施法在战斗消息链里捕获热键。
+        if (!s_p.active || !msg)
+            return false;
+        __try {
+            const int cmd = msg[0];
+            // KEY_DOWN=1 / KEY_UP=2 / KEY_HELD=0x100；键码在 subtype(=msg[1])。
+            if (cmd == 1 || cmd == 2 || cmd == 0x100) {
+                const int key = msg[1];
+                // H3 虚拟键：H3VK_1=2 ... H3VK_9=10, H3VK_0=11
+                if (key >= 2 && key <= 11)
+                    return true;
+            }
+            if (!s_panel_modal_suspended && !s_panel_hidden_for_pick
+                && cmd == 4) {   // 鼠标移动
+                msg[4] = -1000; // x 离屏
+                msg[5] = -1000; // y 离屏
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return false;
+    }
+};
+
+static PanelUiPort_ s_panel_ui_port;
+
+static struct PanelUiPort_Register_ {
+    PanelUiPort_Register_() { g_uiPort = &s_panel_ui_port; }
+} s_panel_ui_port_register_;
+
+} // namespace

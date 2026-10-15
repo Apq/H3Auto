@@ -9,8 +9,10 @@ static void LogInfo(const char* fmt, ...);  // 分级前向声明（LogWarn/LogE
 static void LogWarn(const char* fmt, ...);
 extern void ClearConfirmedProfiles();
 extern void ResetAutoState();
-extern bool IsPanelActive();
-extern void CloseSettingsPanel();
+// 界面契约（UiPortHost 在更早处定义 g_uiPort）：状态机边动作只经契约
+// 关面板，不 extern 界面实现符号（docs/13）。
+#include "AutoUiPort.hpp"
+extern IH3AutoUi* g_uiPort;
 
 BattlePhase g_phase = BP_PEACE;
 DWORD g_ui_gone_grace_until = 0;
@@ -128,9 +130,9 @@ static void PhaseEdgeAction_(BattlePhase from, BattleEvent ev)
 
     if (ev == BE_RESULT_SHOWN) {
         // 面板开时战斗推进到结算（如敌方清场）：静默关面板，草稿丢弃。
-        if (IsPanelActive()) {
+        if (g_uiPort->IsPanelActive()) {
             LogInfo("[Phase] 结算出现：静默关闭设置面板");
-            CloseSettingsPanel();
+            g_uiPort->ClosePanelSilently();
         }
         return;
     }

@@ -21,8 +21,10 @@ extern int  g_last_profile;
 extern uint16_t g_stop_turns[5];
 extern SummonProfileFields g_summon[5];
 extern StatusProfileFields g_status[5];
-extern bool IsPanelActive();
-extern void CloseSettingsPanel();
+// 界面契约（UiPortHost 在更早处定义 g_uiPort）：本文件只经契约感知面板，
+// 不 extern 任何界面实现符号（docs/13）。
+#include "AutoUiPort.hpp"
+extern IH3AutoUi* g_uiPort;
 
 // 战场阶段状态机（enum/g_phase/SetPhase_）：声明在 BattleState.hpp，
 // 实现在 BattleState.inc.cpp（本文件之后 include）。
@@ -477,7 +479,7 @@ static LRESULT CALLBACK CombatHotkeyKbHook_(int code, WPARAM wParam, LPARAM lPar
     __try {
         // bit31=1 是 keyup；bit30=1 是自动重复（按住不放），都不要。
         if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)
-            && !IsPanelActive())
+            && !g_uiPort->IsPanelActive())
         {
             if ((int)wParam == cfg.toggle_manual_vk) {
                 g_auto_state.kb_toggle_seen = true;
@@ -775,8 +777,8 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
 
 void ResetAutoState()
 {
-    if (IsPanelActive())
-        CloseSettingsPanel();
+    if (g_uiPort->IsPanelActive())
+        g_uiPort->ClosePanelSilently();
     g_auto_state.action_wake_stack = nullptr;
     g_pipeline_stage = PS_IDLE;   // 管线整体清（含 done/handled 残留）
     g_pipeline_stack = nullptr;
